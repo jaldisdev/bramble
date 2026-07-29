@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import types as types_module
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from typing import Any
 
 from bramble._bramble import (
@@ -16,6 +16,7 @@ from bramble._bramble import (
 )
 from bramble._execution import execute as _execute
 from bramble._execution import execute_async as _execute_async
+from bramble._execution import subscribe_async as _subscribe_async
 from bramble._lazy import LazyType, namespace_for_callable, namespace_for_class
 from bramble._private import is_private
 from bramble._scalar import ScalarDefinition
@@ -430,6 +431,30 @@ class Schema:
             root_value=root_value,
             operation_name=operation_name,
         )
+
+    async def subscribe_async(
+        self,
+        query: str,
+        *,
+        variable_values: dict[str, Any] | None = None,
+        context: Any = None,
+        root_value: Any = None,
+        operation_name: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Executes a subscription operation, yielding one spec-shaped `{"data": ..., "errors":
+        [...]}` response per event. See `bramble._execution.subscribe_async`. Async-only -- unlike
+        `execute`/`execute_async`, there's no synchronous convenience wrapper, since a subscription
+        is an open-ended event stream, not a single value `asyncio.run` could meaningfully block on.
+        """
+        async for response in _subscribe_async(
+            self,
+            query,
+            variable_values=variable_values,
+            context=context,
+            root_value=root_value,
+            operation_name=operation_name,
+        ):
+            yield response
 
     def to_sdl(self) -> str:
         """Renders this schema's GraphQL SDL (§6/§9/§12): every reachable type/union/scalar, plus

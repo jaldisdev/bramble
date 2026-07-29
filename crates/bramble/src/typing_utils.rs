@@ -123,6 +123,22 @@ fn resolve_core(
         return resolve_union(py, typing, annotation, annotation);
     }
 
+    // A subscription resolver is an async generator, typed `AsyncGenerator[T, None]` (or
+    // `AsyncIterator[T]`/`AsyncIterable[T]`) per spec/convention -- the field's own GraphQL type
+    // is `T` itself, not the generator wrapper, since bramble's execution layer only ever consumes
+    // the annotation this way once, at schema-build time (the actual per-event iteration and
+    // "is this really an async generator at runtime" check both happen in Python at execution
+    // time -- see `bramble._execution.subscribe_async`, which has no need to know the annotation).
+    let collections_abc = py.import("collections.abc")?;
+    if origin.eq(collections_abc.getattr("AsyncGenerator")?)?
+        || origin.eq(collections_abc.getattr("AsyncIterator")?)?
+        || origin.eq(collections_abc.getattr("AsyncIterable")?)?
+    {
+        let args = typing.call_method1("get_args", (annotation,))?;
+        let element = args.get_item(0)?;
+        return resolve_core(py, typing, &element);
+    }
+
     if origin.eq(py.get_type::<pyo3::types::PyList>())? || origin.eq(py.get_type::<pyo3::types::PyTuple>())? {
         let args = typing.call_method1("get_args", (annotation,))?;
         let element = args.get_item(0)?;

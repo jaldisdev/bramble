@@ -5,7 +5,7 @@ import datetime
 import decimal
 import inspect
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -452,25 +452,29 @@ async def _complete_value(
     return _serialize_scalar(type_name, raw_value, state.schema)
 
 
-async def _execute_field(
+async def _finish_field(
     *,
     field_info: "FieldInfo",
     lowered_field: "LoweredField",
     selections: Sequence["LoweredField"],
-    parent_value: Any,
-    concrete_type: type,
+    raw_value: Any,
     path: Path,
     state: _ExecutionState,
 ) -> Any:
+    """The part of field execution that happens *after* a raw value is already in hand (custom
+    directives, then `CompleteValue`) -- shared by `_execute_field` (whose raw value comes from
+    calling the field's own resolver) and subscription event dispatch (§ subscriptions, whose raw
+    value is instead each event a subscription resolver's async generator yields; that resolver is
+    only ever called once, to create the stream, never per event -- there's no second "resolve"
+    step to run here, only completion of the event itself as the field's value).
+    """
     is_non_null = field_info.type_info.kind == "NON_NULL"
-    info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
 
     try:
-        raw_value = await _resolve_field_value(field_info, lowered_field, parent_value, info, concrete_type, state.schema)
         raw_value = await _apply_custom_directives(lowered_field.directives, raw_value, state.schema)
     except _PropagateNull:
         raise
-    except Exception as error:  # noqa: BLE001 -- deliberately broad: any resolver/directive failure becomes a field error, per §8.
+    except Exception as error:  # noqa: BLE001 -- deliberately broad: any directive failure becomes a field error, per §8.
         state.errors.append(_error_from_exception(error, path, lowered_field))
         if is_non_null:
             raise _PropagateNull from error
@@ -489,6 +493,39 @@ async def _execute_field(
         if is_non_null:
             raise
         return None
+
+
+async def _execute_field(
+    *,
+    field_info: "FieldInfo",
+    lowered_field: "LoweredField",
+    selections: Sequence["LoweredField"],
+    parent_value: Any,
+    concrete_type: type,
+    path: Path,
+    state: _ExecutionState,
+) -> Any:
+    is_non_null = field_info.type_info.kind == "NON_NULL"
+    info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
+
+    try:
+        raw_value = await _resolve_field_value(field_info, lowered_field, parent_value, info, concrete_type, state.schema)
+    except _PropagateNull:
+        raise
+    except Exception as error:  # noqa: BLE001 -- deliberately broad: any resolver failure becomes a field error, per §8.
+        state.errors.append(_error_from_exception(error, path, lowered_field))
+        if is_non_null:
+            raise _PropagateNull from error
+        return None
+
+    return await _finish_field(
+        field_info=field_info,
+        lowered_field=lowered_field,
+        selections=selections,
+        raw_value=raw_value,
+        path=path,
+        state=state,
+    )
 
 
 def _group_by_response_key(selections: Sequence["LoweredField"]) -> dict[str, list["LoweredField"]]:
@@ -606,6 +643,12 @@ _ROOT_TYPE_ATTRIBUTE_BY_OPERATION = {
 }
 
 
+def _resolve_execution_context(schema: "Schema", context: Any) -> Any:
+    if context is None and schema.execution_context_class is not None:
+        return schema.execution_context_class()
+    return context
+
+
 async def execute_async(
     schema: "Schema",
     query: str,
@@ -627,12 +670,17 @@ async def execute_async(
     validate_query(query, schema._compiled, operation_name)
     operation_type, fields = lower_query(query, variable_values=resolved_variable_values, operation_name=operation_name)
 
+    if operation_type == "subscription":
+        raise GraphQLError(
+            "execute_async cannot run a subscription operation -- use Schema.subscribe_async instead",
+            code=ErrorCode.GRAPHQL_VALIDATION_FAILED,
+        )
+
     root_type = getattr(schema, _ROOT_TYPE_ATTRIBUTE_BY_OPERATION[operation_type])
     if root_type is None:
         raise GraphQLError(f"schema has no {operation_type} type", code=ErrorCode.GRAPHQL_VALIDATION_FAILED)
 
-    if context is None and schema.execution_context_class is not None:
-        context = schema.execution_context_class()
+    context = _resolve_execution_context(schema, context)
 
     errors: list[GraphQLError] = []
     state = _ExecutionState(
@@ -685,3 +733,119 @@ def execute(
             operation_name=operation_name,
         )
     )
+
+
+async def subscribe_async(
+    schema: "Schema",
+    query: str,
+    *,
+    variable_values: dict[str, Any] | None = None,
+    context: Any = None,
+    root_value: Any = None,
+    operation_name: str | None = None,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Executes a subscription operation, yielding one spec-shaped `{"data": ..., "errors": [...]}`
+    response per event. Per the GraphQL spec's two-phase model: `CreateSourceEventStream` (the
+    subscription root field's own resolver, called exactly once, must itself be an async generator
+    yielding raw "source events" -- unlike a query/mutation resolver, it's never awaited for a
+    single value) and `MapSourceToResponseEvent` (each event re-enters normal field completion via
+    `_finish_field`, treating the event itself as if it were that field's already-resolved value --
+    there is no second "resolve" call per event, only completion of what was yielded).
+
+    A subscription operation's root selection set must have exactly one field (spec-mandated, not
+    just a bramble convention) -- checked here since `validate_query` (Rust) doesn't yet enforce
+    this rule. An error raised by the source generator itself (creating or iterating the stream)
+    propagates out of this generator entirely (a stream-level failure); an error confined to
+    completing one single event becomes that event's own `errors` entry instead, without ending
+    the subscription -- one bad event shouldn't kill the stream.
+    """
+    resolved_variable_values = variable_values or {}
+
+    validate_query(query, schema._compiled, operation_name)
+    operation_type, fields = lower_query(query, variable_values=resolved_variable_values, operation_name=operation_name)
+
+    if operation_type != "subscription":
+        raise GraphQLError(
+            "subscribe_async can only run a subscription operation -- use Schema.execute_async for query/mutation",
+            code=ErrorCode.GRAPHQL_VALIDATION_FAILED,
+        )
+
+    root_type = schema.subscription
+    if root_type is None:
+        raise GraphQLError("schema has no subscription type", code=ErrorCode.GRAPHQL_VALIDATION_FAILED)
+
+    context = _resolve_execution_context(schema, context)
+
+    grouped = _group_by_response_key(_applicable_selections(fields, root_type, schema))
+    if len(grouped) != 1:
+        raise GraphQLError(
+            "a subscription operation must have exactly one root-level field",
+            code=ErrorCode.GRAPHQL_VALIDATION_FAILED,
+        )
+    ((response_key, occurrences),) = grouped.items()
+    primary = occurrences[0]
+    merged_selections = [selection for occurrence in occurrences for selection in occurrence.selections]
+    field_path = Path(key=response_key, prev=None)
+
+    if primary.field_name == "__typename":
+        yield {"data": {response_key: root_type.__bramble_type_info__.name}}
+        return
+
+    field_info = _find_field_info(root_type, primary.field_name, auto_camel_case=schema.config.auto_camel_case)
+    if field_info is None:
+        raise GraphQLError(
+            f"field '{primary.field_name}' does not exist on type '{root_type.__bramble_type_info__.name}'",
+            code=ErrorCode.UNKNOWN_FIELD,
+        )
+
+    setup_state = _ExecutionState(
+        schema=schema,
+        context=context,
+        root_value=root_value,
+        variable_values=resolved_variable_values,
+        query=query,
+        errors=[],
+    )
+    info = _build_info(field_name=primary.field_name, path=field_path, selections=merged_selections, state=setup_state)
+
+    resolver = getattr(root_type, field_info.name)
+    kwargs = _bind_resolver_kwargs(field_info, primary, root_value, info, schema)
+    source_stream = resolver(**kwargs)
+    if not inspect.isasyncgen(source_stream):
+        if inspect.iscoroutine(source_stream):
+            # A plain `async def` resolver (not an async generator) returns an unawaited
+            # coroutine here -- close it explicitly, or Python warns about it at GC time.
+            source_stream.close()
+        raise GraphQLError(
+            f"subscription field '{primary.field_name}' must be an async generator resolver",
+            code=ErrorCode.FIELD_RESOLUTION_FAILED,
+        )
+
+    async for event in source_stream:
+        # A fresh errors list per event -- each yielded response reports only its own errors, not
+        # ones accumulated from earlier events.
+        event_state = _ExecutionState(
+            schema=schema,
+            context=context,
+            root_value=root_value,
+            variable_values=resolved_variable_values,
+            query=query,
+            errors=[],
+        )
+        try:
+            value = await _finish_field(
+                field_info=field_info,
+                lowered_field=primary,
+                selections=merged_selections,
+                raw_value=event,
+                path=field_path,
+                state=event_state,
+            )
+            data: dict[str, Any] | None = {response_key: value}
+        except _PropagateNull:
+            data = None
+
+        response: dict[str, Any] = {"data": data}
+        if event_state.errors:
+            response["errors"] = [_error_to_dict(error) for error in event_state.errors]
+        yield response
