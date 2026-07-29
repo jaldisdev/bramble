@@ -1,0 +1,16 @@
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+# Linux's linker permits undefined symbols in shared objects by default, but some
+# hardened toolchains/distros set `-Wl,-z,defs` (no-undefined) globally, which would
+# break the extension-module cdylib the same way macOS does unconditionally. Pin the
+# permissive behavior explicitly so deployment (mostly Linux) doesn't depend on the
+# host toolchain's defaults.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--unresolved-symbols=ignore-all"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--unresolved-symbols=ignore-all"]

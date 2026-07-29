@@ -1,0 +1,9 @@
+[package]
+name = "bramble-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/bramble_core.rs"
