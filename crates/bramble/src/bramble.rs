@@ -1,8 +1,10 @@
 use pyo3::prelude::*;
 
 mod error;
+mod operation_directive_info;
 mod resolver_binding;
 mod schema_directive_info;
+mod skip_include;
 mod type_info;
 mod typing_utils;
 mod union_info;
@@ -26,5 +28,12 @@ fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_class::<schema_directive_info::PySchemaDirectiveInfo>()?;
     module.add_class::<schema_directive_info::PyDirectiveFieldInfo>()?;
+    module.add_function(wrap_pyfunction!(skip_include::prune_selections, module)?)?;
+    module.add_class::<skip_include::PyPrunedField>()?;
+    module.add_function(wrap_pyfunction!(
+        operation_directive_info::describe_operation_directive,
+        module
+    )?)?;
+    module.add_class::<operation_directive_info::PyOperationDirectiveInfo>()?;
     Ok(())
 }

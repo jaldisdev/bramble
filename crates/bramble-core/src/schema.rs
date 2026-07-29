@@ -79,3 +79,28 @@ pub struct SchemaDirectiveDefinition {
     pub locations: Vec<SchemaDirectiveLocation>,
     pub fields: Vec<DirectiveFieldDefinition>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OperationDirectiveLocation {
+    Query,
+    Mutation,
+    Subscription,
+    Field,
+    FragmentDefinition,
+    FragmentSpread,
+    InlineFragment,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OperationDirectiveDefinition {
+    pub name: String,
+    pub description: Option<String>,
+    pub locations: Vec<OperationDirectiveLocation>,
+    /// The parameter bound to the field's already-resolved value (`DirectiveValue[T]`), if any.
+    pub value_parameter: Option<String>,
+    /// The directive's remaining parameters, each an argument supplied at the directive's use
+    /// site in the query -- reuses `ArgumentDefinition` since the binding rules (§3a) are
+    /// identical to a resolver's own arguments.
+    pub arguments: Vec<ArgumentDefinition>,
+}

@@ -26,7 +26,7 @@ fn is_nullable(py: Python<'_>, typing: &Bound<'_, PyAny>, annotation: &Bound<'_,
     Ok(false)
 }
 
-fn classify_argument<'py>(
+pub(crate) fn classify_argument<'py>(
     py: Python<'py>,
     typing: &Bound<'py, PyAny>,
     parameter_name: String,
@@ -72,32 +72,34 @@ fn classify_argument<'py>(
 /// it's the default), `parameter.annotation` is just a string -- `typing.get_origin("Parent[T]")`
 /// is always `None`, silently misclassifying every Parent[T]/Info/Annotated[...] parameter as a
 /// plain argument. `typing.get_type_hints` evaluates those strings back into real objects, but
-/// only ever sees the resolver's own module globals -- it has no visibility into an enclosing
+/// only ever sees the function's own module globals -- it has no visibility into an enclosing
 /// function's local scope, so a resolver that forward-references its *own* class
 /// (`Parent[Circle]` inside `class Circle`) fails to resolve whenever that class is defined
 /// somewhere other than module scope (as most of bramble's own tests do). Seeding `localns` with
-/// the class being processed fixes exactly that case.
-fn resolve_annotations<'py>(
+/// the class being processed (when there is one -- a resolver always has one, a standalone
+/// operation directive function never does) fixes exactly that case.
+pub(crate) fn resolve_annotations<'py>(
     py: Python<'py>,
     typing: &Bound<'py, PyAny>,
-    cls: &Bound<'py, PyType>,
-    resolver: &Bound<'py, PyAny>,
+    localns_seed: Option<&Bound<'py, PyType>>,
+    func: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let cls_name: String = cls.getattr("__name__")?.extract()?;
     let localns = PyDict::new(py);
-    localns.set_item(cls_name, cls)?;
+    if let Some(cls) = localns_seed {
+        let cls_name: String = cls.getattr("__name__")?.extract()?;
+        localns.set_item(cls_name, cls)?;
+    }
 
     let kwargs = PyDict::new(py);
     kwargs.set_item("localns", &localns)?;
     kwargs.set_item("include_extras", true)?;
 
     let hints = typing
-        .call_method("get_type_hints", (resolver,), Some(&kwargs))
+        .call_method("get_type_hints", (func,), Some(&kwargs))
         .map_err(|error| {
             SchemaError::new_err(format!(
-                "could not resolve resolver parameter annotations for '{}': {error}",
-                resolver
-                    .getattr("__qualname__")
+                "could not resolve parameter annotations for '{}': {error}",
+                func.getattr("__qualname__")
                     .and_then(|q| q.extract::<String>())
                     .unwrap_or_default(),
             ))
@@ -125,7 +127,7 @@ pub fn bind_resolver_arguments(
 
     let signature = inspect.call_method1("signature", (resolver,))?;
     let parameters = signature.getattr("parameters")?.call_method0("values")?;
-    let resolved_hints = resolve_annotations(py, &typing, cls, resolver)?;
+    let resolved_hints = resolve_annotations(py, &typing, Some(cls), resolver)?;
 
     let mut parent_parameter: Option<String> = None;
     let mut info_parameter: Option<String> = None;
