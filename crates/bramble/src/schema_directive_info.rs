@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
 use crate::type_info::SchemaError;
-use crate::typing_utils::resolve_graphql_type;
+use crate::typing_utils::{resolve_graphql_type, seed_lazy_namespace_for_class};
 
 #[pyclass(name = "DirectiveFieldInfo", frozen, get_all, skip_from_py_object)]
 #[derive(Clone)]
@@ -105,6 +105,7 @@ pub fn describe_schema_directive(
     let cls_name: String = cls.getattr("__name__")?.extract()?;
     let localns = PyDict::new(py);
     localns.set_item(&cls_name, cls)?;
+    seed_lazy_namespace_for_class(py, cls.as_any(), &localns)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("localns", &localns)?;
     kwargs.set_item("include_extras", true)?;

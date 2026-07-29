@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple, PyType};
 
 use crate::type_info::{SchemaError, extract_applied_directives, validate_directive_locations};
-use crate::typing_utils::{find_marker, resolve_graphql_type, unwrap_annotated};
+use crate::typing_utils::{find_marker, resolve_graphql_type, seed_lazy_namespace_for_callable, unwrap_annotated};
 
 pub struct ResolverBinding {
     pub parent_parameter: Option<String>,
@@ -78,6 +78,7 @@ pub(crate) fn resolve_annotations<'py>(
         let cls_name: String = cls.getattr("__name__")?.extract()?;
         localns.set_item(cls_name, cls)?;
     }
+    seed_lazy_namespace_for_callable(py, func, &localns)?;
 
     let kwargs = PyDict::new(py);
     kwargs.set_item("localns", &localns)?;

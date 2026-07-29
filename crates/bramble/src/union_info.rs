@@ -56,8 +56,17 @@ pub fn describe_union(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> PyResult
 
     // GraphQL unions may only contain object types (never a scalar, interface, or input type) --
     // a builtin/custom scalar has no `__bramble_type_info__` at all, while an interface/input has
-    // one but with the wrong `kind`, so both are rejected the same way.
+    // one but with the wrong `kind`, so both are rejected the same way. A `bramble.lazy(...)`
+    // placeholder is exempted: it has no `__bramble_type_info__` either (its whole point is to
+    // avoid an import at this stage), so its real kind isn't knowable yet -- accepted here,
+    // trusting it, with no equivalent re-check once `_schema.py`'s graph walk resolves it for
+    // real. A lazy-referenced union member that turns out to be a scalar/interface won't be
+    // caught by this check; an accepted, narrow gap rather than a silent one.
+    let lazy_type_class = py.import("bramble._lazy")?.getattr("LazyType")?;
     for member in &members {
+        if member.is_instance(&lazy_type_class)? {
+            continue;
+        }
         let kind: Option<String> = member
             .getattr("__bramble_type_info__")
             .ok()

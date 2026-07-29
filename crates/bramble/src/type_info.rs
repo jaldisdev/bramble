@@ -6,7 +6,7 @@ use pyo3::types::{PyDict, PyType};
 
 use crate::lowering::python_to_json_value;
 use crate::resolver_binding::bind_resolver_arguments;
-use crate::typing_utils::resolve_graphql_type;
+use crate::typing_utils::{resolve_graphql_type, seed_lazy_namespace_for_class};
 
 create_exception!(
     _bramble,
@@ -227,6 +227,7 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
     let cls_name: String = cls.getattr("__name__")?.extract()?;
     let localns = PyDict::new(py);
     localns.set_item(&cls_name, cls)?;
+    seed_lazy_namespace_for_class(py, cls.as_any(), &localns)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("localns", &localns)?;
     kwargs.set_item("include_extras", true)?;

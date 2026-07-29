@@ -1,7 +1,32 @@
 use bramble_core::schema::GraphQLType;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::union_info::describe_union;
+
+/// Merges `bramble._lazy.namespace_for_class(cls)`'s result into `localns` -- every `get_type_hints`
+/// call site needs this done before it runs, or a `bramble.lazy(...)`-tagged forward reference
+/// raises `NameError` before ever getting a chance to resolve to its `LazyType` placeholder
+/// instead of the (not yet safely importable) real class.
+pub(crate) fn seed_lazy_namespace_for_class(
+    py: Python<'_>,
+    cls: &Bound<'_, PyAny>,
+    localns: &Bound<'_, PyDict>,
+) -> PyResult<()> {
+    let namespace = py.import("bramble._lazy")?.call_method1("namespace_for_class", (cls,))?;
+    localns.update(namespace.cast::<PyDict>()?.as_mapping())
+}
+
+/// Same as `seed_lazy_namespace_for_class`, for a single function's own annotations (a resolver
+/// method or a standalone operation-directive function).
+pub(crate) fn seed_lazy_namespace_for_callable(
+    py: Python<'_>,
+    func: &Bound<'_, PyAny>,
+    localns: &Bound<'_, PyDict>,
+) -> PyResult<()> {
+    let namespace = py.import("bramble._lazy")?.call_method1("namespace_for_callable", (func,))?;
+    localns.update(namespace.cast::<PyDict>()?.as_mapping())
+}
 
 /// `typing.get_origin(int | None)` and `typing.get_origin(typing.Optional[int])` both denote a
 /// union, but which singleton object represents "union" isn't guaranteed stable across Python
@@ -142,6 +167,15 @@ fn resolve_union(
 }
 
 pub(crate) fn named_type_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> PyResult<String> {
+    // A `bramble.lazy(...)`-tagged forward reference resolves (once `localns` has been seeded --
+    // see `namespace_for_class`/`namespace_for_callable`) to this placeholder instead of the real
+    // class, precisely so no import is needed yet: its own name is already everything a field's
+    // type signature needs.
+    let lazy_type_class = py.import("bramble._lazy")?.getattr("LazyType")?;
+    if annotation.is_instance(&lazy_type_class)? {
+        return annotation.getattr("type_name")?.extract();
+    }
+
     let builtins = py.import("builtins")?;
     if annotation.is(&builtins.getattr("str")?) {
         return Ok("String".to_string());

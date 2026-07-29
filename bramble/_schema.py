@@ -16,6 +16,7 @@ from bramble._bramble import (
 )
 from bramble._execution import execute as _execute
 from bramble._execution import execute_async as _execute_async
+from bramble._lazy import LazyType, namespace_for_callable, namespace_for_class
 from bramble._scalar import ScalarDefinition
 from bramble._union import UnionDefinition
 from bramble.schema.config import SchemaConfig
@@ -84,6 +85,15 @@ def _register_union(
 
 
 def _discover_annotation(annotation: Any, *, graph: _SchemaGraph) -> None:
+    if isinstance(annotation, LazyType):
+        # The one place the deferred import actually happens (§ circular imports): by
+        # construction, this only ever runs once a `Schema()` is being built, well after the
+        # module that originally wrote `bramble.lazy(...)` has finished loading -- unlike the
+        # decoration-time resolution (Rust `read_fields`/etc.), which only ever sees the
+        # placeholder's own name, never imports anything.
+        _discover_annotation(annotation.resolve_type(), graph=graph)
+        return
+
     origin = typing.get_origin(annotation)
 
     if origin is typing.Annotated:
@@ -164,8 +174,9 @@ def _discover_type(cls: _type, *, graph: _SchemaGraph) -> None:
             graph.types_by_name.setdefault(base_info.name, base)
             _register_schema_directive_definitions(getattr(base, "__bramble_applied_directives__", ()), graph=graph)
 
+    localns = {**graph.localns, **namespace_for_class(cls)}
     try:
-        hints = typing.get_type_hints(cls, localns=graph.localns, include_extras=True)
+        hints = typing.get_type_hints(cls, localns=localns, include_extras=True)
     except NameError as error:
         raise SchemaError(f"could not resolve field annotations for '{cls.__name__}': {error}") from error
 
@@ -185,8 +196,9 @@ def _discover_type(cls: _type, *, graph: _SchemaGraph) -> None:
         resolver = getattr(cls, field_info.name, None)
         if resolver is None:
             continue
+        resolver_localns = {**graph.localns, **namespace_for_callable(resolver)}
         try:
-            resolver_hints = typing.get_type_hints(resolver, localns=graph.localns, include_extras=True)
+            resolver_hints = typing.get_type_hints(resolver, localns=resolver_localns, include_extras=True)
         except NameError:
             continue  # same graceful degradation as field-type resolution elsewhere
         for annotation in resolver_hints.values():
@@ -288,8 +300,11 @@ class Schema:
         # resolver argument or a field's return type) would otherwise be invisible to
         # `types_by_name`, the same gap Task 90 found and fixed for resolver arguments.
         for directive_function in directives:
+            directive_localns = {**graph.localns, **namespace_for_callable(directive_function)}
             try:
-                directive_hints = typing.get_type_hints(directive_function, localns=graph.localns, include_extras=True)
+                directive_hints = typing.get_type_hints(
+                    directive_function, localns=directive_localns, include_extras=True
+                )
             except NameError:
                 continue
             for annotation in directive_hints.values():
