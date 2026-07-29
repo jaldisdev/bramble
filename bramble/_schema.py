@@ -283,6 +283,18 @@ class Schema:
         for root in roots:
             _discover_type(root, graph=graph)
 
+        # A custom operation directive is a standalone function, never attached to any of the
+        # `roots` above -- an input type used only as one of its own arguments (never as a
+        # resolver argument or a field's return type) would otherwise be invisible to
+        # `types_by_name`, the same gap Task 90 found and fixed for resolver arguments.
+        for directive_function in directives:
+            try:
+                directive_hints = typing.get_type_hints(directive_function, localns=graph.localns, include_extras=True)
+            except NameError:
+                continue
+            for annotation in directive_hints.values():
+                _discover_annotation(annotation, graph=graph)
+
         _validate_interface_implementations(graph)
 
         # The compiled schema: assembled and validated once, here, per §7b -- every subsequent

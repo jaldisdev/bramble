@@ -1,6 +1,7 @@
 use bramble_core::schema::UnionDefinition;
 use pyo3::prelude::*;
 
+use crate::type_info::SchemaError;
 use crate::typing_utils::{find_marker, is_union_origin, named_type_name, unwrap_annotated};
 
 #[pyclass(name = "UnionInfo", frozen, skip_from_py_object)]
@@ -52,6 +53,24 @@ pub fn describe_union(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> PyResult
     } else {
         vec![underlying.clone()]
     };
+
+    // GraphQL unions may only contain object types (never a scalar, interface, or input type) --
+    // a builtin/custom scalar has no `__bramble_type_info__` at all, while an interface/input has
+    // one but with the wrong `kind`, so both are rejected the same way.
+    for member in &members {
+        let kind: Option<String> = member
+            .getattr("__bramble_type_info__")
+            .ok()
+            .and_then(|info| info.getattr("kind").ok())
+            .and_then(|kind| kind.extract().ok());
+        if kind.as_deref() != Some("type") {
+            let member_name = named_type_name(py, member)?;
+            return Err(SchemaError::new_err(format!(
+                "union member '{member_name}' is not a '@bramble.type'-decorated object type; \
+                 GraphQL unions may only contain object types"
+            )));
+        }
+    }
 
     let member_names = members
         .iter()

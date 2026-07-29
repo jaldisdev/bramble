@@ -253,6 +253,9 @@ async def _apply_custom_directives(directives: Sequence[Any], value: Any, schema
         mapped_arguments = _map_arguments(
             directive_info.arguments, directive.arguments, auto_camel_case=schema.config.auto_camel_case
         )
+        for argument in directive_info.arguments:
+            if argument.name in mapped_arguments:
+                mapped_arguments[argument.name] = _coerce_value(argument.type_info, mapped_arguments[argument.name], schema)
         result = apply_directive(directive_function, value, mapped_arguments)
         if inspect.isawaitable(result):
             result = await result
