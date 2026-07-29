@@ -1,8 +1,10 @@
-use bramble_core::schema::{FieldDefinition, TypeDefinition, TypeKind};
+use bramble_core::schema::{ArgumentDefinition, FieldDefinition, TypeDefinition, TypeKind};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::PyType;
+
+use crate::resolver_binding::bind_resolver_arguments;
 
 create_exception!(
     _bramble,
@@ -11,12 +13,41 @@ create_exception!(
     "Raised for bramble schema build-time errors."
 );
 
+#[pyclass(name = "ArgumentInfo", frozen, get_all, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyArgumentInfo {
+    pub name: String,
+    pub graphql_name: Option<String>,
+    pub type_repr: Option<String>,
+    pub is_nullable: bool,
+    pub has_default: bool,
+    pub description: Option<String>,
+    pub deprecation_reason: Option<String>,
+}
+
+impl From<ArgumentDefinition> for PyArgumentInfo {
+    fn from(argument: ArgumentDefinition) -> Self {
+        Self {
+            name: argument.name,
+            graphql_name: argument.graphql_name,
+            type_repr: argument.type_repr,
+            is_nullable: argument.is_nullable,
+            has_default: argument.has_default,
+            description: argument.description,
+            deprecation_reason: argument.deprecation_reason,
+        }
+    }
+}
+
 #[pyclass(name = "FieldInfo", frozen, get_all, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyFieldInfo {
     pub name: String,
     pub type_repr: Option<String>,
     pub has_resolver: bool,
+    pub parent_parameter: Option<String>,
+    pub info_parameter: Option<String>,
+    pub arguments: Vec<PyArgumentInfo>,
 }
 
 impl From<FieldDefinition> for PyFieldInfo {
@@ -25,6 +56,9 @@ impl From<FieldDefinition> for PyFieldInfo {
             name: field.name,
             type_repr: field.type_repr,
             has_resolver: field.has_resolver,
+            parent_parameter: field.parent_parameter,
+            info_parameter: field.info_parameter,
+            arguments: field.arguments.into_iter().map(PyArgumentInfo::from).collect(),
         }
     }
 }
@@ -72,10 +106,20 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
             let resolver = dataclass_field.getattr("resolver").unwrap_or_else(|_| py.None().into_bound(py));
             let has_resolver = !resolver.is_none();
 
+            let (parent_parameter, info_parameter, arguments) = if has_resolver {
+                let binding = bind_resolver_arguments(py, cls, &resolver)?;
+                (binding.parent_parameter, binding.info_parameter, binding.arguments)
+            } else {
+                (None, None, Vec::new())
+            };
+
             Ok(FieldDefinition {
                 name,
                 type_repr,
                 has_resolver,
+                parent_parameter,
+                info_parameter,
+                arguments,
             })
         })
         .collect()

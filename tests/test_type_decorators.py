@@ -67,7 +67,7 @@ def test_input_with_resolver_field_fails_to_build() -> None:
         @bramble.input
         class BadInput:
             @bramble.field
-            def computed(self) -> int:
+            def computed() -> int:
                 return 1
 
 
@@ -75,13 +75,13 @@ def test_mutation_behaves_like_field() -> None:
     @bramble.type
     class Query:
         @bramble.field
-        def hello(self) -> str:
+        def hello() -> str:
             return "hi"
 
     @bramble.type
     class Mutation:
         @bramble.mutation
-        def create_hello(self) -> str:
+        def create_hello() -> str:
             return "hi"
 
     query_field = Query.__bramble_type_info__.fields[0]
@@ -121,7 +121,7 @@ def test_field_supports_both_method_and_plain_function_resolver_syntax() -> None
         greeting: str = bramble.field(resolver=resolve_greeting)
 
         @bramble.field
-        def farewell(self) -> str:
+        def farewell() -> str:
             return "bye"
 
     fields_by_name = {f.name: f for f in Query.__bramble_type_info__.fields}
@@ -153,8 +153,8 @@ def test_decorated_types_are_real_dataclasses() -> None:
         color: str
 
         @bramble.field
-        def area(self) -> float:
-            return 3.14159 * self.radius**2
+        def area(parent: bramble.Parent[Circle]) -> float:
+            return 3.14159 * parent.radius**2
 
     assert dataclasses.is_dataclass(Shape)
     assert dataclasses.is_dataclass(Circle)
@@ -186,8 +186,8 @@ def test_resolver_fields_excluded_from_repr_and_eq() -> None:
         radius: float
 
         @bramble.field
-        def area(self) -> float:
-            return 3.14159 * self.radius**2
+        def area(parent: bramble.Parent[Circle]) -> float:
+            return 3.14159 * parent.radius**2
 
     first = Circle(radius=2.0)
     second = Circle(radius=2.0)
@@ -203,8 +203,8 @@ def test_resolver_restored_as_callable_after_dataclass_processing() -> None:
         radius: float
 
         @bramble.field
-        def area(self) -> float:
-            return 3.14159 * self.radius**2
+        def area(parent: bramble.Parent[Circle]) -> float:
+            return 3.14159 * parent.radius**2
 
     # dataclasses.dataclass() strips a resolver-backed field's raw class attribute
     # (it has no usable default); bramble must restore it so the method still works.

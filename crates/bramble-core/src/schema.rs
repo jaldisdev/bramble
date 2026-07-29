@@ -9,10 +9,27 @@ pub enum TypeKind {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ArgumentDefinition {
+    pub name: String,
+    pub graphql_name: Option<String>,
+    pub type_repr: Option<String>,
+    pub is_nullable: bool,
+    pub has_default: bool,
+    pub description: Option<String>,
+    pub deprecation_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct FieldDefinition {
     pub name: String,
     pub type_repr: Option<String>,
     pub has_resolver: bool,
+    /// The resolver parameter bound to the parent/root value (`Parent[T]`), if any.
+    pub parent_parameter: Option<String>,
+    /// The resolver parameter bound to the execution context (`Info`), if any.
+    pub info_parameter: Option<String>,
+    /// The resolver's remaining parameters, each a GraphQL field argument.
+    pub arguments: Vec<ArgumentDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize)]
