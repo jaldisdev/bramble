@@ -47,3 +47,20 @@ pub fn find_marker<'py>(
     }
     Ok(None)
 }
+
+/// Whether `annotation` is `Optional[T]`/`T | None` (or `typing.Union[..., None]` generally) --
+/// i.e. `None` is one of its union members.
+pub fn is_nullable(py: Python<'_>, typing: &Bound<'_, PyAny>, annotation: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let origin = typing.call_method1("get_origin", (annotation,))?;
+    if !is_union_origin(py, &origin)? {
+        return Ok(false);
+    }
+
+    let none_type = py.None().into_bound(py).get_type();
+    for arg in typing.call_method1("get_args", (annotation,))?.try_iter()? {
+        if arg?.is(&none_type) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}

@@ -3,27 +3,12 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
 use crate::type_info::SchemaError;
-use crate::typing_utils::{find_marker, is_union_origin, unwrap_annotated};
+use crate::typing_utils::{find_marker, is_nullable, unwrap_annotated};
 
 pub struct ResolverBinding {
     pub parent_parameter: Option<String>,
     pub info_parameter: Option<String>,
     pub arguments: Vec<ArgumentDefinition>,
-}
-
-fn is_nullable(py: Python<'_>, typing: &Bound<'_, PyAny>, annotation: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let origin = typing.call_method1("get_origin", (annotation,))?;
-    if !is_union_origin(py, &origin)? {
-        return Ok(false);
-    }
-
-    let none_type = py.None().into_bound(py).get_type();
-    for arg in typing.call_method1("get_args", (annotation,))?.try_iter()? {
-        if arg?.is(&none_type) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 pub(crate) fn classify_argument<'py>(

@@ -2,9 +2,10 @@ use bramble_core::schema::{ArgumentDefinition, FieldDefinition, TypeDefinition, 
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::PyType;
+use pyo3::types::{PyDict, PyType};
 
 use crate::resolver_binding::bind_resolver_arguments;
+use crate::typing_utils::is_nullable;
 
 create_exception!(
     _bramble,
@@ -44,6 +45,7 @@ impl From<ArgumentDefinition> for PyArgumentInfo {
 pub struct PyFieldInfo {
     pub name: String,
     pub type_repr: Option<String>,
+    pub is_nullable: bool,
     pub has_resolver: bool,
     pub parent_parameter: Option<String>,
     pub info_parameter: Option<String>,
@@ -55,6 +57,7 @@ impl From<FieldDefinition> for PyFieldInfo {
         Self {
             name: field.name,
             type_repr: field.type_repr,
+            is_nullable: field.is_nullable,
             has_resolver: field.has_resolver,
             parent_parameter: field.parent_parameter,
             info_parameter: field.info_parameter,
@@ -92,17 +95,41 @@ fn parse_kind(kind: &str) -> PyResult<TypeKind> {
 /// resolver", which is exactly what a plain data field is).
 fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDefinition>> {
     let dataclass_fields = py.import("dataclasses")?.call_method1("fields", (cls,))?;
+    let typing = py.import("typing")?;
+
+    // `dataclass_field.type` is frequently just a string (under `from __future__ import
+    // annotations`, or a resolver-injected return annotation that was itself a string) --
+    // `typing.get_origin("float | None")` is always None, so nullability can't be computed from
+    // it directly. `get_type_hints` resolves the whole class's annotations (walking its MRO,
+    // using each base's own module globals) into real objects; seeding `localns` with the class
+    // itself handles a field forward-referencing its own enclosing type. It can't handle a field
+    // referencing some *other* type defined in the same enclosing local scope (a sibling class
+    // inside a test function, say) -- `get_type_hints` has no visibility into that scope at all.
+    // Rather than fail type registration outright over an annotation we can't resolve, fall back
+    // to an empty hint set: `type_repr` still works (raw_type displays fine either way) and
+    // `is_nullable` just conservatively defaults to `false` for those fields.
+    let cls_name: String = cls.getattr("__name__")?.extract()?;
+    let localns = PyDict::new(py);
+    localns.set_item(&cls_name, cls)?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("localns", &localns)?;
+    kwargs.set_item("include_extras", true)?;
+    let resolved_hints = typing
+        .call_method("get_type_hints", (cls,), Some(&kwargs))
+        .ok()
+        .and_then(|hints| hints.cast::<PyDict>().ok().cloned())
+        .unwrap_or_else(|| PyDict::new(py));
 
     dataclass_fields
         .try_iter()?
         .map(|dataclass_field| {
             let dataclass_field = dataclass_field?;
             let name: String = dataclass_field.getattr("name")?.extract()?;
-            let type_repr = dataclass_field
-                .getattr("type")?
-                .str()
-                .ok()
-                .and_then(|s| s.extract::<String>().ok());
+            let raw_type = dataclass_field.getattr("type")?;
+            let resolved_type = resolved_hints.get_item(&name)?.unwrap_or_else(|| raw_type.clone());
+            let type_repr = resolved_type.str().ok().and_then(|s| s.extract::<String>().ok());
+            let field_is_nullable = is_nullable(py, &typing, &resolved_type)?;
+
             let resolver = dataclass_field.getattr("resolver").unwrap_or_else(|_| py.None().into_bound(py));
             let has_resolver = !resolver.is_none();
 
@@ -116,6 +143,7 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
             Ok(FieldDefinition {
                 name,
                 type_repr,
+                is_nullable: field_is_nullable,
                 has_resolver,
                 parent_parameter,
                 info_parameter,

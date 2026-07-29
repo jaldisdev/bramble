@@ -23,6 +23,7 @@ pub struct ArgumentDefinition {
 pub struct FieldDefinition {
     pub name: String,
     pub type_repr: Option<String>,
+    pub is_nullable: bool,
     pub has_resolver: bool,
     /// The resolver parameter bound to the parent/root value (`Parent[T]`), if any.
     pub parent_parameter: Option<String>,
