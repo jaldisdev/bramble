@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
 use crate::type_info::SchemaError;
-use crate::typing_utils::{find_marker, is_nullable, unwrap_annotated};
+use crate::typing_utils::{find_marker, resolve_graphql_type, unwrap_annotated};
 
 pub struct ResolverBinding {
     pub parent_parameter: Option<String>,
@@ -21,8 +21,6 @@ pub(crate) fn classify_argument<'py>(
     let (underlying, metadata) = unwrap_annotated(typing, annotation)?;
     let argument_class = py.import("bramble._resolver")?.getattr("Argument")?;
     let argument_marker = find_marker(&metadata, &argument_class)?;
-    let is_nullable = is_nullable(py, typing, &underlying)?;
-    let type_repr = underlying.str().ok().and_then(|s| s.extract::<String>().ok());
 
     let (graphql_name, description, deprecation_reason, type_override) = match &argument_marker {
         None => (None, None, None, None),
@@ -32,20 +30,20 @@ pub(crate) fn classify_argument<'py>(
             marker.getattr("deprecation_reason")?.extract::<Option<String>>()?,
             {
                 let graphql_type = marker.getattr("graphql_type")?;
-                if graphql_type.is_none() {
-                    None
-                } else {
-                    graphql_type.str().ok().and_then(|s| s.extract::<String>().ok())
-                }
+                if graphql_type.is_none() { None } else { Some(graphql_type) }
             },
         ),
+    };
+
+    let graphql_type = match type_override {
+        Some(override_annotation) => resolve_graphql_type(py, typing, &override_annotation)?,
+        None => resolve_graphql_type(py, typing, &underlying)?,
     };
 
     Ok(ArgumentDefinition {
         name: parameter_name,
         graphql_name,
-        type_repr: type_override.or(type_repr),
-        is_nullable,
+        graphql_type,
         has_default,
         description,
         deprecation_reason,

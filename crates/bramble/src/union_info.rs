@@ -3,21 +3,28 @@ use pyo3::prelude::*;
 
 use crate::typing_utils::{find_marker, is_union_origin, unwrap_annotated};
 
-#[pyclass(name = "UnionInfo", frozen, get_all, skip_from_py_object)]
+#[pyclass(name = "UnionInfo", frozen, skip_from_py_object)]
 pub struct PyUnionInfo {
+    #[pyo3(get)]
     pub name: String,
+    #[pyo3(get)]
     pub description: Option<String>,
+    #[pyo3(get)]
     pub member_type_reprs: Vec<String>,
+    #[pyo3(get)]
     pub has_custom_resolve_type: bool,
+    /// Not Python-exposed -- see `PyTypeInfo::definition`'s doc comment for why.
+    pub definition: UnionDefinition,
 }
 
 impl From<UnionDefinition> for PyUnionInfo {
     fn from(union: UnionDefinition) -> Self {
         Self {
-            name: union.name,
-            description: union.description,
-            member_type_reprs: union.member_type_reprs,
+            name: union.name.clone(),
+            description: union.description.clone(),
+            member_type_reprs: union.member_type_reprs.clone(),
             has_custom_resolve_type: union.has_custom_resolve_type,
+            definition: union,
         }
     }
 }

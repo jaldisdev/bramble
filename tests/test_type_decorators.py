@@ -20,7 +20,7 @@ def test_nested_types() -> None:
     info = Post.__bramble_type_info__
     assert [f.name for f in info.fields] == ["title", "author"]
     author_field = next(f for f in info.fields if f.name == "author")
-    assert "Author" in (author_field.type_repr or "")
+    assert author_field.graphql_type == "Author!"
 
 
 def test_interface_inheritance_chain() -> None:
@@ -87,7 +87,7 @@ def test_mutation_behaves_like_field() -> None:
     query_field = Query.__bramble_type_info__.fields[0]
     mutation_field = Mutation.__bramble_type_info__.fields[0]
 
-    assert query_field.type_repr == mutation_field.type_repr
+    assert query_field.graphql_type == mutation_field.graphql_type == "String!"
     assert query_field.has_resolver and mutation_field.has_resolver
 
 

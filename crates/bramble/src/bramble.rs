@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 
+mod compiled_schema;
 mod error;
 mod operation_directive_info;
 mod resolver_binding;
@@ -8,6 +9,7 @@ mod skip_include;
 mod type_info;
 mod typing_utils;
 mod union_info;
+mod validation;
 
 #[pymodule]
 fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -35,5 +37,8 @@ fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_class::<operation_directive_info::PyOperationDirectiveInfo>()?;
+    module.add_function(wrap_pyfunction!(compiled_schema::compile_schema, module)?)?;
+    module.add_class::<compiled_schema::PyCompiledSchema>()?;
+    module.add_function(wrap_pyfunction!(validation::validate_query, module)?)?;
     Ok(())
 }

@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -8,12 +10,51 @@ pub enum TypeKind {
     Input,
 }
 
+/// A GraphQL type reference: a named type (scalar/object/interface/union/enum/input, by name),
+/// optionally wrapped in `List`/`NonNull` -- e.g. `[User!]!` is
+/// `NonNull(List(NonNull(Named("User"))))`. Replaces an earlier ad-hoc `type_repr: Option<String>`
+/// (just `str(annotation)`, e.g. `"<class 'int'>"`) with a real structure so query validation
+/// (Task 9) can check argument/field types against parsed query literals principled-ly rather
+/// than by string heuristics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum GraphQLType {
+    Named(String),
+    List(Box<GraphQLType>),
+    NonNull(Box<GraphQLType>),
+}
+
+impl GraphQLType {
+    #[must_use]
+    pub fn is_nullable(&self) -> bool {
+        !matches!(self, GraphQLType::NonNull(_))
+    }
+
+    /// The innermost named type's name, unwrapping any `List`/`NonNull` wrappers.
+    #[must_use]
+    pub fn inner_name(&self) -> &str {
+        match self {
+            GraphQLType::Named(name) => name,
+            GraphQLType::List(inner) | GraphQLType::NonNull(inner) => inner.inner_name(),
+        }
+    }
+
+    /// Renders standard GraphQL SDL type syntax, e.g. `String!`, `[User]`, `ID`.
+    #[must_use]
+    pub fn to_sdl_string(&self) -> String {
+        match self {
+            GraphQLType::Named(name) => name.clone(),
+            GraphQLType::List(inner) => format!("[{}]", inner.to_sdl_string()),
+            GraphQLType::NonNull(inner) => format!("{}!", inner.to_sdl_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ArgumentDefinition {
     pub name: String,
     pub graphql_name: Option<String>,
-    pub type_repr: Option<String>,
-    pub is_nullable: bool,
+    pub graphql_type: GraphQLType,
     pub has_default: bool,
     pub description: Option<String>,
     pub deprecation_reason: Option<String>,
@@ -22,8 +63,7 @@ pub struct ArgumentDefinition {
 #[derive(Debug, Clone, Serialize)]
 pub struct FieldDefinition {
     pub name: String,
-    pub type_repr: Option<String>,
-    pub is_nullable: bool,
+    pub graphql_type: GraphQLType,
     pub has_resolver: bool,
     /// The resolver parameter bound to the parent/root value (`Parent[T]`), if any.
     pub parent_parameter: Option<String>,
@@ -70,7 +110,7 @@ pub enum SchemaDirectiveLocation {
 pub struct DirectiveFieldDefinition {
     pub name: String,
     pub graphql_name: Option<String>,
-    pub type_repr: Option<String>,
+    pub graphql_type: GraphQLType,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,4 +144,18 @@ pub struct OperationDirectiveDefinition {
     /// site in the query -- reuses `ArgumentDefinition` since the binding rules (§3a) are
     /// identical to a resolver's own arguments.
     pub arguments: Vec<ArgumentDefinition>,
+}
+
+/// The assembled, validated schema (§7b) that query validation (Task 9) and execution (Task 11)
+/// operate against for every subsequent request -- built once, by `Schema()`'s Python-side graph
+/// walker (Task 8b) handing over everything it already discovered, not re-derived here.
+#[derive(Debug, Clone)]
+pub struct CompiledSchema {
+    pub types: HashMap<String, TypeDefinition>,
+    pub unions: HashMap<String, UnionDefinition>,
+    pub query_type_name: String,
+    pub mutation_type_name: Option<String>,
+    pub subscription_type_name: Option<String>,
+    pub operation_directives: HashMap<String, OperationDirectiveDefinition>,
+    pub scalar_names: HashSet<String>,
 }

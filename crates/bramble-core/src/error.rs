@@ -24,6 +24,11 @@ pub enum ErrorCode {
     GraphqlValidationFailed,
     InterfaceTypeResolutionFailed,
     UnionTypeResolutionFailed,
+    UnknownField,
+    UnknownArgument,
+    ArgumentTypeMismatch,
+    InvalidDirectiveLocation,
+    InvalidFragmentTarget,
 }
 
 #[derive(Serialize, Debug, Clone)]

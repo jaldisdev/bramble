@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
 use crate::resolver_binding::bind_resolver_arguments;
-use crate::typing_utils::is_nullable;
+use crate::typing_utils::resolve_graphql_type;
 
 create_exception!(
     _bramble,
@@ -19,7 +19,7 @@ create_exception!(
 pub struct PyArgumentInfo {
     pub name: String,
     pub graphql_name: Option<String>,
-    pub type_repr: Option<String>,
+    pub graphql_type: String,
     pub is_nullable: bool,
     pub has_default: bool,
     pub description: Option<String>,
@@ -31,8 +31,8 @@ impl From<ArgumentDefinition> for PyArgumentInfo {
         Self {
             name: argument.name,
             graphql_name: argument.graphql_name,
-            type_repr: argument.type_repr,
-            is_nullable: argument.is_nullable,
+            is_nullable: argument.graphql_type.is_nullable(),
+            graphql_type: argument.graphql_type.to_sdl_string(),
             has_default: argument.has_default,
             description: argument.description,
             deprecation_reason: argument.deprecation_reason,
@@ -44,7 +44,7 @@ impl From<ArgumentDefinition> for PyArgumentInfo {
 #[derive(Clone)]
 pub struct PyFieldInfo {
     pub name: String,
-    pub type_repr: Option<String>,
+    pub graphql_type: String,
     pub is_nullable: bool,
     pub has_resolver: bool,
     pub parent_parameter: Option<String>,
@@ -56,8 +56,8 @@ impl From<FieldDefinition> for PyFieldInfo {
     fn from(field: FieldDefinition) -> Self {
         Self {
             name: field.name,
-            type_repr: field.type_repr,
-            is_nullable: field.is_nullable,
+            is_nullable: field.graphql_type.is_nullable(),
+            graphql_type: field.graphql_type.to_sdl_string(),
             has_resolver: field.has_resolver,
             parent_parameter: field.parent_parameter,
             info_parameter: field.info_parameter,
@@ -66,13 +66,23 @@ impl From<FieldDefinition> for PyFieldInfo {
     }
 }
 
-#[pyclass(name = "TypeInfo", frozen, get_all)]
+#[pyclass(name = "TypeInfo", frozen)]
 pub struct PyTypeInfo {
+    #[pyo3(get)]
     pub kind: String,
+    #[pyo3(get)]
     pub name: String,
+    #[pyo3(get)]
     pub description: Option<String>,
+    #[pyo3(get)]
     pub one_of: bool,
+    #[pyo3(get)]
     pub fields: Vec<PyFieldInfo>,
+    /// Not Python-exposed -- the original Rust IR, kept so `Schema()` (Task 8b's graph walker)
+    /// can hand already-computed `TypeInfo`s straight to `compile_schema` (Task 9) without a
+    /// lossy round-trip back through the display-friendly fields above (re-parsing SDL type
+    /// strings, re-deriving `TypeKind` from a plain string, etc.).
+    pub definition: TypeDefinition,
 }
 
 fn parse_kind(kind: &str) -> PyResult<TypeKind> {
@@ -99,15 +109,15 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
 
     // `dataclass_field.type` is frequently just a string (under `from __future__ import
     // annotations`, or a resolver-injected return annotation that was itself a string) --
-    // `typing.get_origin("float | None")` is always None, so nullability can't be computed from
-    // it directly. `get_type_hints` resolves the whole class's annotations (walking its MRO,
-    // using each base's own module globals) into real objects; seeding `localns` with the class
-    // itself handles a field forward-referencing its own enclosing type. It can't handle a field
-    // referencing some *other* type defined in the same enclosing local scope (a sibling class
-    // inside a test function, say) -- `get_type_hints` has no visibility into that scope at all.
-    // Rather than fail type registration outright over an annotation we can't resolve, fall back
-    // to an empty hint set: `type_repr` still works (raw_type displays fine either way) and
-    // `is_nullable` just conservatively defaults to `false` for those fields.
+    // `typing.get_origin("float | None")` is always None, so the structured GraphQLType can't be
+    // computed from it directly. `get_type_hints` resolves the whole class's annotations (walking
+    // its MRO, using each base's own module globals) into real objects; seeding `localns` with the
+    // class itself handles a field forward-referencing its own enclosing type. It can't handle a
+    // field referencing some *other* type defined in the same enclosing local scope (a sibling
+    // class inside a test function, say) -- `get_type_hints` has no visibility into that scope at
+    // all. Rather than fail type registration outright over an annotation we can't resolve, fall
+    // back to an empty hint set: `resolve_graphql_type` still degrades gracefully on a raw string
+    // (falls through to treating it as an opaque named type) rather than erroring.
     let cls_name: String = cls.getattr("__name__")?.extract()?;
     let localns = PyDict::new(py);
     localns.set_item(&cls_name, cls)?;
@@ -127,8 +137,7 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
             let name: String = dataclass_field.getattr("name")?.extract()?;
             let raw_type = dataclass_field.getattr("type")?;
             let resolved_type = resolved_hints.get_item(&name)?.unwrap_or_else(|| raw_type.clone());
-            let type_repr = resolved_type.str().ok().and_then(|s| s.extract::<String>().ok());
-            let field_is_nullable = is_nullable(py, &typing, &resolved_type)?;
+            let graphql_type = resolve_graphql_type(py, &typing, &resolved_type)?;
 
             let resolver = dataclass_field.getattr("resolver").unwrap_or_else(|_| py.None().into_bound(py));
             let has_resolver = !resolver.is_none();
@@ -142,8 +151,7 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
 
             Ok(FieldDefinition {
                 name,
-                type_repr,
-                is_nullable: field_is_nullable,
+                graphql_type,
                 has_resolver,
                 parent_parameter,
                 info_parameter,
@@ -198,9 +206,10 @@ pub fn process_type(
 
     Ok(PyTypeInfo {
         kind: kind.to_string(),
-        name: definition.name,
-        description: definition.description,
+        name: definition.name.clone(),
+        description: definition.description.clone(),
         one_of: definition.one_of,
-        fields: definition.fields.into_iter().map(PyFieldInfo::from).collect(),
+        fields: definition.fields.iter().cloned().map(PyFieldInfo::from).collect(),
+        definition,
     })
 }

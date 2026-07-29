@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, NewType
+
+ID = NewType("ID", str)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

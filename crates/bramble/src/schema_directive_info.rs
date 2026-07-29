@@ -1,15 +1,16 @@
 use bramble_core::schema::{DirectiveFieldDefinition, SchemaDirectiveDefinition, SchemaDirectiveLocation};
 use pyo3::prelude::*;
-use pyo3::types::PyType;
+use pyo3::types::{PyDict, PyType};
 
 use crate::type_info::SchemaError;
+use crate::typing_utils::resolve_graphql_type;
 
 #[pyclass(name = "DirectiveFieldInfo", frozen, get_all, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyDirectiveFieldInfo {
     pub name: String,
     pub graphql_name: Option<String>,
-    pub type_repr: Option<String>,
+    pub graphql_type: String,
 }
 
 impl From<DirectiveFieldDefinition> for PyDirectiveFieldInfo {
@@ -17,7 +18,7 @@ impl From<DirectiveFieldDefinition> for PyDirectiveFieldInfo {
         Self {
             name: field.name,
             graphql_name: field.graphql_name,
-            type_repr: field.type_repr,
+            graphql_type: field.graphql_type.to_sdl_string(),
         }
     }
 }
@@ -92,17 +93,28 @@ pub fn describe_schema_directive(
         .map(|value| parse_location(value))
         .collect::<PyResult<Vec<_>>>()?;
 
+    let typing = py.import("typing")?;
+    let cls_name: String = cls.getattr("__name__")?.extract()?;
+    let localns = PyDict::new(py);
+    localns.set_item(&cls_name, cls)?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("localns", &localns)?;
+    kwargs.set_item("include_extras", true)?;
+    let resolved_hints = typing
+        .call_method("get_type_hints", (cls,), Some(&kwargs))
+        .ok()
+        .and_then(|hints| hints.cast::<PyDict>().ok().cloned())
+        .unwrap_or_else(|| PyDict::new(py));
+
     let dataclass_fields = py.import("dataclasses")?.call_method1("fields", (cls,))?;
     let fields = dataclass_fields
         .try_iter()?
         .map(|dataclass_field| {
             let dataclass_field = dataclass_field?;
             let name: String = dataclass_field.getattr("name")?.extract()?;
-            let type_repr = dataclass_field
-                .getattr("type")?
-                .str()
-                .ok()
-                .and_then(|s| s.extract::<String>().ok());
+            let raw_type = dataclass_field.getattr("type")?;
+            let resolved_type = resolved_hints.get_item(&name)?.unwrap_or(raw_type);
+            let graphql_type = resolve_graphql_type(py, &typing, &resolved_type)?;
             let graphql_name: Option<String> = dataclass_field
                 .getattr("graphql_name")
                 .ok()
@@ -111,14 +123,14 @@ pub fn describe_schema_directive(
             Ok(DirectiveFieldDefinition {
                 name,
                 graphql_name,
-                type_repr,
+                graphql_type,
             })
         })
         .collect::<PyResult<Vec<_>>>()?;
 
     let resolved_name = match name {
         Some(name) => name,
-        None => class_name_to_directive_name(&cls.getattr("__name__")?.extract::<String>()?),
+        None => class_name_to_directive_name(&cls_name),
     };
 
     let definition = SchemaDirectiveDefinition {

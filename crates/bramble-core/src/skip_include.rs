@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
 use async_graphql_parser::Positioned;
-use async_graphql_parser::types::{
-    ExecutableDocument, FragmentDefinition, OperationDefinition, Selection, SelectionSet,
-};
+use async_graphql_parser::types::{ExecutableDocument, FragmentDefinition, Selection, SelectionSet};
 use async_graphql_value::{Name, Value};
 use serde_json::Value as JsonValue;
 
+use crate::document::select_operation;
 use crate::error::{ErrorCode, GraphQLError, GraphQLResult};
 
 /// A field that survived `@skip`/`@include` pruning, with fragment spreads and inline fragments
@@ -130,35 +129,6 @@ fn prune_selection_set(
     }
 
     Ok(result)
-}
-
-fn select_operation<'a>(
-    document: &'a ExecutableDocument,
-    operation_name: Option<&str>,
-) -> GraphQLResult<&'a OperationDefinition> {
-    match operation_name {
-        Some(target) => document
-            .operations
-            .iter()
-            .find(|(name, _)| name.map(Name::as_str) == Some(target))
-            .map(|(_, operation)| &operation.node)
-            .ok_or_else(|| {
-                Box::new(GraphQLError::new(
-                    format!("no operation named '{target}'"),
-                    ErrorCode::GraphqlValidationFailed,
-                ))
-            }),
-        None => {
-            let operations: Vec<_> = document.operations.iter().collect();
-            match operations.as_slice() {
-                [(_, operation)] => Ok(&operation.node),
-                _ => Err(Box::new(GraphQLError::new(
-                    "document contains multiple operations; operation_name is required",
-                    ErrorCode::GraphqlValidationFailed,
-                ))),
-            }
-        }
-    }
 }
 
 /// Prunes `@skip`/`@include`d selections out of a parsed document's chosen operation, evaluating

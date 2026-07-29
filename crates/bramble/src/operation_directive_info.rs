@@ -4,13 +4,20 @@ use pyo3::prelude::*;
 use crate::resolver_binding::{classify_argument, resolve_annotations};
 use crate::type_info::{PyArgumentInfo, SchemaError};
 
-#[pyclass(name = "OperationDirectiveInfo", frozen, get_all, skip_from_py_object)]
+#[pyclass(name = "OperationDirectiveInfo", frozen, skip_from_py_object)]
 pub struct PyOperationDirectiveInfo {
+    #[pyo3(get)]
     pub name: String,
+    #[pyo3(get)]
     pub description: Option<String>,
+    #[pyo3(get)]
     pub locations: Vec<String>,
+    #[pyo3(get)]
     pub value_parameter: Option<String>,
+    #[pyo3(get)]
     pub arguments: Vec<PyArgumentInfo>,
+    /// Not Python-exposed -- see `PyTypeInfo::definition`'s doc comment for why.
+    pub definition: OperationDirectiveDefinition,
 }
 
 fn parse_location(value: &str) -> PyResult<OperationDirectiveLocation> {
@@ -131,10 +138,11 @@ pub fn describe_operation_directive(
     };
 
     Ok(PyOperationDirectiveInfo {
-        name: definition.name,
-        description: definition.description,
-        locations: definition.locations.into_iter().map(location_str).collect(),
-        value_parameter: definition.value_parameter,
-        arguments: definition.arguments.into_iter().map(PyArgumentInfo::from).collect(),
+        name: definition.name.clone(),
+        description: definition.description.clone(),
+        locations: definition.locations.iter().copied().map(location_str).collect(),
+        value_parameter: definition.value_parameter.clone(),
+        arguments: definition.arguments.iter().cloned().map(PyArgumentInfo::from).collect(),
+        definition,
     })
 }

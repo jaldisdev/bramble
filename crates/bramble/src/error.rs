@@ -38,5 +38,9 @@ fn build_python_error<'py>(py: Python<'py>, error: &CoreGraphQLError) -> PyResul
 
     let kwargs = PyDict::new(py);
     kwargs.set_item("code", code_value)?;
+    if let Some(locations) = &error.locations {
+        let locations: Vec<(usize, usize)> = locations.iter().map(|location| (location.line, location.column)).collect();
+        kwargs.set_item("locations", locations)?;
+    }
     error_class.call((error.message.clone(),), Some(&kwargs))
 }

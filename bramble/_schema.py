@@ -5,7 +5,8 @@ import typing
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from bramble._bramble import SchemaError, describe_union
+from bramble._bramble import SchemaError, compile_schema, describe_union, validate_query
+from bramble._scalar import ScalarDefinition
 from bramble._union import UnionDefinition
 from bramble.schema.config import SchemaConfig
 
@@ -139,6 +140,16 @@ def _validate_interface_implementations(graph: _SchemaGraph) -> None:
                         )
 
 
+def _scalar_name(python_type: Any, scalar_definition: ScalarDefinition) -> str:
+    """The GraphQL name a registered scalar resolves to: its explicit `name=`, or (matching
+    `resolve_graphql_type`'s own fallback for an as-yet-unregistered scalar reference) the
+    Python type's own `__name__` -- the convention `bramble.scalar()` callers follow by default.
+    """
+    if scalar_definition.name is not None:
+        return scalar_definition.name
+    return getattr(python_type, "__name__", str(python_type))
+
+
 class Schema:
     def __init__(
         self,
@@ -184,3 +195,26 @@ class Schema:
         self.implementors_by_interface = graph.implementors_by_interface
         self.unions_by_name = graph.unions_by_name
         self.scalars_by_python_type = dict(self.config.scalar_map)
+
+        scalar_names = [
+            _scalar_name(python_type, scalar_definition)
+            for python_type, scalar_definition in self.scalars_by_python_type.items()
+        ]
+
+        self._compiled = compile_schema(
+            query_type_name=query.__bramble_type_info__.name,
+            mutation_type_name=mutation.__bramble_type_info__.name if mutation is not None else None,
+            subscription_type_name=(
+                subscription.__bramble_type_info__.name if subscription is not None else None
+            ),
+            types=[cls.__bramble_type_info__ for cls in graph.types_by_name.values()],
+            unions=list(graph.unions_by_name.values()),
+            directives=[directive.__bramble_directive_info__ for directive in self.directives],
+            scalar_names=scalar_names,
+        )
+
+    def validate_query(self, query: str, *, operation_name: str | None = None) -> None:
+        """Validates `query`'s (optionally named) operation against this compiled schema (§7a),
+        raising a `bramble.GraphQLError` on the first violation found. Returns `None` if valid.
+        """
+        validate_query(query, self._compiled, operation_name)
