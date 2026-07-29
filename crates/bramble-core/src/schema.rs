@@ -40,3 +40,11 @@ pub struct TypeDefinition {
     pub one_of: bool,
     pub fields: Vec<FieldDefinition>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UnionDefinition {
+    pub name: String,
+    pub description: Option<String>,
+    pub member_type_reprs: Vec<String>,
+    pub has_custom_resolve_type: bool,
+}

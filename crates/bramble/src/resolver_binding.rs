@@ -3,54 +3,12 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
 use crate::type_info::SchemaError;
+use crate::typing_utils::{find_marker, is_union_origin, unwrap_annotated};
 
 pub struct ResolverBinding {
     pub parent_parameter: Option<String>,
     pub info_parameter: Option<String>,
     pub arguments: Vec<ArgumentDefinition>,
-}
-
-/// `typing.get_origin(int | None)` and `typing.get_origin(typing.Optional[int])` both denote a
-/// union, but which singleton object represents "union" isn't guaranteed stable across Python
-/// versions (some versions unify `types.UnionType` and `typing.Union`, some don't) -- so this
-/// checks identity against both rather than assuming either alone is sufficient.
-fn is_union_origin(py: Python<'_>, origin: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let typing_union = py.import("typing")?.getattr("Union")?;
-    if origin.is(&typing_union) {
-        return Ok(true);
-    }
-    let types_union = py.import("types")?.getattr("UnionType")?;
-    Ok(origin.is(&types_union))
-}
-
-/// Unwraps `Annotated[T, ...]` to `T`, and returns any `bramble._resolver.Argument` marker found
-/// in the metadata (per §3a, via `Annotated[T, bramble.argument(...)]`). Non-`Annotated`
-/// annotations, and `Annotated` annotations with no `Argument` marker among their metadata, pass
-/// through unchanged.
-fn unwrap_annotated<'py>(
-    py: Python<'py>,
-    typing: &Bound<'py, PyAny>,
-    annotation: Bound<'py, PyAny>,
-) -> PyResult<(Bound<'py, PyAny>, Option<Bound<'py, PyAny>>)> {
-    let origin = typing.call_method1("get_origin", (&annotation,))?;
-    let annotated = typing.getattr("Annotated")?;
-    if !origin.is(&annotated) {
-        return Ok((annotation, None));
-    }
-
-    let args: Vec<Bound<PyAny>> = typing
-        .call_method1("get_args", (&annotation,))?
-        .try_iter()?
-        .collect::<PyResult<_>>()?;
-    let underlying = args[0].clone();
-
-    let argument_class = py.import("bramble._resolver")?.getattr("Argument")?;
-    let argument_marker = args[1..]
-        .iter()
-        .find(|value| value.is_instance(&argument_class).unwrap_or(false))
-        .cloned();
-
-    Ok((underlying, argument_marker))
 }
 
 fn is_nullable(py: Python<'_>, typing: &Bound<'_, PyAny>, annotation: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -75,7 +33,9 @@ fn classify_argument<'py>(
     annotation: Bound<'py, PyAny>,
     has_default: bool,
 ) -> PyResult<ArgumentDefinition> {
-    let (underlying, argument_marker) = unwrap_annotated(py, typing, annotation)?;
+    let (underlying, metadata) = unwrap_annotated(typing, annotation)?;
+    let argument_class = py.import("bramble._resolver")?.getattr("Argument")?;
+    let argument_marker = find_marker(&metadata, &argument_class)?;
     let is_nullable = is_nullable(py, typing, &underlying)?;
     let type_repr = underlying.str().ok().and_then(|s| s.extract::<String>().ok());
 

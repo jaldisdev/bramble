@@ -23,6 +23,7 @@ pub enum ErrorCode {
     GraphqlParseFailed,
     GraphqlValidationFailed,
     InterfaceTypeResolutionFailed,
+    UnionTypeResolutionFailed,
 }
 
 #[derive(Serialize, Debug, Clone)]
