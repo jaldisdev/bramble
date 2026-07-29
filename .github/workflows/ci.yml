@@ -22,7 +22,7 @@ jobs:
       # Criterion's own HTML/JSON report becomes a downloadable per-run artifact -- a baseline
       # record without needing a dedicated benchmark-tracking service (e.g. a gh-pages branch);
       # comparing runs over time is still a manual "download both, diff" step for now.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: criterion-benchmark-results
           path: target/criterion
