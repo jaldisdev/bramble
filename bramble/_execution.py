@@ -275,7 +275,7 @@ def _serialize_scalar(type_name: str, value: Any, schema: "Schema") -> Any:
     scalar_definition = schema.scalars_by_name.get(type_name)
     if scalar_definition is not None and scalar_definition.serialize is not None:
         return scalar_definition.serialize(value)
-    if isinstance(value, (datetime.datetime, datetime.date)):
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
         return value.isoformat()
     if isinstance(value, (decimal.Decimal, uuid.UUID)):
         return str(value)

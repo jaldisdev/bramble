@@ -169,3 +169,100 @@ def test_to_sdl_renders_mutation_in_schema_block() -> None:
     schema = bramble.Schema(query=Query, mutation=Mutation)
 
     assert "schema {\n  query: Query\n  mutation: Mutation\n}" in schema.to_sdl()
+
+
+# Printer scenarios: built-in scalar rendering, interface implements-clauses, and root types with
+# custom names.
+
+
+def test_to_sdl_renders_all_builtin_scalar_types_as_non_null() -> None:
+    @bramble.type
+    class Query:
+        a: str
+        b: int
+        c: bool
+        d: float
+        e: bramble.ID
+
+    schema = bramble.Schema(query=Query)
+    sdl = schema.to_sdl()
+
+    assert "a: String!" in sdl
+    assert "b: Int!" in sdl
+    assert "c: Boolean!" in sdl
+    assert "d: Float!" in sdl
+    assert "e: ID!" in sdl
+
+
+def test_to_sdl_renders_optional_scalar_as_nullable() -> None:
+    @bramble.type
+    class Query:
+        maybe: str | None
+
+    schema = bramble.Schema(query=Query)
+
+    assert "maybe: String\n" in schema.to_sdl()
+    assert "maybe: String!" not in schema.to_sdl()
+
+
+def test_to_sdl_renders_implements_clause_for_an_interface() -> None:
+    @bramble.interface
+    class Node:
+        @bramble.field
+        def id() -> bramble.ID:
+            return "1"
+
+    @bramble.type
+    class User(Node):
+        @bramble.field
+        def id(parent: bramble.Parent[object]) -> bramble.ID:
+            return "1"
+
+    schema = bramble.Schema(query=User, types=[User])  # abusing User as a throwaway root
+    sdl = schema.to_sdl()
+
+    assert "type User implements Node {" in sdl
+
+
+def test_to_sdl_renders_implements_clause_for_transitive_interface_inheritance() -> None:
+    @bramble.interface
+    class Node:
+        @bramble.field
+        def id() -> bramble.ID:
+            return "1"
+
+    @bramble.interface
+    class Timestamped(Node):
+        @bramble.field
+        def created_at() -> str:
+            return "now"
+
+    @bramble.type
+    class User(Timestamped):
+        @bramble.field
+        def id(parent: bramble.Parent[object]) -> bramble.ID:
+            return "1"
+
+        @bramble.field
+        def created_at(parent: bramble.Parent[object]) -> str:
+            return "now"
+
+    schema = bramble.Schema(query=User, types=[User])
+    sdl = schema.to_sdl()
+
+    assert "interface Timestamped implements Node {" in sdl
+    assert "type User implements Timestamped & Node {" in sdl
+
+
+def test_to_sdl_renders_root_type_with_custom_name_in_schema_block() -> None:
+    @bramble.type(name="RootQuery")
+    class Query:
+        @bramble.field
+        def x() -> int:
+            return 1
+
+    schema = bramble.Schema(query=Query)
+    sdl = schema.to_sdl()
+
+    assert "schema {\n  query: RootQuery\n}" in sdl
+    assert "type RootQuery {" in sdl

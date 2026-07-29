@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import base64
+import datetime
+import decimal
+import uuid
 from typing import NewType
 
 import bramble
@@ -104,3 +107,78 @@ def test_schema_defaults_to_fresh_schema_config() -> None:
 
     assert isinstance(schema.config, SchemaConfig)
     assert schema.config.scalar_map == {}
+
+
+# Built-in scalar coverage, output-direction (serialization) only. bramble has no built-in scalar
+# *input* parsing for these types yet (a resolver argument would receive the raw string unparsed,
+# not a real `datetime.date`/`Decimal`/`UUID` instance) -- see project memory for this flagged, not
+# silently skipped, gap. `datetime.time` -> `Time` was added this session; it wasn't recognized as
+# a scalar at all before (fell back to an invalid lowercase `time` type name and leaked the raw
+# Python object into the response).
+
+
+def test_builtin_date_serializes_to_isoformat() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def today() -> datetime.date:
+            return datetime.date(2024, 1, 1)
+
+    schema = bramble.Schema(query=Query)
+
+    assert "today: Date!" in schema.to_sdl()
+    assert schema.execute("{ today }") == {"data": {"today": "2024-01-01"}}
+
+
+def test_builtin_time_serializes_to_isoformat() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def now() -> datetime.time:
+            return datetime.time(9, 30, 0)
+
+    schema = bramble.Schema(query=Query)
+
+    assert "now: Time!" in schema.to_sdl()
+    assert schema.execute("{ now }") == {"data": {"now": "09:30:00"}}
+
+
+def test_builtin_datetime_serializes_to_isoformat() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def created_at() -> datetime.datetime:
+            return datetime.datetime(2024, 1, 1, 9, 30, 0)
+
+    schema = bramble.Schema(query=Query)
+
+    assert "createdAt: DateTime!" in schema.to_sdl()
+    assert schema.execute("{ createdAt }") == {"data": {"createdAt": "2024-01-01T09:30:00"}}
+
+
+def test_builtin_decimal_serializes_to_str_preserving_precision() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def price() -> decimal.Decimal:
+            return decimal.Decimal("9.99")
+
+    schema = bramble.Schema(query=Query)
+
+    assert "price: Decimal!" in schema.to_sdl()
+    assert schema.execute("{ price }") == {"data": {"price": "9.99"}}
+
+
+def test_builtin_uuid_serializes_to_str() -> None:
+    fixed_uuid = uuid.uuid4()
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def identifier() -> uuid.UUID:
+            return fixed_uuid
+
+    schema = bramble.Schema(query=Query)
+
+    assert "identifier: UUID!" in schema.to_sdl()
+    assert schema.execute("{ identifier }") == {"data": {"identifier": str(fixed_uuid)}}

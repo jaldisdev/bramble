@@ -56,6 +56,7 @@ fn sample_schema() -> CompiledSchema {
             name: "Query".to_string(),
             description: None,
             one_of: false,
+            interfaces: Vec::new(),
             fields: vec![field("user", named("User"), vec![argument("id", named("ID"))])],
             applied_directives: Vec::new(),
         },
@@ -68,6 +69,7 @@ fn sample_schema() -> CompiledSchema {
             name: "User".to_string(),
             description: None,
             one_of: false,
+            interfaces: Vec::new(),
             fields: vec![
                 field("id", named("ID"), Vec::new()),
                 field("name", named("String"), Vec::new()),
@@ -85,6 +87,7 @@ fn sample_schema() -> CompiledSchema {
             name: "Post".to_string(),
             description: None,
             one_of: false,
+            interfaces: Vec::new(),
             fields: vec![
                 field("id", named("ID"), Vec::new()),
                 field("title", named("String"), Vec::new()),

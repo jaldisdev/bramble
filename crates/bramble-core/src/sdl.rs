@@ -98,6 +98,10 @@ fn render_type(type_def: &TypeDefinition, auto_camel_case: bool) -> String {
     out.push_str(kind_keyword(type_def.kind));
     out.push(' ');
     out.push_str(&type_def.name);
+    if !type_def.interfaces.is_empty() {
+        out.push_str(" implements ");
+        out.push_str(&type_def.interfaces.join(" & "));
+    }
     out.push_str(&render_applied_directives(&type_def.applied_directives));
     if type_def.kind == TypeKind::Input && type_def.one_of {
         out.push_str(" @oneOf");
@@ -273,6 +277,7 @@ mod tests {
                 name: "Query".to_string(),
                 description: Some("The root query type".to_string()),
                 one_of: false,
+                interfaces: Vec::new(),
                 fields: vec![FieldDefinition {
                     name: "greet".to_string(),
                     graphql_name: None,
@@ -319,6 +324,7 @@ mod tests {
                 name: "User".to_string(),
                 description: None,
                 one_of: false,
+                interfaces: Vec::new(),
                 fields: Vec::new(),
                 applied_directives: vec![AppliedDirective {
                     name: "keys".to_string(),
@@ -360,6 +366,7 @@ mod tests {
                 name: "Node".to_string(),
                 description: None,
                 one_of: false,
+                interfaces: Vec::new(),
                 fields: vec![FieldDefinition {
                     name: "id".to_string(),
                     graphql_name: None,
@@ -381,6 +388,7 @@ mod tests {
                 name: "UserFilter".to_string(),
                 description: None,
                 one_of: true,
+                interfaces: Vec::new(),
                 fields: vec![
                     FieldDefinition {
                         name: "by_id".to_string(),
@@ -436,6 +444,7 @@ mod tests {
                 name: "Query".to_string(),
                 description: None,
                 one_of: false,
+                interfaces: Vec::new(),
                 fields: vec![FieldDefinition {
                     name: "old_field".to_string(),
                     graphql_name: Some("oldField".to_string()),
@@ -509,6 +518,7 @@ mod tests {
             name: "Query".to_string(),
             description: None,
             one_of: false,
+            interfaces: Vec::new(),
             fields: vec![FieldDefinition {
                 name: "post_by_slug".to_string(),
                 graphql_name: None,

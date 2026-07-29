@@ -1,7 +1,7 @@
 /// Converts a snake_case identifier to camelCase (`turn_uppercase` -> `turnUppercase`) -- GraphQL's
 /// own field/argument naming convention, and this crate's default when no explicit `name=`
-/// override is given (matching Strawberry's own `auto_camel_case` default; `SchemaConfig` can turn
-/// it off, in which case the raw Python identifier is used as-is instead of calling this).
+/// override is given (`SchemaConfig` can turn it off, in which case the raw Python identifier is
+/// used as-is instead of calling this).
 #[must_use]
 pub fn to_camel_case(name: &str) -> String {
     let mut result = String::with_capacity(name.len());

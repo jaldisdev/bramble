@@ -38,6 +38,13 @@ class _Item:
 
 
 @bramble.type
+class _Person:
+    @bramble.field
+    def name(parent: bramble.Parent[object]) -> str:
+        return parent.name  # type: ignore[attr-defined]
+
+
+@bramble.type
 class _FailingInner:
     @bramble.field
     def required() -> str:
@@ -875,3 +882,26 @@ def test_explicit_name_override_takes_priority_over_auto_camel_case() -> None:
     result = schema.execute('query { customName(postId: "p1") }')
 
     assert result == {"data": {"customName": "post p1"}}
+
+
+# A resolver for a plain (non-interface, non-union) object-typed field only ever reads attributes
+# off whatever it returns -- it never isinstance()-checks against the declared class, so any
+# duck-typed object with matching attributes resolves correctly, not just a real instance of the
+# declared type.
+
+
+def test_resolver_can_return_a_duck_typed_object_not_an_instance_of_the_declared_type() -> None:
+    class DuckPerson:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def person() -> _Person:
+            return DuckPerson("Ada")  # type: ignore[return-value]
+
+    schema = bramble.Schema(query=Query, types=[_Person])
+    result = schema.execute("{ person { name } }")
+
+    assert result == {"data": {"person": {"name": "Ada"}}}

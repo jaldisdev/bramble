@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+from typing import NewType
+
 import pytest
 
 import bramble
 from bramble.directive import DirectiveLocation, DirectiveValue, apply_directive
+from bramble.schema.config import SchemaConfig
+
+# `typing.get_type_hints` can't see an enclosing test function's local scope, so a NewType used
+# only as a directive argument's annotation must live at module level (same gotcha elsewhere).
+Slug = NewType("Slug", str)
+
+
+@bramble.input
+class RepeatOptions:
+    times: int
 
 
 def test_turn_uppercase_example_from_spec() -> None:
@@ -110,3 +122,67 @@ def test_multiple_directive_value_parameters_rejected() -> None:
         @bramble.directive(locations=[DirectiveLocation.FIELD])
         def broken(a: DirectiveValue[str], b: DirectiveValue[str]) -> str:
             return a + b
+
+
+# Async directives, and directives whose own arguments are typed as a custom scalar or a
+# `@bramble.input` type -- the latter is a direct regression test for a bug this session found and
+# fixed (a directive's own input-typed argument used to arrive as a raw dict, never coerced into a
+# real instance, because the schema graph walker never discovered a type reachable only via a
+# directive's own argument annotations).
+
+
+def test_runs_async_directive() -> None:
+    @bramble.directive(locations=[DirectiveLocation.FIELD])
+    async def shout_async(value: DirectiveValue[str]) -> str:
+        return value.upper()
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def greeting() -> str:
+            return "hello"
+
+    schema = bramble.Schema(query=Query, directives=[shout_async])
+
+    assert schema.execute("{ greeting @shoutAsync }") == {"data": {"greeting": "HELLO"}}
+
+
+def test_directive_argument_typed_as_custom_scalar() -> None:
+    @bramble.directive(locations=[DirectiveLocation.FIELD])
+    def append_slug(value: DirectiveValue[str], slug: Slug) -> str:
+        return f"{value}-{slug}"
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def greeting() -> str:
+            return "hi"
+
+    schema = bramble.Schema(
+        query=Query,
+        directives=[append_slug],
+        config=SchemaConfig(
+            scalar_map={Slug: bramble.scalar(name="Slug", parse_value=lambda v: v.lower().replace(" ", "-"))}
+        ),
+    )
+
+    result = schema.execute('{ greeting @appendSlug(slug: "Hello World") }')
+    assert result == {"data": {"greeting": "hi-hello-world"}}
+
+
+def test_directive_argument_typed_as_input_object() -> None:
+    @bramble.directive(locations=[DirectiveLocation.FIELD])
+    def repeat(value: DirectiveValue[str], options: RepeatOptions) -> str:
+        return value * options.times
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def greeting() -> str:
+            return "hi"
+
+    schema = bramble.Schema(query=Query, directives=[repeat])
+
+    result = schema.execute("{ greeting @repeat(options: {times: 2}) }")
+    assert result == {"data": {"greeting": "hihi"}}
+    assert schema.types_by_name["RepeatOptions"] is RepeatOptions

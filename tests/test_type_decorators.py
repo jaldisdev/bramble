@@ -271,3 +271,81 @@ def test_field_resolver_and_default_are_mutually_exclusive() -> None:
         # on a method -- the conflict must still be caught when applied out of order.
         deferred = bramble.field(default=5)
         deferred(lambda self: 1)
+
+
+# Object/instantiation edge cases: decorators applied to non-classes, lambda/staticmethod
+# resolvers, and dataclass-derived behavior (asdict/repr) on a bramble type instance.
+
+
+def test_type_decorator_on_a_non_class_raises() -> None:
+    with pytest.raises(Exception):
+        bramble.type(lambda: None)
+
+
+def test_interface_decorator_on_a_non_class_raises() -> None:
+    with pytest.raises(Exception):
+        bramble.interface(lambda: None)
+
+
+def test_input_decorator_on_a_non_class_raises() -> None:
+    with pytest.raises(Exception):
+        bramble.input(lambda: None)
+
+
+def test_lambda_resolver_with_explicit_field_annotation() -> None:
+    @bramble.type
+    class Query:
+        greeting: str = bramble.field(resolver=lambda: "hi", name="greet")
+
+    assert Query.greeting() == "hi"
+    assert Query.__bramble_type_info__.fields[0].graphql_name == "greet"
+
+
+def test_staticmethod_resolver() -> None:
+    class Helpers:
+        @staticmethod
+        def get_name() -> str:
+            return "static-name"
+
+    @bramble.type
+    class Query:
+        name: str = bramble.field(resolver=Helpers.get_name)
+
+    assert Query.name() == "static-name"
+
+
+def test_asdict_on_a_simple_type() -> None:
+    @bramble.type
+    class Point:
+        x: int
+        y: int
+
+    point = Point(x=1, y=2)
+    assert dataclasses.asdict(point) == {"x": 1, "y": 2}
+
+
+def test_asdict_recurses_into_nested_types() -> None:
+    @bramble.type
+    class Author:
+        name: str
+
+    @bramble.type
+    class Post:
+        title: str
+        author: Author
+
+    post = Post(title="Hello", author=Author(name="Ada"))
+    assert dataclasses.asdict(post) == {"title": "Hello", "author": {"name": "Ada"}}
+
+
+def test_repr_of_a_type_instance_shows_field_values() -> None:
+    @bramble.type
+    class Point:
+        x: int
+        y: int
+
+    point = Point(x=1, y=2)
+    representation = repr(point)
+    assert "Point" in representation
+    assert "x=1" in representation
+    assert "y=2" in representation

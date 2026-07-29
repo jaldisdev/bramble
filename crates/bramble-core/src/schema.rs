@@ -97,6 +97,10 @@ pub struct TypeDefinition {
     pub one_of: bool,
     pub fields: Vec<FieldDefinition>,
     pub applied_directives: Vec<AppliedDirective>,
+    /// The GraphQL names of every interface this type (or, for an interface itself, its own
+    /// parent interfaces) implements -- §4's `implements A & B` SDL clause. In MRO order, which
+    /// is deterministic (Python's C3 linearization) and already deduplicates diamond inheritance.
+    pub interfaces: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -180,9 +184,9 @@ pub struct CompiledSchema {
     /// from `scalar_names` (a flat set) since a scalar has no other Rust-side IR of its own to
     /// hang this on the way a type/field does.
     pub scalar_applied_directives: HashMap<String, Vec<AppliedDirective>>,
-    /// `SchemaConfig(auto_camel_case=...)` (default `true`, matching Strawberry's own default):
-    /// whether a field/argument with no explicit `name=` override defaults to a camelCase
-    /// rendering of its Python identifier (`post_id` -> `postId`) or the identifier as-is.
+    /// `SchemaConfig(auto_camel_case=...)` (default `true`): whether a field/argument with no
+    /// explicit `name=` override defaults to a camelCase rendering of its Python identifier
+    /// (`post_id` -> `postId`) or the identifier as-is.
     pub auto_camel_case: bool,
     /// A fresh, empty cache per `CompiledSchema` -- constructing a new `Schema()` naturally
     /// flushes it (Task 10's schema-reload decision), since there's nothing to inherit from.

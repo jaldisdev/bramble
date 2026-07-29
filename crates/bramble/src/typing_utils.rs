@@ -170,6 +170,9 @@ pub(crate) fn named_type_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> 
     if annotation.is(&datetime_module.getattr("date")?) {
         return Ok("Date".to_string());
     }
+    if annotation.is(&datetime_module.getattr("time")?) {
+        return Ok("Time".to_string());
+    }
     if annotation.is(&py.import("decimal")?.getattr("Decimal")?) {
         return Ok("Decimal".to_string());
     }

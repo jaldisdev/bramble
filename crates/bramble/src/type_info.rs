@@ -320,6 +320,21 @@ pub fn process_type(
         None => cls.getattr("__name__")?.extract()?,
     };
 
+    // MRO order (skipping `cls` itself) rather than `__bases__`: an interface implementing
+    // another interface (`class FieldError(Error)`) needs its own transitive parents listed too,
+    // and MRO already deduplicates diamond inheritance for free.
+    let mut interfaces = Vec::new();
+    for base in cls.call_method0("mro")?.try_iter()?.skip(1) {
+        let base = base?;
+        let Ok(info) = base.getattr("__bramble_type_info__") else {
+            continue;
+        };
+        let base_kind: String = info.getattr("kind")?.extract()?;
+        if base_kind == "interface" {
+            interfaces.push(info.getattr("name")?.extract::<String>()?);
+        }
+    }
+
     let definition = TypeDefinition {
         kind: type_kind,
         name: resolved_name,
@@ -327,6 +342,7 @@ pub fn process_type(
         one_of,
         fields,
         applied_directives,
+        interfaces,
     };
 
     let fields_info = definition
