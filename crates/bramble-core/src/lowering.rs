@@ -6,7 +6,7 @@ use async_graphql_value::{Name, Value};
 use serde_json::Value as JsonValue;
 
 use crate::document::select_operation;
-use crate::error::{ErrorCode, GraphQLError, GraphQLResult};
+use crate::error::{ErrorCode, GraphQLError, GraphQLResult, Location};
 
 /// A field argument or directive argument as written in the query: the GraphQL-facing name
 /// (never a resolver's Python parameter name -- that mapping depends on which concrete type
@@ -59,6 +59,10 @@ pub struct LoweredField {
     pub arguments: Vec<LoweredArgument>,
     pub directives: Vec<LoweredDirective>,
     pub selections: Vec<LoweredField>,
+    /// This field's own source position in the query text -- lets an execution-time error (a
+    /// resolver exception, a "cannot return null for non-null field") report `locations` the same
+    /// way a parse/validation error already does, instead of only ever having `path`.
+    pub location: Location,
 }
 
 fn resolve_boolean_argument(
@@ -165,6 +169,7 @@ fn lower_selection_set(
                     arguments: lower_arguments(&field.node.arguments),
                     directives: lower_directives(&field.node.directives),
                     selections,
+                    location: Location::from(field.pos),
                 });
             }
             Selection::InlineFragment(inline) => {

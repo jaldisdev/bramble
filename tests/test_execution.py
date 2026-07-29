@@ -268,6 +268,19 @@ def test_non_null_field_error_propagates_to_null_the_whole_response() -> None:
     assert result["errors"][0]["path"] == ["required"]
 
 
+def test_execution_error_reports_the_failing_field_source_location() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def required() -> str:
+            raise ValueError("boom")
+
+    schema = bramble.Schema(query=Query)
+    result = schema.execute("query {\n  required\n}")
+
+    assert result["errors"][0]["locations"] == [{"line": 2, "column": 3}]
+
+
 def test_non_null_child_field_nulls_nullable_parent_object() -> None:
     @bramble.type
     class Query:

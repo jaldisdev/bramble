@@ -308,24 +308,26 @@ def _find_field_info(concrete_type: type, field_name: str, *, auto_camel_case: b
     return None
 
 
-def _build_error(message: str, path: Path) -> GraphQLError:
-    # No `locations` here -- `LoweredField` doesn't carry the query's own source positions (only
-    # `bramble-core`'s parse/validation errors do), so an execution-time error can only report
-    # `path`. Flagged scope, not an oversight: threading `Pos` through the whole lowering pipeline
-    # is more machinery than field-level error reporting has needed so far.
-    return GraphQLError(message, code=ErrorCode.FIELD_RESOLUTION_FAILED, path=path.as_list())
+def _build_error(message: str, path: Path, lowered_field: "LoweredField") -> GraphQLError:
+    return GraphQLError(
+        message,
+        code=ErrorCode.FIELD_RESOLUTION_FAILED,
+        path=path.as_list(),
+        locations=[(lowered_field.line, lowered_field.column)],
+    )
 
 
-def _error_from_exception(error: Exception, path: Path) -> GraphQLError:
+def _error_from_exception(error: Exception, path: Path, lowered_field: "LoweredField") -> GraphQLError:
     """A resolver that deliberately raises its own `bramble.GraphQLError` (a custom `code`,
-    `extensions`, etc.) keeps all of that -- only `path` is overwritten, since the resolver has no
-    way to know its own position in the response ahead of time. Any other exception is wrapped
-    generically (`_build_error`), same as an unexpected bug in resolver code.
+    `extensions`, etc.) keeps all of that -- only `path`/`locations` are overwritten, since the
+    resolver has no way to know its own position in the response ahead of time. Any other
+    exception is wrapped generically (`_build_error`), same as an unexpected bug in resolver code.
     """
     if isinstance(error, GraphQLError):
         error.path = path.as_list()
+        error.locations = [(lowered_field.line, lowered_field.column)]
         return error
-    return _build_error(str(error), path)
+    return _build_error(str(error), path, lowered_field)
 
 
 async def _complete_value(
@@ -345,7 +347,7 @@ async def _complete_value(
     """
     if type_info.kind == "NON_NULL":
         if raw_value is None:
-            state.errors.append(_build_error("Cannot return null for non-nullable field.", path))
+            state.errors.append(_build_error("Cannot return null for non-nullable field.", path, lowered_field))
             raise _PropagateNull
         return await _complete_value(
             type_info=type_info.of_type, raw_value=raw_value, lowered_field=lowered_field, path=path, state=state
@@ -408,7 +410,7 @@ async def _execute_field(
     except _PropagateNull:
         raise
     except Exception as error:  # noqa: BLE001 -- deliberately broad: any resolver/directive failure becomes a field error, per §8.
-        state.errors.append(_error_from_exception(error, path))
+        state.errors.append(_error_from_exception(error, path, lowered_field))
         if is_non_null:
             raise _PropagateNull from error
         return None

@@ -137,6 +137,11 @@ pub struct PyLoweredField {
     pub arguments: Py<PyDict>,
     pub directives: Vec<Py<PyLoweredDirective>>,
     pub selections: Vec<Py<PyLoweredField>>,
+    /// This field's own 1-indexed source position in the query text (§8's `locations`) -- lets
+    /// an execution-time error report where in the query it came from, the same as a parse/
+    /// validation error already does.
+    pub line: usize,
+    pub column: usize,
 }
 
 fn convert_arguments(
@@ -182,6 +187,8 @@ fn convert_field(py: Python<'_>, field: LoweredField, variable_values: &Bound<'_
         arguments: convert_arguments(py, field.arguments, variable_values)?,
         directives,
         selections,
+        line: field.location.line,
+        column: field.location.column,
     })
 }
 
