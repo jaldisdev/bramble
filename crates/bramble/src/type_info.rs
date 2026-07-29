@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use bramble_core::schema::{FieldDefinition, TypeDefinition, TypeKind};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
@@ -51,59 +49,42 @@ fn parse_kind(kind: &str) -> PyResult<TypeKind> {
     }
 }
 
-/// Iterates the `(name, value)` pairs of a mapping-like object (a real `dict`, or the
-/// `mappingproxy` that `__dict__` actually is -- `mappingproxy` isn't a `dict` subclass at the
-/// C level, so it can't be `cast::<PyDict>()`, but both support `.items()`).
-fn mapping_items<'py>(mapping: &Bound<'py, PyAny>) -> PyResult<Vec<(String, Bound<'py, PyAny>)>> {
-    mapping
-        .call_method0("items")?
+/// Reads `cls`'s fields off `dataclasses.fields(cls)` -- by the time this runs, `bramble._type`
+/// has already turned `cls` into a real dataclass, so the stdlib has already done the MRO
+/// merge/override work of collecting a class's own fields plus its inherited ones in the
+/// correct declaration order. A field only has `.resolver` if it's a `bramble._type.Field`
+/// (dataclasses auto-creates plain `dataclasses.Field`s for bare annotated attributes, which
+/// have no such attribute -- `getattr(..., "resolver", None)` treats that the same as "no
+/// resolver", which is exactly what a plain data field is).
+fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDefinition>> {
+    let dataclass_fields = py.import("dataclasses")?.call_method1("fields", (cls,))?;
+
+    dataclass_fields
         .try_iter()?
-        .map(|entry| {
-            let entry = entry?;
-            let name: String = entry.get_item(0)?.extract()?;
-            let value = entry.get_item(1)?;
-            Ok((name, value))
+        .map(|dataclass_field| {
+            let dataclass_field = dataclass_field?;
+            let name: String = dataclass_field.getattr("name")?.extract()?;
+            let type_repr = dataclass_field
+                .getattr("type")?
+                .str()
+                .ok()
+                .and_then(|s| s.extract::<String>().ok());
+            let resolver = dataclass_field.getattr("resolver").unwrap_or_else(|_| py.None().into_bound(py));
+            let has_resolver = !resolver.is_none();
+
+            Ok(FieldDefinition {
+                name,
+                type_repr,
+                has_resolver,
+            })
         })
         .collect()
 }
 
-/// A class's own (not inherited/merged) annotations. Can't read `__dict__["__annotations__"]`
-/// directly: under PEP 649 (default since Python 3.14), annotations are computed lazily from a
-/// per-class `__annotate__` function and may not be eagerly present in `__dict__` at all.
-/// `inspect.get_annotations` is the version-robust stdlib way to get a class's own annotations
-/// (falling back up the MRO only when the class itself defines none, same as pre-3.14).
-fn own_annotations<'py>(klass: &Bound<'py, PyAny>) -> PyResult<Vec<(String, Bound<'py, PyAny>)>> {
-    let annotations = klass
-        .py()
-        .import("inspect")?
-        .call_method1("get_annotations", (klass,))?;
-    mapping_items(&annotations)
-}
-
-fn is_field_instance(value: &Bound<'_, PyAny>, field_class: &Bound<'_, PyAny>) -> PyResult<bool> {
-    value.is_instance(field_class)
-}
-
-fn field_resolver<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let resolver = value.getattr("resolver")?;
-    if resolver.is_none() {
-        Ok(None)
-    } else {
-        Ok(Some(resolver))
-    }
-}
-
-fn resolver_return_type_repr(resolver: &Bound<'_, PyAny>) -> Option<String> {
-    let annotations = resolver.getattr("__annotations__").ok()?;
-    let items = mapping_items(&annotations).ok()?;
-    let (_, return_annotation) = items.into_iter().find(|(name, _)| name == "return")?;
-    return_annotation.str().ok()?.extract::<String>().ok()
-}
-
-/// Introspects a decorated class (`__mro__`, `__annotations__`, class `__dict__`) and builds
-/// its `TypeDefinition`, tagged by `kind`. Called by `bramble._type._process_type` once per
-/// decorated class -- cross-type validation (interface field contracts, directive locations)
-/// is deferred to `Schema()` (Task 8b), since it needs the whole type graph, not just this class.
+/// Builds `cls`'s `TypeDefinition`, tagged by `kind`. Called by `bramble._type._process_type`
+/// once per decorated class, after it has already been turned into a dataclass -- cross-type
+/// validation (interface field contracts, directive locations) is deferred to `Schema()`
+/// (Task 8b), since it needs the whole type graph, not just this class.
 #[pyfunction]
 #[pyo3(signature = (cls, *, kind, name=None, description=None, directives, one_of=false))]
 #[allow(clippy::too_many_arguments)]
@@ -119,62 +100,7 @@ pub fn process_type(
     let _ = directives;
 
     let type_kind = parse_kind(kind)?;
-
-    let field_class = py.import("bramble._type")?.getattr("Field")?;
-    let mro: Vec<Bound<PyAny>> = cls.getattr("__mro__")?.try_iter()?.collect::<PyResult<_>>()?;
-
-    let mut fields: Vec<FieldDefinition> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-
-    // Base-to-derived so a subclass's own annotation/override wins over its parent's.
-    for klass in mro.iter().rev() {
-        for (field_name, annotation) in own_annotations(klass)? {
-            if field_name.starts_with("__") {
-                continue;
-            }
-
-            let type_repr = annotation.str().ok().and_then(|s| s.extract::<String>().ok());
-            let attribute = cls.getattr(field_name.as_str()).ok();
-            let has_resolver = match &attribute {
-                Some(value) if is_field_instance(value, &field_class)? => {
-                    field_resolver(value)?.is_some()
-                }
-                _ => false,
-            };
-
-            fields.retain(|f| f.name != field_name);
-            fields.push(FieldDefinition {
-                name: field_name.clone(),
-                type_repr,
-                has_resolver,
-            });
-            seen.insert(field_name);
-        }
-    }
-
-    // Method-style fields: a `Field` instance sitting directly in a class's `__dict__`
-    // (via `@bramble.field` on a method) that has no matching variable annotation.
-    for klass in mro.iter().rev() {
-        let class_dict = klass.getattr("__dict__")?;
-        for (attribute_name, value) in mapping_items(&class_dict)? {
-            if seen.contains(&attribute_name) || attribute_name.starts_with("__") {
-                continue;
-            }
-            if !is_field_instance(&value, &field_class)? {
-                continue;
-            }
-            let Some(resolver) = field_resolver(&value)? else {
-                continue;
-            };
-
-            fields.push(FieldDefinition {
-                name: attribute_name.clone(),
-                type_repr: resolver_return_type_repr(&resolver),
-                has_resolver: true,
-            });
-            seen.insert(attribute_name);
-        }
-    }
+    let fields = read_fields(py, cls)?;
 
     if type_kind == TypeKind::Input
         && let Some(bad_field) = fields.iter().find(|f| f.has_resolver)

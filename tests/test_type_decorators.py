@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 import bramble
@@ -139,3 +141,82 @@ def test_bare_and_parameterized_type_decorator() -> None:
     assert Bare.__bramble_type_info__.name == "Bare"
     assert Parameterized.__bramble_type_info__.name == "Custom"
     assert Parameterized.__bramble_type_info__.description == "a custom type"
+
+
+def test_decorated_types_are_real_dataclasses() -> None:
+    @bramble.interface
+    class Shape:
+        radius: float
+
+    @bramble.type
+    class Circle(Shape):
+        color: str
+
+        @bramble.field
+        def area(self) -> float:
+            return 3.14159 * self.radius**2
+
+    assert dataclasses.is_dataclass(Shape)
+    assert dataclasses.is_dataclass(Circle)
+
+    circle = Circle(radius=2.0, color="red")
+    assert circle.radius == 2.0
+    assert circle.color == "red"
+    assert circle.area() == pytest.approx(12.566, abs=1e-3)
+
+    # kw_only=True: no positional construction, even across inheritance
+    with pytest.raises(TypeError):
+        Circle(2.0, "red")  # type: ignore[call-arg]
+
+
+def test_input_types_are_constructible() -> None:
+    @bramble.input(one_of=True)
+    class Filter:
+        by_id: int | None = None
+        by_name: str | None = None
+
+    filter_by_id = Filter(by_id=5)
+    assert filter_by_id.by_id == 5
+    assert filter_by_id.by_name is None
+
+
+def test_resolver_fields_excluded_from_repr_and_eq() -> None:
+    @bramble.type
+    class Circle:
+        radius: float
+
+        @bramble.field
+        def area(self) -> float:
+            return 3.14159 * self.radius**2
+
+    first = Circle(radius=2.0)
+    second = Circle(radius=2.0)
+
+    assert first == second
+    assert "area" not in repr(first)
+    assert "radius=2.0" in repr(first)
+
+
+def test_resolver_restored_as_callable_after_dataclass_processing() -> None:
+    @bramble.type
+    class Circle:
+        radius: float
+
+        @bramble.field
+        def area(self) -> float:
+            return 3.14159 * self.radius**2
+
+    # dataclasses.dataclass() strips a resolver-backed field's raw class attribute
+    # (it has no usable default); bramble must restore it so the method still works.
+    assert callable(Circle.area)
+    assert Circle(radius=1.0).area() == pytest.approx(3.14159, abs=1e-5)
+
+
+def test_method_style_field_without_return_annotation_fails_to_build() -> None:
+    with pytest.raises(bramble.SchemaError):
+
+        @bramble.type
+        class Broken:
+            @bramble.field
+            def broken(self):
+                return 1
