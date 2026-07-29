@@ -110,6 +110,22 @@ BareMediaItem = Union[_Audio, _Video]
 
 Base64 = NewType("Base64", bytes)
 
+Slug = NewType("Slug", str)
+
+
+def _slugify(value: str) -> str:
+    return value.lower().replace(" ", "-")
+
+
+@bramble.input
+class _PostFilter:
+    slug: Slug
+
+
+@bramble.input
+class _PostFilters:
+    filters: list[_PostFilter]
+
 
 @bramble.type
 class _InfoInner:
@@ -694,6 +710,62 @@ def test_custom_scalar_serialize_and_parse_value_round_trip() -> None:
     result = schema.execute('query { encoded(data: "aGVsbG8=") }')
 
     assert result == {"data": {"encoded": "aGVsbG8="}}
+
+
+def test_custom_scalar_input_type_used_only_as_an_argument_is_discovered() -> None:
+    """A type reachable *only* through a resolver's own argument (never a field's return type)
+    used to be invisible to `Schema()`'s graph walker entirely -- neither validated nor available
+    for argument coercion.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def filtered(filter: _PostFilter) -> str:
+            return filter.slug
+
+    config = SchemaConfig(
+        scalar_map={Slug: bramble.scalar(name="Slug", serialize=lambda v: v, parse_value=_slugify)}
+    )
+    schema = bramble.Schema(query=Query, types=[_PostFilter], config=config)
+
+    assert "_PostFilter" in schema.types_by_name
+    result = schema.execute('query { filtered(filter: {slug: "Hello World"}) }')
+    assert result == {"data": {"filtered": "hello-world"}}
+
+
+def test_scalar_coercion_recurses_into_list_arguments() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def slugs(values: list[Slug]) -> list[str]:
+            return list(values)
+
+    config = SchemaConfig(
+        scalar_map={Slug: bramble.scalar(name="Slug", serialize=lambda v: v, parse_value=_slugify)}
+    )
+    schema = bramble.Schema(query=Query, config=config)
+    result = schema.execute('query { slugs(values: ["Hello World", "Another One"]) }')
+
+    assert result == {"data": {"slugs": ["hello-world", "another-one"]}}
+
+
+def test_scalar_coercion_recurses_into_nested_input_object_lists() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def filtered_many(filters: _PostFilters) -> list[str]:
+            return [f.slug for f in filters.filters]
+
+    config = SchemaConfig(
+        scalar_map={Slug: bramble.scalar(name="Slug", serialize=lambda v: v, parse_value=_slugify)}
+    )
+    schema = bramble.Schema(query=Query, types=[_PostFilter, _PostFilters], config=config)
+    result = schema.execute(
+        'query { filteredMany(filters: {filters: [{slug: "Hello World"}, {slug: "Another One"}]}) }'
+    )
+
+    assert result == {"data": {"filteredMany": ["hello-world", "another-one"]}}
 
 
 # --- Info / selected_fields --------------------------------------------------------------------

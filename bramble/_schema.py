@@ -172,6 +172,26 @@ def _discover_type(cls: _type, *, graph: _SchemaGraph) -> None:
     for annotation in hints.values():
         _discover_annotation(annotation, graph=graph)
 
+    # `hints` above only ever covers the class's own dataclass FIELD annotations (a resolver's
+    # *return* type, injected by `_ensure_field_annotations`) -- a type used only as one of a
+    # resolver's own *arguments* (`def resolver(filter: SomeInput) -> ...`) never appears there,
+    # since it's a function parameter, not a class attribute. Without this, such a type would
+    # never make it into `types_by_name`/the compiled schema at all, silently breaking both query
+    # validation (an input's own field shape never gets checked) and argument coercion (the
+    # resolver would only ever receive a raw dict, never a real instance of the input class).
+    for field_info in info.fields:
+        if not field_info.has_resolver:
+            continue
+        resolver = getattr(cls, field_info.name, None)
+        if resolver is None:
+            continue
+        try:
+            resolver_hints = typing.get_type_hints(resolver, localns=graph.localns, include_extras=True)
+        except NameError:
+            continue  # same graceful degradation as field-type resolution elsewhere
+        for annotation in resolver_hints.values():
+            _discover_annotation(annotation, graph=graph)
+
 
 def _validate_interface_implementations(graph: _SchemaGraph) -> None:
     """Per §4/§8b: an interface's field contract is checked once the whole graph is known. Since

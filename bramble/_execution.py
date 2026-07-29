@@ -150,26 +150,53 @@ def _map_arguments(
     return kwargs
 
 
-def _inner_type_name(type_info: "GraphQLTypeInfo") -> str | None:
-    node = type_info
-    while node.name is None and node.of_type is not None:
-        node = node.of_type
-    return node.name
-
-
-def _coerce_argument_value(argument_info: "ArgumentInfo", value: Any, schema: "Schema") -> Any:
-    """Applies a registered custom scalar's `parse_value` hook (§3b) to a resolved argument value,
-    if the argument's own named type matches one. Only checked at the argument's own top level --
-    a custom scalar nested inside a list/input-object argument isn't coerced, a deliberate scope
-    limit (recursing through arbitrary argument shapes is significantly more machinery for a case
-    bramble's own test suite doesn't yet need).
+def _coerce_value(type_info: "GraphQLTypeInfo", value: Any, schema: "Schema") -> Any:
+    """Coerces a resolved argument value to what a resolver should actually receive, recursing
+    through the value's own declared type structure: `NonNull`/`List` wrapping (each list item
+    coerced individually); a registered custom scalar's `parse_value` hook (§3b); and an input
+    object's own fields (each coerced by *that field's* declared type, matched by the same
+    graphql_name-or-camelCase convention field/argument lookup uses everywhere else -- an input
+    type is schema-registered the same way an object type is, just with `kind == "input"`), with
+    the coerced dict then instantiated as a real instance of the `@bramble.input`-decorated class
+    -- `graphql_value_to_python` only ever produces a plain dict for an input object literal, so
+    without this step a resolver typed `Parent[SomeInput]`/`filter: SomeInput` would always
+    receive a bare dict instead, keyed by GraphQL name rather than Python attribute name.
     """
     if value is None:
-        return value
-    type_name = _inner_type_name(argument_info.type_info)
-    scalar_definition = schema.scalars_by_name.get(type_name) if type_name is not None else None
+        return None
+
+    if type_info.kind == "NON_NULL":
+        return _coerce_value(type_info.of_type, value, schema)
+
+    if type_info.kind == "LIST":
+        return [_coerce_value(type_info.of_type, item, schema) for item in value]
+
+    type_name = type_info.name
+    assert type_name is not None  # NAMED is the only remaining kind, and it always carries a name.
+
+    scalar_definition = schema.scalars_by_name.get(type_name)
     if scalar_definition is not None and scalar_definition.parse_value is not None:
         return scalar_definition.parse_value(value)
+
+    input_type = schema.types_by_name.get(type_name)
+    if input_type is not None and input_type.__bramble_type_info__.kind == "input" and isinstance(value, dict):
+        fields_by_key = {
+            _effective_name(field_info.name, field_info.graphql_name, auto_camel_case=schema.config.auto_camel_case): (
+                field_info
+            )
+            for field_info in input_type.__bramble_type_info__.fields
+        }
+        kwargs = {}
+        for key, item_value in value.items():
+            field_info = fields_by_key.get(key)
+            if field_info is None:
+                # Shouldn't happen post-validation (an unknown input field is a validation-time
+                # error) -- pass through defensively rather than silently dropping the key.
+                kwargs[key] = item_value
+            else:
+                kwargs[field_info.name] = _coerce_value(field_info.type_info, item_value, schema)
+        return input_type(**kwargs)
+
     return value
 
 
@@ -183,7 +210,7 @@ def _bind_resolver_kwargs(
     kwargs = _map_arguments(field_info.arguments, lowered_field.arguments, auto_camel_case=schema.config.auto_camel_case)
     for argument in field_info.arguments:
         if argument.name in kwargs:
-            kwargs[argument.name] = _coerce_argument_value(argument, kwargs[argument.name], schema)
+            kwargs[argument.name] = _coerce_value(argument.type_info, kwargs[argument.name], schema)
     if field_info.parent_parameter is not None:
         kwargs[field_info.parent_parameter] = parent_value
     if field_info.info_parameter is not None:
