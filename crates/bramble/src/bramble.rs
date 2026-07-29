@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 
+mod error;
 mod resolver_binding;
 mod type_info;
 
@@ -13,5 +14,6 @@ fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "SchemaError",
         module.py().get_type::<type_info::SchemaError>(),
     )?;
+    module.add("GraphQLError", module.py().get_type::<error::GraphQLError>())?;
     Ok(())
 }

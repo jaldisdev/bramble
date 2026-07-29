@@ -22,6 +22,7 @@ impl From<async_graphql_parser::Pos> for Location {
 pub enum ErrorCode {
     GraphqlParseFailed,
     GraphqlValidationFailed,
+    InterfaceTypeResolutionFailed,
 }
 
 #[derive(Serialize, Debug, Clone)]
