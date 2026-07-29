@@ -48,3 +48,34 @@ pub struct UnionDefinition {
     pub member_type_reprs: Vec<String>,
     pub has_custom_resolve_type: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SchemaDirectiveLocation {
+    Schema,
+    Scalar,
+    Object,
+    FieldDefinition,
+    ArgumentDefinition,
+    Interface,
+    Union,
+    Enum,
+    EnumValue,
+    InputObject,
+    InputFieldDefinition,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DirectiveFieldDefinition {
+    pub name: String,
+    pub graphql_name: Option<String>,
+    pub type_repr: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaDirectiveDefinition {
+    pub name: String,
+    pub description: Option<String>,
+    pub locations: Vec<SchemaDirectiveLocation>,
+    pub fields: Vec<DirectiveFieldDefinition>,
+}

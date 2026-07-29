@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 mod error;
 mod resolver_binding;
+mod schema_directive_info;
 mod type_info;
 mod typing_utils;
 mod union_info;
@@ -19,5 +20,11 @@ fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("GraphQLError", module.py().get_type::<error::GraphQLError>())?;
     module.add_function(wrap_pyfunction!(union_info::describe_union, module)?)?;
     module.add_class::<union_info::PyUnionInfo>()?;
+    module.add_function(wrap_pyfunction!(
+        schema_directive_info::describe_schema_directive,
+        module
+    )?)?;
+    module.add_class::<schema_directive_info::PySchemaDirectiveInfo>()?;
+    module.add_class::<schema_directive_info::PyDirectiveFieldInfo>()?;
     Ok(())
 }

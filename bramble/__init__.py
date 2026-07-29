@@ -5,3 +5,4 @@ from bramble._scalar import ScalarDefinition, scalar  # noqa: F401
 from bramble._schema import Schema  # noqa: F401
 from bramble._type import Field, field, input, interface, mutation, type  # noqa: F401
 from bramble._union import UnionDefinition, union  # noqa: F401
+from bramble.schema_directive import directive_field, schema_directive  # noqa: F401

@@ -7,8 +7,15 @@ from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 from bramble._bramble import SchemaError, process_type
+from bramble.schema_directive import Location
 
 _type = type  # capture the builtin before `type` (below) shadows this module's name for it
+
+_LOCATION_BY_KIND: dict[str, Location] = {
+    "type": Location.OBJECT,
+    "interface": Location.INTERFACE,
+    "input": Location.INPUT_OBJECT,
+}
 
 
 class Field(dataclasses.Field):
@@ -139,6 +146,24 @@ def _restore_resolvers(cls: _type) -> None:
             setattr(cls, dataclass_field.name, resolver)
 
 
+def _validate_directive_locations(directives: Sequence[object], kind: str, cls_name: str) -> None:
+    """A schema directive declares which locations it's legal to use at (§6); check the
+    directives applied here against the location that matches `kind`. Only recognizes objects
+    produced by `@bramble.schema_directive` (anything else -- e.g. a future non-bramble
+    metadata object -- is skipped rather than rejected).
+    """
+    required_location = _LOCATION_BY_KIND[kind]
+    for directive in directives:
+        info = getattr(_type(directive), "__bramble_directive_info__", None)
+        if info is None:
+            continue
+        if required_location.value not in info.locations:
+            raise SchemaError(
+                f"directive '@{info.name}' cannot be applied to '{cls_name}' ({required_location.value}); "
+                f"declared locations: {', '.join(info.locations)}"
+            )
+
+
 def _process_type(
     cls: _type | None,
     *,
@@ -152,6 +177,7 @@ def _process_type(
         _ensure_field_annotations(cls)
         cls = dataclasses.dataclass(cls, kw_only=True)
         _restore_resolvers(cls)
+        _validate_directive_locations(directives, kind, cls.__name__)
 
         cls.__bramble_type_info__ = process_type(
             cls,
