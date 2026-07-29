@@ -7,7 +7,7 @@ use async_graphql_parser::types::{
 use async_graphql_value::{Name, Value};
 use serde_json::Value as JsonValue;
 
-use crate::error::{ErrorCode, GraphQLError};
+use crate::error::{ErrorCode, GraphQLError, GraphQLResult};
 
 /// A field that survived `@skip`/`@include` pruning, with fragment spreads and inline fragments
 /// already flattened into their parent's selection list -- pruning is orthogonal to type-
@@ -23,27 +23,27 @@ fn resolve_boolean_argument(
     value: &Value,
     variable_values: &HashMap<String, JsonValue>,
     directive_name: &str,
-) -> Result<bool, GraphQLError> {
+) -> GraphQLResult<bool> {
     match value {
         Value::Boolean(condition) => Ok(*condition),
         Value::Variable(name) => {
             let name = name.as_str();
             match variable_values.get(name) {
                 Some(JsonValue::Bool(condition)) => Ok(*condition),
-                Some(_) => Err(GraphQLError::new(
+                Some(_) => Err(Box::new(GraphQLError::new(
                     format!("variable '${name}' used in @{directive_name}(if: ...) must be a boolean"),
                     ErrorCode::GraphqlValidationFailed,
-                )),
-                None => Err(GraphQLError::new(
+                ))),
+                None => Err(Box::new(GraphQLError::new(
                     format!("@{directive_name}(if: ${name}) references undefined variable '${name}'"),
                     ErrorCode::GraphqlValidationFailed,
-                )),
+                ))),
             }
         }
-        _ => Err(GraphQLError::new(
+        _ => Err(Box::new(GraphQLError::new(
             format!("@{directive_name}(if: ...) argument must be a boolean or a variable"),
             ErrorCode::GraphqlValidationFailed,
-        )),
+        ))),
     }
 }
 
@@ -54,7 +54,7 @@ fn resolve_boolean_argument(
 fn should_prune(
     directives: &[Positioned<async_graphql_parser::types::Directive>],
     variable_values: &HashMap<String, JsonValue>,
-) -> Result<bool, GraphQLError> {
+) -> GraphQLResult<bool> {
     for directive in directives {
         let name = directive.node.name.node.as_str();
         if name != "skip" && name != "include" {
@@ -68,7 +68,10 @@ fn should_prune(
             .find(|(arg_name, _)| arg_name.node.as_str() == "if")
             .map(|(_, value)| &value.node)
             .ok_or_else(|| {
-                GraphQLError::new(format!("@{name} requires an 'if' argument"), ErrorCode::GraphqlValidationFailed)
+                Box::new(GraphQLError::new(
+                    format!("@{name} requires an 'if' argument"),
+                    ErrorCode::GraphqlValidationFailed,
+                ))
             })?;
 
         let condition = resolve_boolean_argument(if_argument, variable_values, name)?;
@@ -83,7 +86,7 @@ fn prune_selection_set(
     selection_set: &SelectionSet,
     fragments: &HashMap<Name, Positioned<FragmentDefinition>>,
     variable_values: &HashMap<String, JsonValue>,
-) -> Result<Vec<PrunedField>, GraphQLError> {
+) -> GraphQLResult<Vec<PrunedField>> {
     let mut result = Vec::new();
 
     for selection in &selection_set.items {
@@ -111,10 +114,10 @@ fn prune_selection_set(
                 }
                 let fragment_name = &spread.node.fragment_name.node;
                 let fragment = fragments.get(fragment_name).ok_or_else(|| {
-                    GraphQLError::new(
+                    Box::new(GraphQLError::new(
                         format!("undefined fragment '{fragment_name}'"),
                         ErrorCode::GraphqlValidationFailed,
-                    )
+                    ))
                 })?;
                 if should_prune(&fragment.node.directives, variable_values)? {
                     continue;
@@ -132,7 +135,7 @@ fn prune_selection_set(
 fn select_operation<'a>(
     document: &'a ExecutableDocument,
     operation_name: Option<&str>,
-) -> Result<&'a OperationDefinition, GraphQLError> {
+) -> GraphQLResult<&'a OperationDefinition> {
     match operation_name {
         Some(target) => document
             .operations
@@ -140,16 +143,19 @@ fn select_operation<'a>(
             .find(|(name, _)| name.map(Name::as_str) == Some(target))
             .map(|(_, operation)| &operation.node)
             .ok_or_else(|| {
-                GraphQLError::new(format!("no operation named '{target}'"), ErrorCode::GraphqlValidationFailed)
+                Box::new(GraphQLError::new(
+                    format!("no operation named '{target}'"),
+                    ErrorCode::GraphqlValidationFailed,
+                ))
             }),
         None => {
             let operations: Vec<_> = document.operations.iter().collect();
             match operations.as_slice() {
                 [(_, operation)] => Ok(&operation.node),
-                _ => Err(GraphQLError::new(
+                _ => Err(Box::new(GraphQLError::new(
                     "document contains multiple operations; operation_name is required",
                     ErrorCode::GraphqlValidationFailed,
-                )),
+                ))),
             }
         }
     }
@@ -163,7 +169,7 @@ pub fn prune_document(
     document: &ExecutableDocument,
     variable_values: &HashMap<String, JsonValue>,
     operation_name: Option<&str>,
-) -> Result<Vec<PrunedField>, GraphQLError> {
+) -> GraphQLResult<Vec<PrunedField>> {
     let operation = select_operation(document, operation_name)?;
     prune_selection_set(&operation.selection_set.node, &document.fragments, variable_values)
 }

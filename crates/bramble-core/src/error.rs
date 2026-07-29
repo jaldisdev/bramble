@@ -45,6 +45,11 @@ pub struct GraphQLError {
     pub extensions: ErrorExtensions,
 }
 
+/// `GraphQLError` is intentionally not `Copy`-small (it carries an owned message, optional
+/// locations/path, and an extensions map) -- boxing it in the `Err` position keeps the `Ok` path
+/// (the overwhelmingly common case) from paying for that size in every `Result`.
+pub type GraphQLResult<T> = Result<T, Box<GraphQLError>>;
+
 impl GraphQLError {
     pub fn new(message: impl Into<String>, code: ErrorCode) -> Self {
         Self {

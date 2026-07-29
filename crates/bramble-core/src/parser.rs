@@ -1,11 +1,11 @@
 use async_graphql_parser::types::ExecutableDocument;
 
-use crate::error::{ErrorCode, GraphQLError, Location};
+use crate::error::{ErrorCode, GraphQLError, GraphQLResult, Location};
 
-pub fn parse_document(source: &str) -> Result<ExecutableDocument, GraphQLError> {
+pub fn parse_document(source: &str) -> GraphQLResult<ExecutableDocument> {
     async_graphql_parser::parse_query(source).map_err(|error| {
         let locations = error.positions().map(Location::from).collect();
-        GraphQLError::new(error.to_string(), ErrorCode::GraphqlParseFailed).with_locations(locations)
+        Box::new(GraphQLError::new(error.to_string(), ErrorCode::GraphqlParseFailed).with_locations(locations))
     })
 }
 

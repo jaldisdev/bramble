@@ -18,7 +18,7 @@ create_exception!(
 /// exception base), so errors raised natively during parsing/pruning look identical to ones
 /// raised from Python. Reuses the `ErrorCode` enum's own serde rendering (`SCREAMING_SNAKE_CASE`)
 /// rather than hand-duplicating a second name-to-string mapping.
-pub fn raise(py: Python<'_>, error: CoreGraphQLError) -> PyErr {
+pub fn raise(py: Python<'_>, error: Box<CoreGraphQLError>) -> PyErr {
     match build_python_error(py, &error) {
         Ok(instance) => PyErr::from_value(instance),
         Err(construction_error) => construction_error,
