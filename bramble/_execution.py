@@ -92,7 +92,7 @@ def _build_info(
     *,
     field_name: str,
     path: Path,
-    lowered_field: "LoweredField",
+    selections: Sequence["LoweredField"],
     state: _ExecutionState,
 ) -> Info:
     info = Info()
@@ -103,7 +103,7 @@ def _build_info(
     info.variable_values = state.variable_values
     info.query = state.query
     info.path = path
-    info.selected_fields = _selected_fields(lowered_field.selections)
+    info.selected_fields = _selected_fields(selections)
     info.schema = state.schema
     return info
 
@@ -335,6 +335,7 @@ async def _complete_value(
     type_info: "GraphQLTypeInfo",
     raw_value: Any,
     lowered_field: "LoweredField",
+    selections: Sequence["LoweredField"],
     path: Path,
     state: _ExecutionState,
 ) -> Any:
@@ -344,13 +345,23 @@ async def _complete_value(
     `_PropagateNull` when a non-null boundary is violated, after recording the responsible error --
     the caller (a list item's loop, or `_execute_field`) decides from there whether it must keep
     propagating (its own slot is also non-null) or can absorb the failure as `None`.
+
+    `selections` is `lowered_field`'s sub-selections *merged* across every occurrence of this
+    response key (§8's `CollectFields`) -- kept as a separate parameter rather than always reading
+    `lowered_field.selections` directly, since `lowered_field` here is only ever the *first*
+    occurrence (used for identity: field name, arguments, directives), not the full merged set.
     """
     if type_info.kind == "NON_NULL":
         if raw_value is None:
             state.errors.append(_build_error("Cannot return null for non-nullable field.", path, lowered_field))
             raise _PropagateNull
         return await _complete_value(
-            type_info=type_info.of_type, raw_value=raw_value, lowered_field=lowered_field, path=path, state=state
+            type_info=type_info.of_type,
+            raw_value=raw_value,
+            lowered_field=lowered_field,
+            selections=selections,
+            path=path,
+            state=state,
         )
 
     if raw_value is None:
@@ -365,6 +376,7 @@ async def _complete_value(
                     type_info=type_info.of_type,
                     raw_value=item,
                     lowered_field=lowered_field,
+                    selections=selections,
                     path=item_path,
                     state=state,
                 )
@@ -379,10 +391,10 @@ async def _complete_value(
     assert type_name is not None  # NAMED is the only remaining kind, and it always carries a name.
 
     if type_name in state.schema.types_by_name or type_name in state.schema.union_members_by_name:
-        info = _build_info(field_name=lowered_field.field_name, path=path, lowered_field=lowered_field, state=state)
+        info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
         concrete_type = _resolve_concrete_type(type_name, raw_value, state.schema, info)
         return await _execute_selection_set(
-            selections=lowered_field.selections,
+            selections=selections,
             concrete_type=concrete_type,
             parent_value=raw_value,
             path=path,
@@ -396,13 +408,14 @@ async def _execute_field(
     *,
     field_info: "FieldInfo",
     lowered_field: "LoweredField",
+    selections: Sequence["LoweredField"],
     parent_value: Any,
     concrete_type: type,
     path: Path,
     state: _ExecutionState,
 ) -> Any:
     is_non_null = field_info.type_info.kind == "NON_NULL"
-    info = _build_info(field_name=lowered_field.field_name, path=path, lowered_field=lowered_field, state=state)
+    info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
 
     try:
         raw_value = await _resolve_field_value(field_info, lowered_field, parent_value, info, concrete_type, state.schema)
@@ -416,11 +429,33 @@ async def _execute_field(
         return None
 
     try:
-        return await _complete_value(type_info=field_info.type_info, raw_value=raw_value, lowered_field=lowered_field, path=path, state=state)
+        return await _complete_value(
+            type_info=field_info.type_info,
+            raw_value=raw_value,
+            lowered_field=lowered_field,
+            selections=selections,
+            path=path,
+            state=state,
+        )
     except _PropagateNull:
         if is_non_null:
             raise
         return None
+
+
+def _group_by_response_key(selections: Sequence["LoweredField"]) -> dict[str, list["LoweredField"]]:
+    """Implements GraphQL's `CollectFields` merge (§8): the same response key can legally appear
+    more than once at one nesting level -- once directly, and/or again via one or more applicable
+    fragments -- and every occurrence's sub-selections must be merged, not have a later occurrence
+    silently overwrite an earlier one's data. The first occurrence's own identity (field name,
+    arguments, directives) is used for the merged field; bramble doesn't validate that repeated
+    occurrences actually agree on these (an accepted approximation, matching
+    `check_value_matches_type`'s own documented scope elsewhere) -- only their selections merge.
+    """
+    groups: dict[str, list["LoweredField"]] = {}
+    for selection in selections:
+        groups.setdefault(selection.response_key, []).append(selection)
+    return groups
 
 
 async def _execute_selection_set(
@@ -432,34 +467,39 @@ async def _execute_selection_set(
     state: _ExecutionState,
 ) -> dict[str, Any]:
     """Executes one selection set against a known concrete type + resolved parent value (§8's
-    per-field algorithm). Fields run sequentially, not concurrently -- always correct for a
-    mutation's root selection set (which the spec requires to be serial anyway), and a valid
-    (if not maximally parallel) choice for queries too; parallelizing is a possible future
-    optimization, not a correctness requirement. Raises `_PropagateNull` if the *entire* selection
-    set must be discarded, i.e. one of its own non-null fields propagated up to here.
+    per-field algorithm), after merging any same-response-key occurrences (`_group_by_response_key`).
+    Fields run sequentially, not concurrently -- always correct for a mutation's root selection set
+    (which the spec requires to be serial anyway), and a valid (if not maximally parallel) choice
+    for queries too; parallelizing is a possible future optimization, not a correctness requirement.
+    Raises `_PropagateNull` if the *entire* selection set must be discarded, i.e. one of its own
+    non-null fields propagated up to here.
     """
-    result: dict[str, Any] = {}
-    for lowered_field in _applicable_selections(selections, concrete_type, state.schema):
-        response_key = lowered_field.response_key
+    grouped = _group_by_response_key(_applicable_selections(selections, concrete_type, state.schema))
 
-        if lowered_field.field_name == "__typename":
+    result: dict[str, Any] = {}
+    for response_key, occurrences in grouped.items():
+        primary = occurrences[0]
+
+        if primary.field_name == "__typename":
             result[response_key] = concrete_type.__bramble_type_info__.name
             continue
 
         field_info = _find_field_info(
-            concrete_type, lowered_field.field_name, auto_camel_case=state.schema.config.auto_camel_case
+            concrete_type, primary.field_name, auto_camel_case=state.schema.config.auto_camel_case
         )
         if field_info is None:
             raise GraphQLError(
-                f"field '{lowered_field.field_name}' does not exist on type "
+                f"field '{primary.field_name}' does not exist on type "
                 f"'{concrete_type.__bramble_type_info__.name}'",
                 code=ErrorCode.UNKNOWN_FIELD,
             )
 
+        merged_selections = [selection for occurrence in occurrences for selection in occurrence.selections]
         field_path = Path(key=response_key, prev=path)
         result[response_key] = await _execute_field(
             field_info=field_info,
-            lowered_field=lowered_field,
+            lowered_field=primary,
+            selections=merged_selections,
             parent_value=parent_value,
             concrete_type=concrete_type,
             path=field_path,

@@ -23,6 +23,7 @@ from bramble.schema.config import SchemaConfig
 @bramble.type
 class _Author:
     name: str
+    email: str = "ada@example.com"
 
 
 @bramble.type
@@ -139,6 +140,41 @@ def test_nested_object_field() -> None:
     result = schema.execute("query { post { title author { name } } }")
 
     assert result == {"data": {"post": {"title": "Hello", "author": {"name": "Ada"}}}}
+
+
+def test_overlapping_fragments_merge_sub_selections_for_the_same_response_key() -> None:
+    """§8's `CollectFields`: `post` appears twice -- once directly, once via a fragment -- each
+    requesting a *different* sub-field of `author`. Both must appear in the result; the second
+    occurrence must not silently discard the first's sub-selection.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def post() -> _Post:
+            return _Post(title="Hello", author=_Author(name="Ada", email="ada@example.com"))
+
+    schema = bramble.Schema(query=Query)
+    result = schema.execute(
+        """
+        query {
+            post {
+                title
+                author { name }
+            }
+            ...F
+        }
+        fragment F on Query {
+            post {
+                author { email }
+            }
+        }
+        """
+    )
+
+    assert result == {
+        "data": {"post": {"title": "Hello", "author": {"name": "Ada", "email": "ada@example.com"}}}
+    }
 
 
 def test_list_field() -> None:
