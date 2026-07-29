@@ -20,7 +20,14 @@ class Field(dataclasses.Field):
         description: str | None = None,
         directives: Sequence[object] = (),
         extensions: Sequence[object] = (),
+        default: Any = dataclasses.MISSING,
+        default_factory: Any = dataclasses.MISSING,
     ) -> None:
+        if default is not dataclasses.MISSING and default_factory is not dataclasses.MISSING:
+            raise SchemaError("a field cannot specify both 'default' and 'default_factory'")
+        if resolver is not None and (default is not dataclasses.MISSING or default_factory is not dataclasses.MISSING):
+            raise SchemaError("a field with a resolver cannot also declare a default value")
+
         # A resolver-backed field is computed at execution time, not user-supplied, so it's
         # excluded from the generated __init__/__repr__/__eq__. This is also why Field needs to
         # subclass dataclasses.Field at all: dataclasses.dataclass() only recognizes a class
@@ -33,8 +40,8 @@ class Field(dataclasses.Field):
             kwargs["doc"] = None
 
         super().__init__(
-            default=dataclasses.MISSING,
-            default_factory=dataclasses.MISSING,
+            default=default,
+            default_factory=default_factory,
             init=is_basic_field,
             repr=is_basic_field,
             compare=is_basic_field,
@@ -60,6 +67,8 @@ class Field(dataclasses.Field):
 
     @resolver.setter
     def resolver(self, resolver: Callable[..., Any]) -> None:
+        if self.default is not dataclasses.MISSING or self.default_factory is not dataclasses.MISSING:
+            raise SchemaError("a field with a resolver cannot also declare a default value")
         self._resolver = resolver
         self.init = False
         self.repr = False
@@ -77,6 +86,8 @@ def field(
     description: str | None = None,
     directives: Sequence[object] = (),
     extensions: Sequence[object] = (),
+    default: Any = dataclasses.MISSING,
+    default_factory: Any = dataclasses.MISSING,
 ) -> Any:
     return Field(
         resolver,
@@ -84,6 +95,8 @@ def field(
         description=description,
         directives=directives,
         extensions=extensions,
+        default=default,
+        default_factory=default_factory,
     )
 
 

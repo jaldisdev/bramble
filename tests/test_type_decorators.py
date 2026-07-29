@@ -220,3 +220,34 @@ def test_method_style_field_without_return_annotation_fails_to_build() -> None:
             @bramble.field
             def broken(self):
                 return 1
+
+
+def test_field_default_and_default_factory() -> None:
+    @bramble.type
+    class Config:
+        timeout: int = bramble.field(description="request timeout", default=30)
+        tags: list = bramble.field(default_factory=list)
+
+    default_config = Config()
+    assert default_config.timeout == 30
+    assert default_config.tags == []
+
+    overridden = Config(timeout=60, tags=["a"])
+    assert overridden.timeout == 60
+    assert overridden.tags == ["a"]
+
+
+def test_field_default_and_default_factory_are_mutually_exclusive() -> None:
+    with pytest.raises(bramble.SchemaError):
+        bramble.field(default=1, default_factory=list)
+
+
+def test_field_resolver_and_default_are_mutually_exclusive() -> None:
+    with pytest.raises(bramble.SchemaError):
+        bramble.field(resolver=lambda: 1, default=5)
+
+    with pytest.raises(bramble.SchemaError):
+        # a default set up front, then a resolver attached afterward via `@field(...)`
+        # on a method -- the conflict must still be caught when applied out of order.
+        deferred = bramble.field(default=5)
+        deferred(lambda self: 1)
