@@ -2,35 +2,45 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeGuard, TypeVar
 
 from bramble._error import GraphQLError, error_to_dict
 from bramble.http.base import BaseRequestProtocol, BaseView
 from bramble.http.exceptions import HTTPException
 from bramble.http.parse_content_type import parse_content_type
 from bramble.http.types import GraphQLRequestData
+from bramble.subscriptions.graphql_transport_ws import GRAPHQL_TRANSPORT_WS_PROTOCOL, GraphQLTransportWSHandler
 
 if TYPE_CHECKING:
     from bramble._schema import Schema
 
 Request = TypeVar("Request")
 Response = TypeVar("Response")
+WebSocketRequest = TypeVar("WebSocketRequest")
+WebSocketResponse = TypeVar("WebSocketResponse")
 
 
-class AsyncBaseHTTPView(BaseView[Request], Generic[Request, Response]):
-    """The async request/response cycle every concrete adapter (ASGI now; a WSGI-based one later,
-    per the roadmap) drives: parse whatever shape the request came in as (GET query params, a
-    single JSON body, a batched JSON array, or a multipart file-upload request) into one or more
-    `GraphQLRequestData`, execute each against `self.schema`, and hand the result(s) back through
-    `create_response`/`create_html_response` for the concrete adapter to turn into its own
-    framework's actual response type.
+class AsyncBaseHTTPView(
+    BaseView[Request], Generic[Request, Response, WebSocketRequest, WebSocketResponse]
+):
+    """The async request/response cycle every concrete adapter (Starlette, raw ASGI, FastAPI,
+    Flask, Django/Channels) drives: parse whatever shape the request came in as (GET query
+    params, a single JSON body, a batched JSON array, or a multipart file-upload request) into one
+    or more `GraphQLRequestData`, execute each against `self.schema`, and hand the result(s) back
+    through `create_response`/`create_html_response` for the concrete adapter to turn into its own
+    framework's actual response type. WebSocket requests are dispatched through the same `run()`
+    entry point (see `is_websocket_request`/`pick_websocket_subprotocol`/
+    `create_websocket_response` below) so a concrete adapter implements one hook set for both
+    transports instead of re-deriving its own branch-and-delegate dance.
 
     Every method below that isn't already implemented is exactly what a concrete adapter must
     supply -- reading the raw body, parsing multipart form fields, building the resolver context/
-    root value, and constructing a real response object are all inherently framework-specific.
+    root value, and constructing a real response/websocket object are all inherently
+    framework-specific.
     """
 
     schema: "Schema"
+    graphql_transport_ws_handler_class: type[GraphQLTransportWSHandler] = GraphQLTransportWSHandler
 
     async def get_body(self, request: Request) -> bytes:
         raise NotImplementedError
@@ -38,16 +48,38 @@ class AsyncBaseHTTPView(BaseView[Request], Generic[Request, Response]):
     async def get_form_data(self, request: Request) -> Mapping[str, Any]:
         raise NotImplementedError
 
-    async def get_context(self, request: Request) -> Any:
+    async def get_context(self, request: Request | WebSocketRequest) -> Any:
         raise NotImplementedError
 
-    async def get_root_value(self, request: Request) -> Any:
+    async def get_root_value(self, request: Request | WebSocketRequest) -> Any:
         return None
 
     def create_response(self, response_data: dict[str, Any] | list[dict[str, Any]]) -> Response:
         raise NotImplementedError
 
     def create_html_response(self, html: str) -> Response:
+        raise NotImplementedError
+
+    def is_websocket_request(self, request: Request | WebSocketRequest) -> TypeGuard[WebSocketRequest]:
+        """Distinguishes a WebSocket handshake request from a plain HTTP one -- a `TypeGuard` so
+        the rest of `run()`'s websocket branch can treat `request` as a `WebSocketRequest` without
+        an explicit cast.
+        """
+        raise NotImplementedError
+
+    async def pick_websocket_subprotocol(self, request: WebSocketRequest) -> str | None:
+        """Returns the one WebSocket subprotocol bramble speaks (`graphql-transport-ws`) if the
+        client offered it, else `None` -- bramble deliberately doesn't implement the legacy
+        `graphql-ws` subprotocol, so there's nothing else to negotiate.
+        """
+        raise NotImplementedError
+
+    async def create_websocket_response(self, request: WebSocketRequest, subprotocol: str | None) -> WebSocketResponse:
+        """Wraps the raw framework request into whatever object satisfies
+        `bramble.subscriptions.graphql_transport_ws.WebSocketProtocol`. Must NOT accept the
+        connection itself -- `GraphQLTransportWSHandler.handle()` calls `accept(subprotocol=...)`
+        exactly once, so accepting here too would double-accept.
+        """
         raise NotImplementedError
 
     def _max_batch_operations(self) -> int | None:
@@ -91,7 +123,25 @@ class AsyncBaseHTTPView(BaseView[Request], Generic[Request, Response]):
             # `errors` list -- still rendered in the same spec shape, just as the whole response.
             return {"data": None, "errors": [error_to_dict(error)]}
 
-    async def run(self, request: Request, protocol_request: BaseRequestProtocol) -> Response:
+    async def _run_websocket(self, request: WebSocketRequest) -> WebSocketResponse:
+        subprotocol = await self.pick_websocket_subprotocol(request)
+        websocket = await self.create_websocket_response(request, subprotocol)
+
+        if subprotocol != GRAPHQL_TRANSPORT_WS_PROTOCOL:
+            await websocket.close(code=4406, reason="Subprotocol not acceptable")  # type: ignore[attr-defined]
+            return websocket
+
+        await self.graphql_transport_ws_handler_class(schema=self.schema, websocket=websocket).handle()  # type: ignore[arg-type]
+        return websocket
+
+    async def run(
+        self, request: Request | WebSocketRequest, protocol_request: BaseRequestProtocol | None = None
+    ) -> Response | WebSocketResponse:
+        if self.is_websocket_request(request):
+            return await self._run_websocket(request)
+
+        assert protocol_request is not None
+
         if not self.is_request_allowed(protocol_request):
             raise HTTPException(405, "GraphQL only supports GET and POST requests")
 

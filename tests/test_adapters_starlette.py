@@ -6,13 +6,15 @@ from collections.abc import AsyncGenerator
 import httpx
 import pytest
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 import bramble
-from bramble.asgi import GraphQL
+from bramble.adapters.starlette import GraphQL
 from bramble.schema.config import SchemaConfig
 
 # Real HTTP requests (via `httpx.ASGITransport`, no actual socket) and real WebSocket sessions
-# (via Starlette's own `TestClient`) driven against the concrete `bramble.asgi.GraphQL` view --
+# (via Starlette's own `TestClient`) driven against the concrete `bramble.adapters.starlette.GraphQL`
+# view --
 # `tests/test_http.py` already covers the framework-agnostic request-shape logic through a fake
 # request, so these focus on things only the real ASGI adapter can exercise: the actual HTTP
 # response objects, and the WebSocket subprotocol end to end.
@@ -180,3 +182,16 @@ def test_websocket_rejects_operations_before_connection_init() -> None:
         websocket.send_json({"type": "subscribe", "id": "1", "payload": {"query": "{ greet }"}})
         with pytest.raises(Exception):  # noqa: PT011 -- Starlette raises its own WebSocketDisconnect here.
             websocket.receive_json()
+
+
+def test_websocket_closes_with_4406_for_an_unsupported_subprotocol() -> None:
+    schema = bramble.Schema(query=_Query, subscription=_Subscription)
+    app = GraphQL(schema)
+    client = TestClient(app)
+
+    # The rejection happens before `accept()`, so Starlette's test client raises
+    # `WebSocketDisconnect` immediately on connect rather than on a later `receive_json()`.
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect("/graphql", subprotocols=["graphql-ws"]):
+            pass
+    assert excinfo.value.code == 4406

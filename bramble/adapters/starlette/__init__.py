@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
@@ -10,7 +10,7 @@ from starlette.websockets import WebSocket
 
 from bramble.http.async_base_view import AsyncBaseHTTPView
 from bramble.http.exceptions import HTTPException
-from bramble.subscriptions import GraphQLTransportWSHandler
+from bramble.subscriptions import GRAPHQL_TRANSPORT_WS_PROTOCOL
 
 if TYPE_CHECKING:
     from bramble._schema import Schema
@@ -38,7 +38,7 @@ class _StarletteRequestAdapter:
         return self._request.headers
 
 
-class GraphQL(AsyncBaseHTTPView[Request, Response]):
+class GraphQL(AsyncBaseHTTPView[Request, Response, WebSocket, WebSocket]):
     """A plain ASGI application serving `schema` over HTTP (GET/POST, JSON and multipart bodies,
     batching if `schema.config.batching_config` enables it, the GraphiQL IDE on a bare browser
     `GET`) and WebSocket (the `graphql-transport-ws` subscription protocol). Usable directly as a
@@ -57,7 +57,7 @@ class GraphQL(AsyncBaseHTTPView[Request, Response]):
         form = await request.form()
         return dict(form)
 
-    async def get_context(self, request: Request) -> Any:
+    async def get_context(self, request: Request | WebSocket) -> Any:
         return {"request": request}
 
     def create_response(self, response_data: Any) -> Response:
@@ -66,11 +66,20 @@ class GraphQL(AsyncBaseHTTPView[Request, Response]):
     def create_html_response(self, html: str) -> Response:
         return HTMLResponse(html)
 
+    def is_websocket_request(self, request: Request | WebSocket) -> TypeGuard[WebSocket]:
+        return isinstance(request, WebSocket)
+
+    async def pick_websocket_subprotocol(self, request: WebSocket) -> str | None:
+        offered = request.scope.get("subprotocols", [])
+        return GRAPHQL_TRANSPORT_WS_PROTOCOL if GRAPHQL_TRANSPORT_WS_PROTOCOL in offered else None
+
+    async def create_websocket_response(self, request: WebSocket, subprotocol: str | None) -> WebSocket:
+        return request
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "websocket":
             websocket = WebSocket(scope, receive=receive, send=send)
-            handler = GraphQLTransportWSHandler(schema=self.schema, websocket=websocket)
-            await handler.handle()
+            await self.run(websocket)
             return
 
         request = Request(scope, receive=receive, send=send)

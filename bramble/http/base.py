@@ -32,7 +32,8 @@ class BaseView(Generic[Request]):
     """Framework-agnostic GraphQL-over-HTTP request-shape logic, shared by every concrete
     adapter. Deliberately holds nothing framework-specific (no raw request/response types) --
     those live in `AsyncBaseHTTPView` (this module's own subclass) and, one layer further out, in
-    each concrete adapter (`bramble.asgi`, and later Django/Flask/etc.).
+    each concrete adapter (`bramble.adapters.starlette`, `bramble.adapters.asgi`, and later
+    FastAPI/Flask/Django/etc.).
     """
 
     multipart_uploads_enabled: bool = False

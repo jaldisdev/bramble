@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import pytest
 
@@ -12,7 +13,8 @@ from bramble.schema.config import SchemaConfig
 
 # `bramble.http` is framework-agnostic by design -- these tests exercise `AsyncBaseHTTPView`
 # directly through a minimal fake request/adapter, with no real ASGI server involved (that's
-# `tests/test_asgi.py`'s job, against the concrete `bramble.asgi` adapter).
+# `tests/test_adapters_starlette.py`'s job, against the concrete `bramble.adapters.starlette`
+# adapter).
 
 
 @bramble.type
@@ -43,7 +45,7 @@ class _FakeRequest:
         self.form = form or {}
 
 
-class _FakeView(AsyncBaseHTTPView[_FakeRequest, dict]):
+class _FakeView(AsyncBaseHTTPView[_FakeRequest, dict, Any, Any]):
     multipart_uploads_enabled = True
 
     def __init__(self, schema: bramble.Schema) -> None:
@@ -63,6 +65,9 @@ class _FakeView(AsyncBaseHTTPView[_FakeRequest, dict]):
 
     def create_html_response(self, html: str) -> dict:
         return {"kind": "html", "body": html}
+
+    def is_websocket_request(self, request: _FakeRequest) -> bool:
+        return False
 
 
 def _run(coro):  # type: ignore[no-untyped-def]

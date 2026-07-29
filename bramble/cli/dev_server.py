@@ -14,7 +14,7 @@ from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import BaseRoute, Route, WebSocketRoute
 
-from bramble.asgi import GraphQL
+from bramble.adapters.starlette import GraphQL
 from bramble.cli.constants import DEV_SERVER_APP_DIR_ENV_VAR_KEY, DEV_SERVER_SCHEMA_ENV_VAR_KEY
 from bramble.cli.utils import load_schema
 
