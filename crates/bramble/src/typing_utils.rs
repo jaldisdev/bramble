@@ -1,8 +1,42 @@
 use bramble_core::schema::GraphQLType;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::PyDict;
 
 use crate::union_info::describe_union;
+
+/// `bramble._lazy`'s own contents, imported once per process and reused from then on -- every one
+/// of these is looked up on every single type reference bramble resolves (`named_type_name` runs
+/// once per leaf type across the whole schema; `seed_lazy_namespace_for_*` once per class/
+/// function), so re-importing the module and re-doing the attribute lookups each time would be
+/// pure waste: `sys.modules` already caches the import itself, but repeating the lookup still
+/// costs real (if small) per-call overhead -- `PyOnceLock` skips that entirely after the first
+/// call, for the lifetime of the process.
+struct LazyModuleCache {
+    lazy_type: Py<PyAny>,
+    namespace_for_class: Py<PyAny>,
+    namespace_for_callable: Py<PyAny>,
+}
+
+static LAZY_MODULE_CACHE: PyOnceLock<LazyModuleCache> = PyOnceLock::new();
+
+fn lazy_module_cache(py: Python<'_>) -> PyResult<&LazyModuleCache> {
+    LAZY_MODULE_CACHE.get_or_try_init(py, || {
+        let module = py.import("bramble._lazy")?;
+        Ok(LazyModuleCache {
+            lazy_type: module.getattr("LazyType")?.unbind(),
+            namespace_for_class: module.getattr("namespace_for_class")?.unbind(),
+            namespace_for_callable: module.getattr("namespace_for_callable")?.unbind(),
+        })
+    })
+}
+
+/// The `LazyType` class object, cached -- shared by `named_type_name` (below) and
+/// `union_info.rs::describe_union`'s own union-member check, so both recognize the exact same
+/// placeholder without either needing its own separate import.
+pub(crate) fn lazy_type_class(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    Ok(lazy_module_cache(py)?.lazy_type.bind(py))
+}
 
 /// Merges `bramble._lazy.namespace_for_class(cls)`'s result into `localns` -- every `get_type_hints`
 /// call site needs this done before it runs, or a `bramble.lazy(...)`-tagged forward reference
@@ -13,7 +47,7 @@ pub(crate) fn seed_lazy_namespace_for_class(
     cls: &Bound<'_, PyAny>,
     localns: &Bound<'_, PyDict>,
 ) -> PyResult<()> {
-    let namespace = py.import("bramble._lazy")?.call_method1("namespace_for_class", (cls,))?;
+    let namespace = lazy_module_cache(py)?.namespace_for_class.bind(py).call1((cls,))?;
     localns.update(namespace.cast::<PyDict>()?.as_mapping())
 }
 
@@ -24,8 +58,34 @@ pub(crate) fn seed_lazy_namespace_for_callable(
     func: &Bound<'_, PyAny>,
     localns: &Bound<'_, PyDict>,
 ) -> PyResult<()> {
-    let namespace = py.import("bramble._lazy")?.call_method1("namespace_for_callable", (func,))?;
+    let namespace = lazy_module_cache(py)?.namespace_for_callable.bind(py).call1((func,))?;
     localns.update(namespace.cast::<PyDict>()?.as_mapping())
+}
+
+/// The handful of external type objects `resolve_core`/`is_union_origin` compare every type
+/// reference against, at every level of `Optional[...]`/`Annotated[...]` unwrapping -- cached for
+/// the same reason as `LazyModuleCache` above.
+struct OriginCache {
+    typing_union: Py<PyAny>,
+    types_union_type: Py<PyAny>,
+    async_generator: Py<PyAny>,
+    async_iterator: Py<PyAny>,
+    async_iterable: Py<PyAny>,
+}
+
+static ORIGIN_CACHE: PyOnceLock<OriginCache> = PyOnceLock::new();
+
+fn origin_cache(py: Python<'_>) -> PyResult<&OriginCache> {
+    ORIGIN_CACHE.get_or_try_init(py, || {
+        let collections_abc = py.import("collections.abc")?;
+        Ok(OriginCache {
+            typing_union: py.import("typing")?.getattr("Union")?.unbind(),
+            types_union_type: py.import("types")?.getattr("UnionType")?.unbind(),
+            async_generator: collections_abc.getattr("AsyncGenerator")?.unbind(),
+            async_iterator: collections_abc.getattr("AsyncIterator")?.unbind(),
+            async_iterable: collections_abc.getattr("AsyncIterable")?.unbind(),
+        })
+    })
 }
 
 /// `typing.get_origin(int | None)` and `typing.get_origin(typing.Optional[int])` both denote a
@@ -33,12 +93,11 @@ pub(crate) fn seed_lazy_namespace_for_callable(
 /// versions (some versions unify `types.UnionType` and `typing.Union`, some don't) -- so this
 /// checks identity against both rather than assuming either alone is sufficient.
 pub fn is_union_origin(py: Python<'_>, origin: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let typing_union = py.import("typing")?.getattr("Union")?;
-    if origin.is(&typing_union) {
+    let cache = origin_cache(py)?;
+    if origin.is(cache.typing_union.bind(py)) {
         return Ok(true);
     }
-    let types_union = py.import("types")?.getattr("UnionType")?;
-    Ok(origin.is(&types_union))
+    Ok(origin.is(cache.types_union_type.bind(py)))
 }
 
 /// Unwraps `Annotated[T, ...]` to `(T, metadata)`. Non-`Annotated` annotations pass through
@@ -129,10 +188,10 @@ fn resolve_core(
     // the annotation this way once, at schema-build time (the actual per-event iteration and
     // "is this really an async generator at runtime" check both happen in Python at execution
     // time -- see `bramble._execution.subscribe_async`, which has no need to know the annotation).
-    let collections_abc = py.import("collections.abc")?;
-    if origin.eq(collections_abc.getattr("AsyncGenerator")?)?
-        || origin.eq(collections_abc.getattr("AsyncIterator")?)?
-        || origin.eq(collections_abc.getattr("AsyncIterable")?)?
+    let cache = origin_cache(py)?;
+    if origin.eq(cache.async_generator.bind(py))?
+        || origin.eq(cache.async_iterator.bind(py))?
+        || origin.eq(cache.async_iterable.bind(py))?
     {
         let args = typing.call_method1("get_args", (annotation,))?;
         let element = args.get_item(0)?;
@@ -182,51 +241,88 @@ fn resolve_union(
     Ok((GraphQLType::Named(union_info.name), false))
 }
 
+/// The builtin/stdlib scalar type objects `named_type_name` compares every leaf type reference
+/// against -- cached for the same reason as `LazyModuleCache`/`OriginCache` above: this runs once
+/// per leaf type across the *whole* schema (every field, every argument, every list/optional
+/// wrapping bottoms out here), so re-importing five separate modules on every single call would
+/// be pure waste.
+struct BuiltinScalarCache {
+    str_type: Py<PyAny>,
+    bool_type: Py<PyAny>,
+    int_type: Py<PyAny>,
+    float_type: Py<PyAny>,
+    id_type: Py<PyAny>,
+    datetime_type: Py<PyAny>,
+    date_type: Py<PyAny>,
+    time_type: Py<PyAny>,
+    decimal_type: Py<PyAny>,
+    uuid_type: Py<PyAny>,
+}
+
+static BUILTIN_SCALAR_CACHE: PyOnceLock<BuiltinScalarCache> = PyOnceLock::new();
+
+fn builtin_scalar_cache(py: Python<'_>) -> PyResult<&BuiltinScalarCache> {
+    BUILTIN_SCALAR_CACHE.get_or_try_init(py, || {
+        let builtins = py.import("builtins")?;
+        let datetime_module = py.import("datetime")?;
+        Ok(BuiltinScalarCache {
+            str_type: builtins.getattr("str")?.unbind(),
+            bool_type: builtins.getattr("bool")?.unbind(),
+            int_type: builtins.getattr("int")?.unbind(),
+            float_type: builtins.getattr("float")?.unbind(),
+            id_type: py.import("bramble")?.getattr("ID")?.unbind(),
+            datetime_type: datetime_module.getattr("datetime")?.unbind(),
+            date_type: datetime_module.getattr("date")?.unbind(),
+            time_type: datetime_module.getattr("time")?.unbind(),
+            decimal_type: py.import("decimal")?.getattr("Decimal")?.unbind(),
+            uuid_type: py.import("uuid")?.getattr("UUID")?.unbind(),
+        })
+    })
+}
+
 pub(crate) fn named_type_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> PyResult<String> {
     // A `bramble.lazy(...)`-tagged forward reference resolves (once `localns` has been seeded --
     // see `namespace_for_class`/`namespace_for_callable`) to this placeholder instead of the real
     // class, precisely so no import is needed yet: its own name is already everything a field's
     // type signature needs.
-    let lazy_type_class = py.import("bramble._lazy")?.getattr("LazyType")?;
-    if annotation.is_instance(&lazy_type_class)? {
+    if annotation.is_instance(lazy_type_class(py)?)? {
         return annotation.getattr("type_name")?.extract();
     }
 
-    let builtins = py.import("builtins")?;
-    if annotation.is(&builtins.getattr("str")?) {
+    let cache = builtin_scalar_cache(py)?;
+    if annotation.is(cache.str_type.bind(py)) {
         return Ok("String".to_string());
     }
-    if annotation.is(&builtins.getattr("bool")?) {
+    if annotation.is(cache.bool_type.bind(py)) {
         // Must be checked before `int`: Python's `bool` is a subclass of `int`, but identity
         // comparison against the exact `int`/`bool` class objects below isn't affected by that
         // subclass relationship either way -- this ordering is just for readability.
         return Ok("Boolean".to_string());
     }
-    if annotation.is(&builtins.getattr("int")?) {
+    if annotation.is(cache.int_type.bind(py)) {
         return Ok("Int".to_string());
     }
-    if annotation.is(&builtins.getattr("float")?) {
+    if annotation.is(cache.float_type.bind(py)) {
         return Ok("Float".to_string());
     }
 
-    if annotation.is(&py.import("bramble")?.getattr("ID")?) {
+    if annotation.is(cache.id_type.bind(py)) {
         return Ok("ID".to_string());
     }
 
-    let datetime_module = py.import("datetime")?;
-    if annotation.is(&datetime_module.getattr("datetime")?) {
+    if annotation.is(cache.datetime_type.bind(py)) {
         return Ok("DateTime".to_string());
     }
-    if annotation.is(&datetime_module.getattr("date")?) {
+    if annotation.is(cache.date_type.bind(py)) {
         return Ok("Date".to_string());
     }
-    if annotation.is(&datetime_module.getattr("time")?) {
+    if annotation.is(cache.time_type.bind(py)) {
         return Ok("Time".to_string());
     }
-    if annotation.is(&py.import("decimal")?.getattr("Decimal")?) {
+    if annotation.is(cache.decimal_type.bind(py)) {
         return Ok("Decimal".to_string());
     }
-    if annotation.is(&py.import("uuid")?.getattr("UUID")?) {
+    if annotation.is(cache.uuid_type.bind(py)) {
         return Ok("UUID".to_string());
     }
 

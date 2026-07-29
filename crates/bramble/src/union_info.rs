@@ -2,7 +2,7 @@ use bramble_core::schema::UnionDefinition;
 use pyo3::prelude::*;
 
 use crate::type_info::SchemaError;
-use crate::typing_utils::{find_marker, is_union_origin, named_type_name, unwrap_annotated};
+use crate::typing_utils::{find_marker, is_union_origin, lazy_type_class, named_type_name, unwrap_annotated};
 
 #[pyclass(name = "UnionInfo", frozen, skip_from_py_object)]
 pub struct PyUnionInfo {
@@ -62,9 +62,8 @@ pub fn describe_union(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> PyResult
     // trusting it, with no equivalent re-check once `_schema.py`'s graph walk resolves it for
     // real. A lazy-referenced union member that turns out to be a scalar/interface won't be
     // caught by this check; an accepted, narrow gap rather than a silent one.
-    let lazy_type_class = py.import("bramble._lazy")?.getattr("LazyType")?;
     for member in &members {
-        if member.is_instance(&lazy_type_class)? {
+        if member.is_instance(lazy_type_class(py)?)? {
             continue;
         }
         let kind: Option<String> = member
