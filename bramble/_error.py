@@ -37,3 +37,17 @@ class GraphQLError(_GraphQLError):
         self.locations = locations
         self.path = path
         self.extensions = extensions or {}
+
+
+def error_to_dict(error: GraphQLError) -> dict[str, Any]:
+    """Renders `error` in the GraphQL-over-HTTP spec's own error shape -- shared by the execution
+    engine's own per-field errors and the HTTP layer's own request-level ones (a malformed query,
+    an unsupported content type, ...), so both look identical to a client.
+    """
+    result: dict[str, Any] = {"message": error.message}
+    if error.locations:
+        result["locations"] = [{"line": line, "column": column} for line, column in error.locations]
+    if error.path is not None:
+        result["path"] = error.path
+    result["extensions"] = {"code": error.code.value, **error.extensions}
+    return result

@@ -11,7 +11,11 @@ license = "MIT OR Apache-2.0"
 dynamic = []
 
 [project.optional-dependencies]
-dev = ["pytest"]
+cli = ["click>=8.1", "starlette>=0.37", "uvicorn>=0.30", "python-multipart>=0.0.9"]
+dev = ["pytest", "bramble[cli]", "httpx>=0.27", "httpx2>=2.0"]
+
+[project.scripts]
+bramble = "bramble.cli.app:main"
 
 [tool.maturin]
 manifest-path = "crates/bramble/Cargo.toml"

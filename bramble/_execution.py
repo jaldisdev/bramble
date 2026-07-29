@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from bramble._bramble import lower_query, validate_query
 from bramble._error import ErrorCode, GraphQLError
+from bramble._error import error_to_dict as _error_to_dict
 from bramble._interface import resolve_interface_type
 from bramble._resolver import Info
 from bramble._union import resolve_union_type
@@ -623,16 +624,6 @@ async def _execute_selection_set(
         result[key] = value
     if propagate is not None:
         raise propagate
-    return result
-
-
-def _error_to_dict(error: GraphQLError) -> dict[str, Any]:
-    result: dict[str, Any] = {"message": error.message}
-    if error.locations:
-        result["locations"] = [{"line": line, "column": column} for line, column in error.locations]
-    if error.path is not None:
-        result["path"] = error.path
-    result["extensions"] = {"code": error.code.value, **error.extensions}
     return result
 
 

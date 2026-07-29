@@ -5,6 +5,7 @@ mod error;
 mod lowering;
 mod operation_directive_info;
 mod persisted_query;
+mod query_document;
 mod resolver_binding;
 mod schema_directive_info;
 mod sdl;
@@ -46,5 +47,11 @@ fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(validation::validate_query, module)?)?;
     module.add_function(wrap_pyfunction!(persisted_query::resolve_persisted_query, module)?)?;
     module.add_function(wrap_pyfunction!(sdl::render_sdl, module)?)?;
+    module.add_function(wrap_pyfunction!(query_document::parse_query_document, module)?)?;
+    module.add_class::<query_document::PyQueryDocument>()?;
+    module.add_class::<query_document::PyQueryOperation>()?;
+    module.add_class::<query_document::PyQueryFragment>()?;
+    module.add_class::<query_document::PyQuerySelection>()?;
+    module.add_class::<query_document::PyQueryVariableDefinition>()?;
     Ok(())
 }
