@@ -37,3 +37,25 @@ def scalar(
         parse_literal=parse_literal,
         directives=tuple(directives),
     )
+
+
+Upload = NewType("Upload", bytes)
+"""A scalar for file upload arguments/fields. Entirely opaque -- `serialize`/`parse_value` are
+both identity functions, so whatever object a request's transport layer puts into
+`variable_values` (bytes, a file-like object, ...) passes straight through to the resolver
+unchanged. bramble has no HTTP transport layer of its own; parsing a multipart request into
+`variable_values` is left to whatever's calling `Schema.execute`/`execute_async`.
+"""
+
+UploadDefinition = scalar(
+    name="Upload",
+    description="Represents a file upload.",
+    serialize=lambda value: value,
+    parse_value=lambda value: value,
+)
+"""Register with `SchemaConfig(scalar_map={Upload: UploadDefinition})` for a `scalar Upload`
+declaration (with its description) in `to_sdl()`'s output -- `Upload` used unregistered already
+round-trips correctly through execution regardless, the same way bramble's other built-in
+scalars (`datetime.datetime`, `decimal.Decimal`, ...) don't require `scalar_map` registration to
+work, only to be declared in SDL.
+"""

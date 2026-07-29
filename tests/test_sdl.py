@@ -145,6 +145,21 @@ def test_to_sdl_renders_custom_scalar() -> None:
     assert "scalar Base64" in schema.to_sdl()
 
 
+def test_to_sdl_renders_custom_scalar_description() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def data() -> Base64:
+            return b""
+
+    schema = bramble.Schema(
+        query=Query,
+        config=SchemaConfig(scalar_map={Base64: bramble.scalar(name="Base64", description="Base64 bytes")}),
+    )
+
+    assert '"""Base64 bytes"""\nscalar Base64' in schema.to_sdl()
+
+
 def test_to_sdl_renders_operation_directive() -> None:
     @bramble.type
     class Query:

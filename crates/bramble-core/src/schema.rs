@@ -184,6 +184,10 @@ pub struct CompiledSchema {
     /// from `scalar_names` (a flat set) since a scalar has no other Rust-side IR of its own to
     /// hang this on the way a type/field does.
     pub scalar_applied_directives: HashMap<String, Vec<AppliedDirective>>,
+    /// A registered scalar's own `description=`, keyed by its GraphQL name -- same reasoning as
+    /// `scalar_applied_directives` (no other Rust-side IR to carry it on). Absent for a scalar
+    /// with no description, not an empty string.
+    pub scalar_descriptions: HashMap<String, String>,
     /// `SchemaConfig(auto_camel_case=...)` (default `true`): whether a field/argument with no
     /// explicit `name=` override defaults to a camelCase rendering of its Python identifier
     /// (`post_id` -> `postId`) or the identifier as-is.

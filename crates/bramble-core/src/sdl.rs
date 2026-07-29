@@ -118,8 +118,11 @@ fn render_union(union_def: &UnionDefinition) -> String {
     format!("union {} = {}", union_def.name, union_def.member_names.join(" | "))
 }
 
-fn render_scalar(name: &str, applied_directives: &[AppliedDirective]) -> String {
-    format!("scalar {name}{}", render_applied_directives(applied_directives))
+fn render_scalar(name: &str, description: Option<&String>, applied_directives: &[AppliedDirective]) -> String {
+    let description = description.cloned();
+    let mut out = render_description(&description, "");
+    out.push_str(&format!("scalar {name}{}", render_applied_directives(applied_directives)));
+    out
 }
 
 fn operation_directive_location_str(location: OperationDirectiveLocation) -> &'static str {
@@ -225,7 +228,8 @@ pub fn render_sdl(schema: &CompiledSchema) -> String {
     scalar_names.sort();
     for name in scalar_names {
         let applied_directives = schema.scalar_applied_directives.get(name).map(Vec::as_slice).unwrap_or(&[]);
-        sections.push(render_scalar(name, applied_directives));
+        let description = schema.scalar_descriptions.get(name);
+        sections.push(render_scalar(name, description, applied_directives));
     }
 
     let mut operation_directive_names: Vec<&String> = schema.operation_directives.keys().collect();
@@ -262,6 +266,7 @@ mod tests {
             schema_directives: HashMap::new(),
             scalar_names: HashSet::new(),
             scalar_applied_directives: HashMap::new(),
+            scalar_descriptions: HashMap::new(),
             auto_camel_case: true,
             persisted_query_cache: PersistedQueryCache::new(),
         }

@@ -182,3 +182,87 @@ def test_builtin_uuid_serializes_to_str() -> None:
 
     assert "identifier: UUID!" in schema.to_sdl()
     assert schema.execute("{ identifier }") == {"data": {"identifier": str(fixed_uuid)}}
+
+
+# `bramble.Upload`/`UploadDefinition` (matches the equivalent scalar in another popular Python
+# GraphQL library's exact signature -- see project memory on not naming it in code/comments):
+# a fully opaque pass-through scalar. bramble has no HTTP transport layer of its own, so there's
+# no multipart-request parsing to test here -- just that the scalar type-checks and round-trips
+# whatever value a caller puts into `variable_values`, registered or not.
+
+
+def test_upload_round_trips_unregistered() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(file: bramble.Upload) -> bramble.Upload:
+            return file
+
+    schema = bramble.Schema(query=Query)
+
+    assert "echo(file: Upload!): Upload!" in schema.to_sdl()
+    assert "scalar Upload" not in schema.to_sdl()
+
+    result = schema.execute("query($f: Upload!) { echo(file: $f) }", variable_values={"f": b"hello"})
+    assert result == {"data": {"echo": b"hello"}}
+
+
+def test_upload_round_trips_an_arbitrary_object_not_just_bytes() -> None:
+    class FakeUploadFile:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(file: bramble.Upload) -> bramble.Upload:
+            return file
+
+    schema = bramble.Schema(query=Query)
+    upload = FakeUploadFile("photo.png")
+
+    result = schema.execute("query($f: Upload!) { echo(file: $f) }", variable_values={"f": upload})
+    assert result["data"]["echo"] is upload
+
+
+def test_upload_definition_matches_the_expected_fields() -> None:
+    assert bramble.UploadDefinition.name == "Upload"
+    assert bramble.UploadDefinition.description == "Represents a file upload."
+    assert bramble.UploadDefinition.serialize(b"x") == b"x"
+    assert bramble.UploadDefinition.parse_value(b"x") == b"x"
+
+
+def test_upload_registered_via_scalar_map_declares_scalar_in_sdl() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(file: bramble.Upload) -> bramble.Upload:
+            return file
+
+    schema = bramble.Schema(
+        query=Query, config=SchemaConfig(scalar_map={bramble.Upload: bramble.UploadDefinition})
+    )
+    sdl = schema.to_sdl()
+
+    assert '"""Represents a file upload."""\nscalar Upload' in sdl
+    result = schema.execute("query($f: Upload!) { echo(file: $f) }", variable_values={"f": b"hello"})
+    assert result == {"data": {"echo": b"hello"}}
+
+
+def test_upload_as_mutation_argument() -> None:
+    @bramble.type
+    class Query:
+        ok: bool = True
+
+    @bramble.type
+    class Mutation:
+        @bramble.field
+        def upload_avatar(file: bramble.Upload) -> str:
+            return f"received {len(file)} bytes"
+
+    schema = bramble.Schema(query=Query, mutation=Mutation)
+
+    result = schema.execute(
+        "mutation($f: Upload!) { uploadAvatar(file: $f) }", variable_values={"f": b"12345"}
+    )
+    assert result == {"data": {"uploadAvatar": "received 5 bytes"}}

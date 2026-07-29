@@ -108,6 +108,7 @@ fn sample_schema() -> CompiledSchema {
         schema_directives: HashMap::new(),
         scalar_names: HashSet::new(),
         scalar_applied_directives: HashMap::new(),
+        scalar_descriptions: HashMap::new(),
         auto_camel_case: true,
         persisted_query_cache: PersistedQueryCache::new(),
     }
