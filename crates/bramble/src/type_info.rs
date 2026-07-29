@@ -6,7 +6,7 @@ use pyo3::types::{PyDict, PyType};
 
 use crate::lowering::python_to_json_value;
 use crate::resolver_binding::bind_resolver_arguments;
-use crate::typing_utils::{resolve_graphql_type, seed_lazy_namespace_for_class};
+use crate::typing_utils::{find_marker, resolve_graphql_type, seed_lazy_namespace_for_class, unwrap_annotated};
 
 create_exception!(
     _bramble,
@@ -237,53 +237,75 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
         .and_then(|hints| hints.cast::<PyDict>().ok().cloned())
         .unwrap_or_else(|| PyDict::new(py));
 
-    dataclass_fields
-        .try_iter()?
-        .map(|dataclass_field| {
-            let dataclass_field = dataclass_field?;
-            let name: String = dataclass_field.getattr("name")?.extract()?;
-            let graphql_name: Option<String> = dataclass_field
-                .getattr("graphql_name")
-                .ok()
-                .and_then(|value| value.extract().ok());
-            let description: Option<String> = dataclass_field
-                .getattr("description")
-                .ok()
-                .and_then(|value| value.extract().ok());
-            let raw_type = dataclass_field.getattr("type")?;
-            let resolved_type = resolved_hints.get_item(&name)?.unwrap_or_else(|| raw_type.clone());
-            let graphql_type = resolve_graphql_type(py, &typing, &resolved_type)?;
+    let private_marker_class = py.import("bramble._private")?.getattr("PrivateMarker")?;
 
-            let resolver = dataclass_field.getattr("resolver").unwrap_or_else(|_| py.None().into_bound(py));
-            let has_resolver = !resolver.is_none();
+    let mut fields = Vec::new();
+    for dataclass_field in dataclass_fields.try_iter()? {
+        let dataclass_field = dataclass_field?;
+        let name: String = dataclass_field.getattr("name")?.extract()?;
+        let raw_type = dataclass_field.getattr("type")?;
+        let resolved_type = resolved_hints.get_item(&name)?.unwrap_or_else(|| raw_type.clone());
 
-            let (parent_parameter, info_parameter, arguments) = if has_resolver {
-                let binding = bind_resolver_arguments(py, cls, &resolver)?;
-                (binding.parent_parameter, binding.info_parameter, binding.arguments)
-            } else {
-                (None, None, Vec::new())
-            };
+        // A `bramble.field(...)`-created field always has a `.resolver` attribute (even when it's
+        // `None` -- `Field.__init__` sets it unconditionally), unlike a plain dataclass field from
+        // a bare annotation. That's the same distinguishing check `has_resolver` below reuses.
+        let is_bramble_field = dataclass_field.getattr("resolver").is_ok();
 
-            // A plain (non-`bramble.field`) dataclass field has no `.directives` attribute --
-            // `getattr`'s default handles that the same way `graphql_name`/`resolver` already do.
-            let field_directives = dataclass_field
-                .getattr("directives")
-                .unwrap_or_else(|_| pyo3::types::PyTuple::empty(py).into_any());
-            let applied_directives = extract_applied_directives(&field_directives)?;
+        let (_, metadata) = unwrap_annotated(&typing, resolved_type.clone())?;
+        if find_marker(&metadata, &private_marker_class)?.is_some() {
+            if is_bramble_field {
+                let cls_name: String = cls.getattr("__name__")?.extract()?;
+                return Err(SchemaError::new_err(format!(
+                    "field '{name}' on '{cls_name}' cannot be both Private and a bramble.field(...) \
+                     -- either remove the Private annotation or the field configuration"
+                )));
+            }
+            // A private plain field stays a normal Python/dataclass attribute (untouched here) --
+            // it's simply never turned into a `FieldDefinition`, so it's invisible to the GraphQL
+            // schema (SDL, query validation, execution) entirely.
+            continue;
+        }
 
-            Ok(FieldDefinition {
-                name,
-                graphql_name,
-                graphql_type,
-                description,
-                has_resolver,
-                parent_parameter,
-                info_parameter,
-                arguments,
-                applied_directives,
-            })
-        })
-        .collect()
+        let graphql_name: Option<String> = dataclass_field
+            .getattr("graphql_name")
+            .ok()
+            .and_then(|value| value.extract().ok());
+        let description: Option<String> = dataclass_field
+            .getattr("description")
+            .ok()
+            .and_then(|value| value.extract().ok());
+        let graphql_type = resolve_graphql_type(py, &typing, &resolved_type)?;
+
+        let resolver = dataclass_field.getattr("resolver").unwrap_or_else(|_| py.None().into_bound(py));
+        let has_resolver = !resolver.is_none();
+
+        let (parent_parameter, info_parameter, arguments) = if has_resolver {
+            let binding = bind_resolver_arguments(py, cls, &resolver)?;
+            (binding.parent_parameter, binding.info_parameter, binding.arguments)
+        } else {
+            (None, None, Vec::new())
+        };
+
+        // A plain (non-`bramble.field`) dataclass field has no `.directives` attribute --
+        // `getattr`'s default handles that the same way `graphql_name`/`resolver` already do.
+        let field_directives = dataclass_field
+            .getattr("directives")
+            .unwrap_or_else(|_| pyo3::types::PyTuple::empty(py).into_any());
+        let applied_directives = extract_applied_directives(&field_directives)?;
+
+        fields.push(FieldDefinition {
+            name,
+            graphql_name,
+            graphql_type,
+            description,
+            has_resolver,
+            parent_parameter,
+            info_parameter,
+            arguments,
+            applied_directives,
+        });
+    }
+    Ok(fields)
 }
 
 /// Builds `cls`'s `TypeDefinition`, tagged by `kind`. Called by `bramble._type._process_type`

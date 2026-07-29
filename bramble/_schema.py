@@ -17,6 +17,7 @@ from bramble._bramble import (
 from bramble._execution import execute as _execute
 from bramble._execution import execute_async as _execute_async
 from bramble._lazy import LazyType, namespace_for_callable, namespace_for_class
+from bramble._private import is_private
 from bramble._scalar import ScalarDefinition
 from bramble._union import UnionDefinition
 from bramble.schema.config import SchemaConfig
@@ -181,6 +182,11 @@ def _discover_type(cls: _type, *, graph: _SchemaGraph) -> None:
         raise SchemaError(f"could not resolve field annotations for '{cls.__name__}': {error}") from error
 
     for annotation in hints.values():
+        # A `Private[T]` field is invisible to the GraphQL schema entirely (Rust's `read_fields`
+        # already excludes it from this class's own `FieldDefinition`s) -- its own type shouldn't
+        # get pulled into the schema graph either, just because it happened to appear here.
+        if is_private(annotation):
+            continue
         _discover_annotation(annotation, graph=graph)
 
     # `hints` above only ever covers the class's own dataclass FIELD annotations (a resolver's

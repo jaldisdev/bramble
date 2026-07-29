@@ -2,6 +2,7 @@ from bramble._bramble import SchemaError  # noqa: F401
 from bramble._error import ErrorCode, GraphQLError  # noqa: F401
 from bramble._execution import Path, SelectedField  # noqa: F401
 from bramble._lazy import LazyType, lazy  # noqa: F401
+from bramble._private import Private  # noqa: F401
 from bramble._resolver import Argument, Info, Parent, argument  # noqa: F401
 from bramble._scalar import ID, ScalarDefinition, scalar  # noqa: F401
 from bramble._schema import Schema  # noqa: F401
