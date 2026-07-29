@@ -395,23 +395,41 @@ async def _complete_value(
         return None
 
     if type_info.kind == "LIST":
+
+        async def _complete_item(index: int, item: Any) -> Any:
+            return await _complete_value(
+                type_info=type_info.of_type,
+                raw_value=item,
+                lowered_field=lowered_field,
+                selections=selections,
+                path=Path(key=index, prev=path),
+                state=state,
+            )
+
+        # List items may complete concurrently (the spec never requires ordering here, only that
+        # the *response* array preserves each item's position -- `asyncio.gather` already returns
+        # outcomes in the same order as the awaitables passed in, regardless of completion order).
+        # `return_exceptions=True` so one item's `_PropagateNull` doesn't cancel its siblings --
+        # every item still gets to run (and record its own errors) before this list decides
+        # whether *it* must propagate too.
+        outcomes = await asyncio.gather(
+            *(_complete_item(index, item) for index, item in enumerate(raw_value)), return_exceptions=True
+        )
+
+        item_type_non_null = type_info.of_type.kind == "NON_NULL"
         results = []
-        for index, item in enumerate(raw_value):
-            item_path = Path(key=index, prev=path)
-            try:
-                completed = await _complete_value(
-                    type_info=type_info.of_type,
-                    raw_value=item,
-                    lowered_field=lowered_field,
-                    selections=selections,
-                    path=item_path,
-                    state=state,
-                )
-            except _PropagateNull:
-                if type_info.of_type.kind == "NON_NULL":
-                    raise
-                completed = None
-            results.append(completed)
+        propagate: _PropagateNull | None = None
+        for outcome in outcomes:
+            if isinstance(outcome, _PropagateNull):
+                if item_type_non_null:
+                    propagate = propagate or outcome
+                results.append(None)
+                continue
+            if isinstance(outcome, BaseException):
+                raise outcome
+            results.append(outcome)
+        if propagate is not None:
+            raise propagate
         return results
 
     type_name = type_info.name
@@ -492,24 +510,25 @@ async def _execute_selection_set(
     parent_value: Any,
     path: Path | None,
     state: _ExecutionState,
+    serial: bool = False,
 ) -> dict[str, Any]:
     """Executes one selection set against a known concrete type + resolved parent value (§8's
     per-field algorithm), after merging any same-response-key occurrences (`_group_by_response_key`).
-    Fields run sequentially, not concurrently -- always correct for a mutation's root selection set
-    (which the spec requires to be serial anyway), and a valid (if not maximally parallel) choice
-    for queries too; parallelizing is a possible future optimization, not a correctness requirement.
+    Fields run concurrently by default (`asyncio.gather`) -- the spec permits but doesn't require
+    this, and it lets I/O-bound resolvers actually overlap. `serial=True` is passed only for a
+    mutation's *root* selection set (the one spec-mandated exception: "fields of the top-level
+    selection set must be executed serially"); anything nested -- including inside a mutation's own
+    result, or a list's items -- reverts to concurrent execution regardless of the root operation.
     Raises `_PropagateNull` if the *entire* selection set must be discarded, i.e. one of its own
     non-null fields propagated up to here.
     """
     grouped = _group_by_response_key(_applicable_selections(selections, concrete_type, state.schema))
 
-    result: dict[str, Any] = {}
-    for response_key, occurrences in grouped.items():
+    async def _resolve_group(response_key: str, occurrences: list["LoweredField"]) -> tuple[str, Any]:
         primary = occurrences[0]
 
         if primary.field_name == "__typename":
-            result[response_key] = concrete_type.__bramble_type_info__.name
-            continue
+            return response_key, concrete_type.__bramble_type_info__.name
 
         field_info = _find_field_info(
             concrete_type, primary.field_name, auto_camel_case=state.schema.config.auto_camel_case
@@ -523,7 +542,7 @@ async def _execute_selection_set(
 
         merged_selections = [selection for occurrence in occurrences for selection in occurrence.selections]
         field_path = Path(key=response_key, prev=path)
-        result[response_key] = await _execute_field(
+        value = await _execute_field(
             field_info=field_info,
             lowered_field=primary,
             selections=merged_selections,
@@ -532,7 +551,38 @@ async def _execute_selection_set(
             path=field_path,
             state=state,
         )
+        return response_key, value
 
+    if serial:
+        result: dict[str, Any] = {}
+        for response_key, occurrences in grouped.items():
+            key, value = await _resolve_group(response_key, occurrences)
+            result[key] = value
+        return result
+
+    # `_execute_field` already decides internally (per field, based on *that field's* own type)
+    # whether a failure should propagate past it or be absorbed as `None` -- so unlike the list-item
+    # case above, there's no further "should I absorb this here" check: any `_PropagateNull` that
+    # reaches this level always means the whole selection set must propagate too. Still gathered
+    # with `return_exceptions=True` so every sibling field gets to run (and record its own errors)
+    # before that decision is acted on.
+    outcomes = await asyncio.gather(
+        *(_resolve_group(response_key, occurrences) for response_key, occurrences in grouped.items()),
+        return_exceptions=True,
+    )
+
+    result = {}
+    propagate: _PropagateNull | None = None
+    for outcome in outcomes:
+        if isinstance(outcome, _PropagateNull):
+            propagate = propagate or outcome
+            continue
+        if isinstance(outcome, BaseException):
+            raise outcome
+        key, value = outcome
+        result[key] = value
+    if propagate is not None:
+        raise propagate
     return result
 
 
@@ -593,7 +643,12 @@ async def execute_async(
 
     try:
         data: dict[str, Any] | None = await _execute_selection_set(
-            selections=fields, concrete_type=root_type, parent_value=root_value, path=None, state=state
+            selections=fields,
+            concrete_type=root_type,
+            parent_value=root_value,
+            path=None,
+            state=state,
+            serial=operation_type == "mutation",
         )
     except _PropagateNull:
         data = None

@@ -408,8 +408,9 @@ def test_non_null_list_item_failure_nulls_the_whole_list() -> None:
     result = schema.execute("query { items { value(shouldFail: true) } sibling }")
 
     assert result["data"] == {"items": None, "sibling": "fine"}
-    # Execution aborts the list on the first failing item rather than continuing.
-    assert len(result["errors"]) == 1
+    # List items complete concurrently (not "stop at the first failure") -- both items are
+    # attempted and both report their own error before the list decides to propagate.
+    assert len(result["errors"]) == 2
 
 
 def test_non_null_list_item_failure_propagates_past_a_non_null_list_field() -> None:
@@ -423,7 +424,7 @@ def test_non_null_list_item_failure_propagates_past_a_non_null_list_field() -> N
     result = schema.execute("query { items { value(shouldFail: true) } }")
 
     assert result["data"] is None
-    assert len(result["errors"]) == 1
+    assert len(result["errors"]) == 2
 
 
 def test_resolver_raised_graphql_error_keeps_its_own_code_and_extensions() -> None:
