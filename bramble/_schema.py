@@ -5,7 +5,7 @@ import typing
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from bramble._bramble import SchemaError, compile_schema, describe_union, validate_query
+from bramble._bramble import SchemaError, compile_schema, describe_union, resolve_persisted_query, validate_query
 from bramble._scalar import ScalarDefinition
 from bramble._union import UnionDefinition
 from bramble.schema.config import SchemaConfig
@@ -218,3 +218,20 @@ class Schema:
         raising a `bramble.GraphQLError` on the first violation found. Returns `None` if valid.
         """
         validate_query(query, self._compiled, operation_name)
+
+    def resolve_persisted_query(
+        self,
+        sha256_hash: str,
+        *,
+        query: str | None = None,
+        operation_name: str | None = None,
+    ) -> bool:
+        """Implements the Automatic Persisted Queries protocol (§10) against this schema's cache.
+
+        Returns `True` if `sha256_hash` was already cached, `False` if `query` was freshly
+        parsed/validated and just registered under its hash. Raises `bramble.GraphQLError` with
+        `code=PERSISTED_QUERY_NOT_FOUND` on a hash-only miss (the client should resend with
+        `query` included) or `code=PERSISTED_QUERY_MISMATCH` if a provided `query`'s hash doesn't
+        match `sha256_hash`.
+        """
+        return resolve_persisted_query(sha256_hash, self._compiled, query=query, operation_name=operation_name)

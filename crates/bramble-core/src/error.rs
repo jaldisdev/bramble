@@ -29,6 +29,8 @@ pub enum ErrorCode {
     ArgumentTypeMismatch,
     InvalidDirectiveLocation,
     InvalidFragmentTarget,
+    PersistedQueryNotFound,
+    PersistedQueryMismatch,
 }
 
 #[derive(Serialize, Debug, Clone)]

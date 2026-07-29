@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 mod compiled_schema;
 mod error;
 mod operation_directive_info;
+mod persisted_query;
 mod resolver_binding;
 mod schema_directive_info;
 mod skip_include;
@@ -40,5 +41,6 @@ fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(compiled_schema::compile_schema, module)?)?;
     module.add_class::<compiled_schema::PyCompiledSchema>()?;
     module.add_function(wrap_pyfunction!(validation::validate_query, module)?)?;
+    module.add_function(wrap_pyfunction!(persisted_query::resolve_persisted_query, module)?)?;
     Ok(())
 }

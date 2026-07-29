@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use bramble_core::persisted_query::PersistedQueryCache;
 use bramble_core::schema::CompiledSchema;
 use pyo3::prelude::*;
 
@@ -58,6 +59,7 @@ pub fn compile_schema(
         subscription_type_name,
         operation_directives,
         scalar_names: scalar_names.into_iter().collect::<HashSet<_>>(),
+        persisted_query_cache: PersistedQueryCache::new(),
     };
 
     Ok(PyCompiledSchema { schema })

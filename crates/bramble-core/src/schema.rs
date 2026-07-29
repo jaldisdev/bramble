@@ -149,7 +149,7 @@ pub struct OperationDirectiveDefinition {
 /// The assembled, validated schema (§7b) that query validation (Task 9) and execution (Task 11)
 /// operate against for every subsequent request -- built once, by `Schema()`'s Python-side graph
 /// walker (Task 8b) handing over everything it already discovered, not re-derived here.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CompiledSchema {
     pub types: HashMap<String, TypeDefinition>,
     pub unions: HashMap<String, UnionDefinition>,
@@ -158,4 +158,7 @@ pub struct CompiledSchema {
     pub subscription_type_name: Option<String>,
     pub operation_directives: HashMap<String, OperationDirectiveDefinition>,
     pub scalar_names: HashSet<String>,
+    /// A fresh, empty cache per `CompiledSchema` -- constructing a new `Schema()` naturally
+    /// flushes it (Task 10's schema-reload decision), since there's nothing to inherit from.
+    pub persisted_query_cache: crate::persisted_query::PersistedQueryCache,
 }
