@@ -58,6 +58,7 @@ pub struct ArgumentDefinition {
     pub has_default: bool,
     pub description: Option<String>,
     pub deprecation_reason: Option<String>,
+    pub applied_directives: Vec<AppliedDirective>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,6 +176,10 @@ pub struct CompiledSchema {
     pub operation_directives: HashMap<String, OperationDirectiveDefinition>,
     pub schema_directives: HashMap<String, SchemaDirectiveDefinition>,
     pub scalar_names: HashSet<String>,
+    /// Applied directives (§6) for a registered scalar, keyed by its GraphQL name -- separate
+    /// from `scalar_names` (a flat set) since a scalar has no other Rust-side IR of its own to
+    /// hang this on the way a type/field does.
+    pub scalar_applied_directives: HashMap<String, Vec<AppliedDirective>>,
     /// `SchemaConfig(auto_camel_case=...)` (default `true`, matching Strawberry's own default):
     /// whether a field/argument with no explicit `name=` override defaults to a camelCase
     /// rendering of its Python identifier (`post_id` -> `postId`) or the identifier as-is.

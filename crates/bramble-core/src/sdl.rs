@@ -59,6 +59,7 @@ fn render_argument(argument: &ArgumentDefinition, auto_camel_case: bool) -> Stri
     if let Some(reason) = &argument.deprecation_reason {
         out.push_str(&format!(" @deprecated(reason: {reason:?})"));
     }
+    out.push_str(&render_applied_directives(&argument.applied_directives));
     out
 }
 
@@ -113,8 +114,8 @@ fn render_union(union_def: &UnionDefinition) -> String {
     format!("union {} = {}", union_def.name, union_def.member_names.join(" | "))
 }
 
-fn render_scalar(name: &str) -> String {
-    format!("scalar {name}")
+fn render_scalar(name: &str, applied_directives: &[AppliedDirective]) -> String {
+    format!("scalar {name}{}", render_applied_directives(applied_directives))
 }
 
 fn operation_directive_location_str(location: OperationDirectiveLocation) -> &'static str {
@@ -219,7 +220,8 @@ pub fn render_sdl(schema: &CompiledSchema) -> String {
     let mut scalar_names: Vec<&String> = schema.scalar_names.iter().collect();
     scalar_names.sort();
     for name in scalar_names {
-        sections.push(render_scalar(name));
+        let applied_directives = schema.scalar_applied_directives.get(name).map(Vec::as_slice).unwrap_or(&[]);
+        sections.push(render_scalar(name, applied_directives));
     }
 
     let mut operation_directive_names: Vec<&String> = schema.operation_directives.keys().collect();
@@ -255,6 +257,7 @@ mod tests {
             operation_directives: HashMap::new(),
             schema_directives: HashMap::new(),
             scalar_names: HashSet::new(),
+            scalar_applied_directives: HashMap::new(),
             auto_camel_case: true,
             persisted_query_cache: PersistedQueryCache::new(),
         }
@@ -285,6 +288,7 @@ mod tests {
                         has_default: false,
                         description: None,
                         deprecation_reason: None,
+                        applied_directives: Vec::new(),
                     }],
                     applied_directives: Vec::new(),
                 }],
@@ -447,6 +451,7 @@ mod tests {
                         has_default: true,
                         description: None,
                         deprecation_reason: Some("no longer used".to_string()),
+                        applied_directives: Vec::new(),
                     }],
                     applied_directives: Vec::new(),
                 }],
@@ -519,6 +524,7 @@ mod tests {
                     has_default: false,
                     description: None,
                     deprecation_reason: None,
+                    applied_directives: Vec::new(),
                 }],
                 applied_directives: Vec::new(),
             }],

@@ -137,15 +137,46 @@ fn parse_kind(kind: &str) -> PyResult<TypeKind> {
     }
 }
 
+/// Mirrors `bramble._type._validate_directive_locations`'s exact check (§6): every instance in
+/// `directives` that's actually a `@bramble.schema_directive` object (anything else is silently
+/// ignored) must declare `required_location` among its own locations. Needed here, in Rust,
+/// because argument classification (`resolver_binding::classify_argument`) happens entirely on
+/// this side of the PyO3 boundary -- unlike type-/field-level directives, which are validated in
+/// Python (`_type.py`) before `process_type` ever runs, there's no equivalent Python-side pass
+/// over a resolver's own arguments to do this check in first.
+pub(crate) fn validate_directive_locations(
+    directives: &Bound<'_, PyAny>,
+    required_location: &str,
+    owner_name: &str,
+) -> PyResult<()> {
+    for item in directives.try_iter()? {
+        let item = item?;
+        let Ok(info) = item.getattr("__bramble_directive_info__") else {
+            continue;
+        };
+        let locations: Vec<String> = info.getattr("locations")?.extract()?;
+        if !locations.iter().any(|location| location == required_location) {
+            let name: String = info.getattr("name")?.extract()?;
+            return Err(SchemaError::new_err(format!(
+                "directive '@{name}' cannot be applied to '{owner_name}' ({required_location}); \
+                 declared locations: {}",
+                locations.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Converts a sequence of applied schema-directive instances (§6) into `AppliedDirective`s ready
-/// for SDL rendering -- location legality is already checked in Python (`_validate_directive_locations`)
-/// before this runs, so this is purely value extraction: for each instance that actually is a
+/// for SDL rendering -- location legality is checked separately (`validate_directive_locations`,
+/// or Python's own `_validate_directive_locations` for type-/field-level directives) before this
+/// runs, so this is purely value extraction: for each instance that actually is a
 /// `@bramble.schema_directive`-decorated object (anything else is silently ignored, matching
 /// `directives=[...]`'s existing "non-directive objects are ignored" behavior), read its own
 /// `__bramble_directive_info__` for the directive's name and declared fields, then read each
 /// field's *value* off the instance itself and convert it the same way a resolved argument value
 /// would be (`python_to_json_value`).
-fn extract_applied_directives(directives: &Bound<'_, PyAny>) -> PyResult<Vec<AppliedDirective>> {
+pub(crate) fn extract_applied_directives(directives: &Bound<'_, PyAny>) -> PyResult<Vec<AppliedDirective>> {
     let mut result = Vec::new();
 
     for item in directives.try_iter()? {

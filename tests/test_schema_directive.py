@@ -1,9 +1,31 @@
 from __future__ import annotations
 
+from typing import Annotated, NewType
+
 import pytest
 
 import bramble
+from bramble.schema.config import SchemaConfig
 from bramble.schema_directive import Location
+
+# `typing.get_type_hints` (used to resolve a resolver parameter's `Annotated[...]` annotation, and
+# a resolver's own return annotation) can only see module globals, never an enclosing test
+# function's locals -- so anything referenced *from an annotation* (as opposed to a plain
+# decorator call-time argument, like `directives=[SomeMarker()]` on a type/field) has to live at
+# module level here, matching test_schema.py's/test_sdl.py's own established convention.
+
+
+@bramble.schema_directive(locations=[Location.ARGUMENT_DEFINITION])
+class Sensitive:
+    reason: str
+
+
+@bramble.schema_directive(locations=[Location.OBJECT])
+class _ObjectOnlyForAnnotatedTests:
+    pass
+
+
+Base64 = NewType("Base64", bytes)
 
 
 def test_keys_directive_example_from_spec() -> None:
@@ -159,3 +181,85 @@ def test_non_directive_objects_in_field_directives_are_ignored() -> None:
         f: str = bramble.field(directives=[object()], default="x")
 
     assert Query().f == "x"
+
+
+def test_argument_level_directive_at_argument_definition_location_succeeds() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def greet(name: Annotated[str, bramble.argument(directives=[Sensitive(reason="pii")])]) -> str:
+            return f"hi {name}"
+
+    schema = bramble.Schema(query=Query)
+    assert schema.execute('query { greet(name: "Ada") }') == {"data": {"greet": "hi Ada"}}
+    assert "greet(name: String! @sensitive(reason: \"pii\")): String!" in schema.to_sdl()
+
+
+def test_argument_level_directive_at_disallowed_location_fails_with_clear_error() -> None:
+    with pytest.raises(bramble.SchemaError, match="ARGUMENT_DEFINITION"):
+
+        @bramble.type
+        class Query:
+            @bramble.field
+            def greet(
+                name: Annotated[str, bramble.argument(directives=[_ObjectOnlyForAnnotatedTests()])],
+            ) -> str:
+                return name
+
+
+def test_non_directive_objects_in_argument_directives_are_ignored() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def greet(name: Annotated[str, bramble.argument(directives=[object()])]) -> str:
+            return name
+
+    schema = bramble.Schema(query=Query)
+    assert schema.execute('query { greet(name: "Ada") }') == {"data": {"greet": "Ada"}}
+
+
+def test_scalar_level_directive_at_scalar_location_succeeds() -> None:
+    @bramble.schema_directive(locations=[Location.SCALAR])
+    class SpecifiedBy:
+        url: str
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def data() -> Base64:
+            return b"hi"
+
+    config = SchemaConfig(
+        scalar_map={Base64: bramble.scalar(name="Base64", directives=[SpecifiedBy(url="https://example.com")])}
+    )
+    schema = bramble.Schema(query=Query, config=config)
+
+    assert 'scalar Base64 @specifiedBy(url: "https://example.com")' in schema.to_sdl()
+
+
+def test_scalar_level_directive_at_disallowed_location_fails_with_clear_error() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def data() -> Base64:
+            return b"hi"
+
+    config = SchemaConfig(
+        scalar_map={Base64: bramble.scalar(name="Base64", directives=[_ObjectOnlyForAnnotatedTests()])}
+    )
+
+    with pytest.raises(bramble.SchemaError, match="SCALAR"):
+        bramble.Schema(query=Query, config=config)
+
+
+def test_non_directive_objects_in_scalar_directives_are_ignored() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def data() -> Base64:
+            return b"hi"
+
+    config = SchemaConfig(scalar_map={Base64: bramble.scalar(name="Base64", directives=[object()])})
+    schema = bramble.Schema(query=Query, config=config)
+
+    assert schema.execute("query { data }") == {"data": {"data": b"hi"}}

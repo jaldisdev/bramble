@@ -288,6 +288,10 @@ class Schema:
             _scalar_name(python_type, scalar_definition): scalar_definition
             for python_type, scalar_definition in self.scalars_by_python_type.items()
         }
+        scalar_directives = [
+            (_scalar_name(python_type, scalar_definition), scalar_definition.directives)
+            for python_type, scalar_definition in self.scalars_by_python_type.items()
+        ]
 
         self._compiled = compile_schema(
             query_type_name=query.__bramble_type_info__.name,
@@ -300,6 +304,7 @@ class Schema:
             directives=[directive.__bramble_directive_info__ for directive in self.directives],
             schema_directives=list(graph.schema_directives_by_name.values()),
             scalar_names=scalar_names,
+            scalar_directives=scalar_directives,
             auto_camel_case=self.config.auto_camel_case,
         )
 

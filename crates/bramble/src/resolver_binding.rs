@@ -1,8 +1,8 @@
 use bramble_core::schema::ArgumentDefinition;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyType};
+use pyo3::types::{PyDict, PyTuple, PyType};
 
-use crate::type_info::SchemaError;
+use crate::type_info::{SchemaError, extract_applied_directives, validate_directive_locations};
 use crate::typing_utils::{find_marker, resolve_graphql_type, unwrap_annotated};
 
 pub struct ResolverBinding {
@@ -22,8 +22,8 @@ pub(crate) fn classify_argument<'py>(
     let argument_class = py.import("bramble._resolver")?.getattr("Argument")?;
     let argument_marker = find_marker(&metadata, &argument_class)?;
 
-    let (graphql_name, description, deprecation_reason, type_override) = match &argument_marker {
-        None => (None, None, None, None),
+    let (graphql_name, description, deprecation_reason, type_override, directives) = match &argument_marker {
+        None => (None, None, None, None, None),
         Some(marker) => (
             marker.getattr("name")?.extract::<Option<String>>()?,
             marker.getattr("description")?.extract::<Option<String>>()?,
@@ -32,6 +32,7 @@ pub(crate) fn classify_argument<'py>(
                 let graphql_type = marker.getattr("graphql_type")?;
                 if graphql_type.is_none() { None } else { Some(graphql_type) }
             },
+            Some(marker.getattr("directives")?),
         ),
     };
 
@@ -40,6 +41,10 @@ pub(crate) fn classify_argument<'py>(
         None => resolve_graphql_type(py, typing, &underlying)?,
     };
 
+    let directives = directives.unwrap_or_else(|| PyTuple::empty(py).into_any());
+    validate_directive_locations(&directives, "ARGUMENT_DEFINITION", &parameter_name)?;
+    let applied_directives = extract_applied_directives(&directives)?;
+
     Ok(ArgumentDefinition {
         name: parameter_name,
         graphql_name,
@@ -47,6 +52,7 @@ pub(crate) fn classify_argument<'py>(
         has_default,
         description,
         deprecation_reason,
+        applied_directives,
     })
 }
 

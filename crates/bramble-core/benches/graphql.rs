@@ -40,6 +40,7 @@ fn argument(name: &str, graphql_type: GraphQLType) -> ArgumentDefinition {
         has_default: false,
         description: None,
         deprecation_reason: None,
+        applied_directives: Vec::new(),
     }
 }
 
@@ -103,6 +104,7 @@ fn sample_schema() -> CompiledSchema {
         operation_directives: HashMap::new(),
         schema_directives: HashMap::new(),
         scalar_names: HashSet::new(),
+        scalar_applied_directives: HashMap::new(),
         auto_camel_case: true,
         persisted_query_cache: PersistedQueryCache::new(),
     }
