@@ -23,12 +23,20 @@ impl From<DirectiveFieldDefinition> for PyDirectiveFieldInfo {
     }
 }
 
-#[pyclass(name = "SchemaDirectiveInfo", frozen, get_all, skip_from_py_object)]
+#[pyclass(name = "SchemaDirectiveInfo", frozen, skip_from_py_object)]
 pub struct PySchemaDirectiveInfo {
+    #[pyo3(get)]
     pub name: String,
+    #[pyo3(get)]
     pub description: Option<String>,
+    #[pyo3(get)]
     pub locations: Vec<String>,
+    #[pyo3(get)]
     pub fields: Vec<PyDirectiveFieldInfo>,
+    /// Not Python-exposed -- see `PyTypeInfo::definition`'s doc comment for why. Lets
+    /// `compile_schema` (§9/§12) re-key an already-computed `SchemaDirectiveInfo` by name for SDL
+    /// rendering, the same way it already does for types/unions/operation directives.
+    pub definition: SchemaDirectiveDefinition,
 }
 
 fn parse_location(value: &str) -> PyResult<SchemaDirectiveLocation> {
@@ -141,13 +149,15 @@ pub fn describe_schema_directive(
     };
 
     Ok(PySchemaDirectiveInfo {
-        name: definition.name,
-        description: definition.description,
+        name: definition.name.clone(),
+        description: definition.description.clone(),
         locations: definition
             .locations
-            .into_iter()
+            .iter()
+            .copied()
             .map(|location| location_str(location).to_string())
             .collect(),
-        fields: definition.fields.into_iter().map(PyDirectiveFieldInfo::from).collect(),
+        fields: definition.fields.iter().cloned().map(PyDirectiveFieldInfo::from).collect(),
+        definition,
     })
 }

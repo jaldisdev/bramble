@@ -63,7 +63,9 @@ pub struct ArgumentDefinition {
 #[derive(Debug, Clone, Serialize)]
 pub struct FieldDefinition {
     pub name: String,
+    pub graphql_name: Option<String>,
     pub graphql_type: GraphQLType,
+    pub description: Option<String>,
     pub has_resolver: bool,
     /// The resolver parameter bound to the parent/root value (`Parent[T]`), if any.
     pub parent_parameter: Option<String>,
@@ -71,6 +73,19 @@ pub struct FieldDefinition {
     pub info_parameter: Option<String>,
     /// The resolver's remaining parameters, each a GraphQL field argument.
     pub arguments: Vec<ArgumentDefinition>,
+    pub applied_directives: Vec<AppliedDirective>,
+}
+
+/// A schema directive instance applied at a specific site (a type, a field, ...; §6) -- the
+/// directive's own name plus its field values *at this application*, ready to render as
+/// `@name(arg: value, ...)` in SDL. `arguments` is a `Vec` (not a `HashMap`) to preserve
+/// declaration order, which matters for reproducible SDL output. Values are `serde_json::Value`
+/// rather than `GraphQLType` -- a directive field holds a concrete value here, not a type
+/// reference (unlike `ArgumentDefinition`, which describes a field/argument's *type*).
+#[derive(Debug, Clone, Serialize)]
+pub struct AppliedDirective {
+    pub name: String,
+    pub arguments: Vec<(String, serde_json::Value)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,13 +95,14 @@ pub struct TypeDefinition {
     pub description: Option<String>,
     pub one_of: bool,
     pub fields: Vec<FieldDefinition>,
+    pub applied_directives: Vec<AppliedDirective>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UnionDefinition {
     pub name: String,
     pub description: Option<String>,
-    pub member_type_reprs: Vec<String>,
+    pub member_names: Vec<String>,
     pub has_custom_resolve_type: bool,
 }
 
@@ -157,7 +173,12 @@ pub struct CompiledSchema {
     pub mutation_type_name: Option<String>,
     pub subscription_type_name: Option<String>,
     pub operation_directives: HashMap<String, OperationDirectiveDefinition>,
+    pub schema_directives: HashMap<String, SchemaDirectiveDefinition>,
     pub scalar_names: HashSet<String>,
+    /// `SchemaConfig(auto_camel_case=...)` (default `true`, matching Strawberry's own default):
+    /// whether a field/argument with no explicit `name=` override defaults to a camelCase
+    /// rendering of its Python identifier (`post_id` -> `postId`) or the identifier as-is.
+    pub auto_camel_case: bool,
     /// A fresh, empty cache per `CompiledSchema` -- constructing a new `Schema()` naturally
     /// flushes it (Task 10's schema-reload decision), since there's nothing to inherit from.
     pub persisted_query_cache: crate::persisted_query::PersistedQueryCache,

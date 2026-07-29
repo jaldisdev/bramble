@@ -86,7 +86,8 @@ class _Square(_Shape):
 
 
 class _AudioRecord:
-    pass
+    def __init__(self, title: str) -> None:
+        self.title = title
 
 
 @bramble.type
@@ -164,6 +165,20 @@ def test_alias_is_used_as_response_key() -> None:
     result = schema.execute('query { hi: greet(name: "Bo") }')
 
     assert result == {"data": {"hi": "hi Bo"}}
+
+
+def test_field_name_override_is_the_only_valid_query_name() -> None:
+    @bramble.type
+    class Query:
+        internal_name: str = bramble.field(name="publicName", default="hi")
+
+    schema = bramble.Schema(query=Query)
+    root = Query()
+
+    assert schema.execute("query { publicName }", root_value=root) == {"data": {"publicName": "hi"}}
+
+    with pytest.raises(bramble.GraphQLError, match="internalName"):
+        schema.execute("query { internalName }", root_value=root)
 
 
 def test_variables_resolve_into_arguments() -> None:
@@ -307,7 +322,7 @@ def test_nullable_list_item_failure_nulls_just_that_item() -> None:
             return [_ListItem(), _ListItem()]
 
     schema = bramble.Schema(query=Query)
-    result = schema.execute("query { items { value(should_fail: true) } }")
+    result = schema.execute("query { items { value(shouldFail: true) } }")
 
     assert result["data"] == {"items": [None, None]}
     assert len(result["errors"]) == 2
@@ -325,7 +340,7 @@ def test_non_null_list_item_failure_nulls_the_whole_list() -> None:
             return "fine"
 
     schema = bramble.Schema(query=Query)
-    result = schema.execute("query { items { value(should_fail: true) } sibling }")
+    result = schema.execute("query { items { value(shouldFail: true) } sibling }")
 
     assert result["data"] == {"items": None, "sibling": "fine"}
     # Execution aborts the list on the first failing item rather than continuing.
@@ -340,7 +355,7 @@ def test_non_null_list_item_failure_propagates_past_a_non_null_list_field() -> N
             return [_ListItem(), _ListItem()]
 
     schema = bramble.Schema(query=Query)
-    result = schema.execute("query { items { value(should_fail: true) } }")
+    result = schema.execute("query { items { value(shouldFail: true) } }")
 
     assert result["data"] is None
     assert len(result["errors"]) == 1
@@ -455,11 +470,16 @@ def test_unresolvable_interface_type_raises_graphql_error() -> None:
 
 
 def test_union_dispatch_via_resolve_type() -> None:
+    """`_resolve_media_type` dispatches on the *domain* object's own type (`_AudioRecord`), not
+    the GraphQL type -- matching how a real resolver would return a raw domain record rather than
+    an instance of the `@bramble.type`-decorated class itself.
+    """
+
     @bramble.type
     class Query:
         @bramble.field
         def media() -> MediaItem:
-            return _Audio(title="song")
+            return _AudioRecord(title="song")
 
     schema = bramble.Schema(query=Query, types=[_Audio, _Video])
     result = schema.execute(
@@ -552,9 +572,9 @@ def test_mutation_fields_execute_serially_in_query_order() -> None:
             return "b"
 
     schema = bramble.Schema(query=Query, mutation=Mutation)
-    result = schema.execute("mutation { step_a step_b }")
+    result = schema.execute("mutation { stepA stepB }")
 
-    assert result == {"data": {"step_a": "a", "step_b": "b"}}
+    assert result == {"data": {"stepA": "a", "stepB": "b"}}
     assert calls == ["a", "b"]
 
 
@@ -678,3 +698,58 @@ def test_execute_async_directly() -> None:
     result = asyncio.run(schema.execute_async('query { greet(name: "Ada") }'))
 
     assert result == {"data": {"greet": "hi Ada"}}
+
+
+# --- auto_camel_case -----------------------------------------------------------------------------
+
+
+def test_snake_case_field_and_argument_are_queryable_as_camel_case_by_default() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def post_by_slug(post_id: str) -> str:
+            return f"post {post_id}"
+
+    schema = bramble.Schema(query=Query)
+    result = schema.execute('query { postBySlug(postId: "p1") }')
+
+    assert result == {"data": {"postBySlug": "post p1"}}
+
+
+def test_snake_case_names_are_no_longer_queryable_once_camel_cased() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def post_by_slug(post_id: str) -> str:
+            return f"post {post_id}"
+
+    schema = bramble.Schema(query=Query)
+
+    with pytest.raises(bramble.GraphQLError, match="post_by_slug"):
+        schema.execute('query { post_by_slug(post_id: "p1") }')
+
+
+def test_auto_camel_case_false_keeps_raw_snake_case_names() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def post_by_slug(post_id: str) -> str:
+            return f"post {post_id}"
+
+    schema = bramble.Schema(query=Query, config=SchemaConfig(auto_camel_case=False))
+    result = schema.execute('query { post_by_slug(post_id: "p1") }')
+
+    assert result == {"data": {"post_by_slug": "post p1"}}
+
+
+def test_explicit_name_override_takes_priority_over_auto_camel_case() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field(name="customName")
+        def post_by_slug(post_id: str) -> str:
+            return f"post {post_id}"
+
+    schema = bramble.Schema(query=Query)
+    result = schema.execute('query { customName(postId: "p1") }')
+
+    assert result == {"data": {"customName": "post p1"}}

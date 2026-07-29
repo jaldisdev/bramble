@@ -108,17 +108,43 @@ def _build_info(
     return info
 
 
-def _map_arguments(argument_defs: Sequence["ArgumentInfo"], provided: dict[str, Any]) -> dict[str, Any]:
+def _to_camel_case(name: str) -> str:
+    """Mirrors `bramble_core::naming::to_camel_case` exactly (`post_id` -> `postId`) -- must stay
+    in lockstep with the Rust implementation validation uses, or a query could pass validation
+    (Rust) but fail to bind at execution time (Python), or vice versa.
+    """
+    result: list[str] = []
+    capitalize_next = False
+    for char in name:
+        if char == "_":
+            capitalize_next = True
+        elif capitalize_next:
+            result.append(char.upper())
+            capitalize_next = False
+        else:
+            result.append(char)
+    return "".join(result)
+
+
+def _effective_name(name: str, graphql_name: str | None, *, auto_camel_case: bool) -> str:
+    if graphql_name is not None:
+        return graphql_name
+    return _to_camel_case(name) if auto_camel_case else name
+
+
+def _map_arguments(
+    argument_defs: Sequence["ArgumentInfo"], provided: dict[str, Any], *, auto_camel_case: bool
+) -> dict[str, Any]:
     """Maps a dict keyed by GraphQL argument name (as written in the query, already resolved to
     real Python values by `lower_query`) onto the Python keyword names a resolver/directive
-    function actually declares. Mirrors `argument_key()`'s graphql_name-or-name convention from
-    `bramble-core`'s own validation, just evaluated here in Python: which concrete type ends up
-    owning a field (and thus its true parameter names) isn't known until execution reaches it, so
-    this mapping can't be precomputed during lowering (see `LoweredField`'s own doc comment).
+    function actually declares. Mirrors `argument_key()`'s convention from `bramble-core`'s own
+    validation, just evaluated here in Python: which concrete type ends up owning a field (and
+    thus its true parameter names) isn't known until execution reaches it, so this mapping can't
+    be precomputed during lowering (see `LoweredField`'s own doc comment).
     """
     kwargs: dict[str, Any] = {}
     for argument in argument_defs:
-        graphql_key = argument.graphql_name if argument.graphql_name is not None else argument.name
+        graphql_key = _effective_name(argument.name, argument.graphql_name, auto_camel_case=auto_camel_case)
         if graphql_key in provided:
             kwargs[argument.name] = provided[graphql_key]
     return kwargs
@@ -154,7 +180,7 @@ def _bind_resolver_kwargs(
     info: Info,
     schema: "Schema",
 ) -> dict[str, Any]:
-    kwargs = _map_arguments(field_info.arguments, lowered_field.arguments)
+    kwargs = _map_arguments(field_info.arguments, lowered_field.arguments, auto_camel_case=schema.config.auto_camel_case)
     for argument in field_info.arguments:
         if argument.name in kwargs:
             kwargs[argument.name] = _coerce_argument_value(argument, kwargs[argument.name], schema)
@@ -197,7 +223,9 @@ async def _apply_custom_directives(directives: Sequence[Any], value: Any, schema
                 code=ErrorCode.INVALID_DIRECTIVE_LOCATION,
             )
         directive_info = directive_function.__bramble_directive_info__
-        mapped_arguments = _map_arguments(directive_info.arguments, directive.arguments)
+        mapped_arguments = _map_arguments(
+            directive_info.arguments, directive.arguments, auto_camel_case=schema.config.auto_camel_case
+        )
         result = apply_directive(directive_function, value, mapped_arguments)
         if inspect.isawaitable(result):
             result = await result
@@ -272,9 +300,10 @@ def _applicable_selections(
     return result
 
 
-def _find_field_info(concrete_type: type, field_name: str) -> "FieldInfo | None":
+def _find_field_info(concrete_type: type, field_name: str, *, auto_camel_case: bool) -> "FieldInfo | None":
     for field_info in concrete_type.__bramble_type_info__.fields:
-        if field_info.name == field_name:
+        graphql_key = _effective_name(field_info.name, field_info.graphql_name, auto_camel_case=auto_camel_case)
+        if graphql_key == field_name:
             return field_info
     return None
 
@@ -415,7 +444,9 @@ async def _execute_selection_set(
             result[response_key] = concrete_type.__bramble_type_info__.name
             continue
 
-        field_info = _find_field_info(concrete_type, lowered_field.field_name)
+        field_info = _find_field_info(
+            concrete_type, lowered_field.field_name, auto_camel_case=state.schema.config.auto_camel_case
+        )
         if field_info is None:
             raise GraphQLError(
                 f"field '{lowered_field.field_name}' does not exist on type "

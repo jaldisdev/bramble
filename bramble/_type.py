@@ -146,22 +146,34 @@ def _restore_resolvers(cls: _type) -> None:
             setattr(cls, dataclass_field.name, resolver)
 
 
-def _validate_directive_locations(directives: Sequence[object], kind: str, cls_name: str) -> None:
+def _validate_directive_locations(directives: Sequence[object], required_location: Location, owner_name: str) -> None:
     """A schema directive declares which locations it's legal to use at (§6); check the
-    directives applied here against the location that matches `kind`. Only recognizes objects
-    produced by `@bramble.schema_directive` (anything else -- e.g. a future non-bramble
-    metadata object -- is skipped rather than rejected).
+    directives applied here against `required_location`. Only recognizes objects produced by
+    `@bramble.schema_directive` (anything else -- e.g. a future non-bramble metadata object -- is
+    skipped rather than rejected).
     """
-    required_location = _LOCATION_BY_KIND[kind]
     for directive in directives:
         info = getattr(_type(directive), "__bramble_directive_info__", None)
         if info is None:
             continue
         if required_location.value not in info.locations:
             raise SchemaError(
-                f"directive '@{info.name}' cannot be applied to '{cls_name}' ({required_location.value}); "
+                f"directive '@{info.name}' cannot be applied to '{owner_name}' ({required_location.value}); "
                 f"declared locations: {', '.join(info.locations)}"
             )
+
+
+def _validate_field_directive_locations(cls: _type) -> None:
+    """Same check as `_validate_directive_locations`, but for each field's own
+    `bramble.field(directives=[...])` against `FIELD_DEFINITION` -- distinct from the type-level
+    check, which validates directives applied to the type itself. A plain (non-`bramble.field`)
+    dataclass field has no `.directives` attribute at all, hence the `getattr` default.
+    """
+    for dataclass_field in dataclasses.fields(cls):
+        field_directives = getattr(dataclass_field, "directives", ())
+        _validate_directive_locations(
+            field_directives, Location.FIELD_DEFINITION, f"{cls.__name__}.{dataclass_field.name}"
+        )
 
 
 def _process_type(
@@ -177,7 +189,8 @@ def _process_type(
         _ensure_field_annotations(cls)
         cls = dataclasses.dataclass(cls, kw_only=True)
         _restore_resolvers(cls)
-        _validate_directive_locations(directives, kind, cls.__name__)
+        _validate_directive_locations(directives, _LOCATION_BY_KIND[kind], cls.__name__)
+        _validate_field_directive_locations(cls)
 
         cls.__bramble_type_info__ = process_type(
             cls,
@@ -187,6 +200,12 @@ def _process_type(
             directives=tuple(directives),
             one_of=one_of,
         )
+        # `process_type` (Rust) already extracted these directives' *values* into
+        # `TypeDefinition.applied_directives` for SDL rendering -- kept here too, on the Python
+        # side, so `Schema()`'s graph walker (§7b) can discover each *class* of schema directive
+        # actually in use (locations/field defs, for its own `directive @name(...) on ...`
+        # declaration), which the already-extracted values alone can't reconstruct.
+        cls.__bramble_applied_directives__ = tuple(directives)
         return cls
 
     if cls is None:

@@ -8,6 +8,7 @@ use async_graphql_value::{Name, Value};
 
 use crate::document::select_operation;
 use crate::error::{ErrorCode, GraphQLError, GraphQLResult, Location};
+use crate::naming::to_camel_case;
 use crate::schema::{ArgumentDefinition, CompiledSchema, FieldDefinition, GraphQLType, OperationDirectiveLocation, TypeDefinition, TypeKind};
 
 fn operation_directive_location_str(location: OperationDirectiveLocation) -> String {
@@ -131,8 +132,14 @@ fn check_value_matches_type(value: &Value, expected: &GraphQLType, schema: &Comp
     }
 }
 
-fn argument_key(argument: &ArgumentDefinition) -> &str {
-    argument.graphql_name.as_deref().unwrap_or(&argument.name)
+/// The GraphQL-facing name an argument/field is actually queried by: its explicit `name=`
+/// override if it declared one, else a camelCase rendering of the Python identifier (or the
+/// identifier as-is, if `SchemaConfig(auto_camel_case=False)`).
+fn argument_key(argument: &ArgumentDefinition, auto_camel_case: bool) -> String {
+    if let Some(graphql_name) = &argument.graphql_name {
+        return graphql_name.clone();
+    }
+    if auto_camel_case { to_camel_case(&argument.name) } else { argument.name.clone() }
 }
 
 /// Validates a selection/directive's provided arguments against its declared ones: every
@@ -147,13 +154,16 @@ fn check_arguments(
 ) -> GraphQLResult<()> {
     for (arg_name, arg_value) in provided {
         let name = arg_name.node.as_str();
-        let argument_def = declared.iter().find(|argument| argument_key(argument) == name).ok_or_else(|| {
-            error_at(
-                format!("unknown argument '{name}' on '{owner_name}'"),
-                ErrorCode::UnknownArgument,
-                arg_name.pos,
-            )
-        })?;
+        let argument_def = declared
+            .iter()
+            .find(|argument| argument_key(argument, schema.auto_camel_case) == name)
+            .ok_or_else(|| {
+                error_at(
+                    format!("unknown argument '{name}' on '{owner_name}'"),
+                    ErrorCode::UnknownArgument,
+                    arg_name.pos,
+                )
+            })?;
 
         check_value_matches_type(&arg_value.node, &argument_def.graphql_type, schema).map_err(|reason| {
             error_at(
@@ -166,9 +176,10 @@ fn check_arguments(
 
     for argument_def in declared {
         let is_required = !argument_def.graphql_type.is_nullable() && !argument_def.has_default;
-        if is_required && !provided.iter().any(|(name, _)| name.node.as_str() == argument_key(argument_def)) {
+        let key = argument_key(argument_def, schema.auto_camel_case);
+        if is_required && !provided.iter().any(|(name, _)| name.node.as_str() == key) {
             return Err(error_at(
-                format!("missing required argument '{}' on '{owner_name}'", argument_key(argument_def)),
+                format!("missing required argument '{key}' on '{owner_name}'"),
                 ErrorCode::ArgumentTypeMismatch,
                 pos,
             ));
@@ -178,8 +189,15 @@ fn check_arguments(
     Ok(())
 }
 
-fn find_field<'a>(type_def: &'a TypeDefinition, name: &str) -> Option<&'a FieldDefinition> {
-    type_def.fields.iter().find(|field| field.name == name)
+fn field_key(field: &FieldDefinition, auto_camel_case: bool) -> String {
+    if let Some(graphql_name) = &field.graphql_name {
+        return graphql_name.clone();
+    }
+    if auto_camel_case { to_camel_case(&field.name) } else { field.name.clone() }
+}
+
+fn find_field<'a>(type_def: &'a TypeDefinition, name: &str, auto_camel_case: bool) -> Option<&'a FieldDefinition> {
+    type_def.fields.iter().find(|field| field_key(field, auto_camel_case) == name)
 }
 
 fn validate_field(
@@ -195,7 +213,7 @@ fn validate_field(
         return Ok(());
     }
 
-    let field_def = find_field(parent_type, field_name).ok_or_else(|| {
+    let field_def = find_field(parent_type, field_name, schema.auto_camel_case).ok_or_else(|| {
         error_at(
             format!("field '{field_name}' does not exist on type '{}'", parent_type.name),
             ErrorCode::UnknownField,

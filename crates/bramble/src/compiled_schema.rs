@@ -5,6 +5,7 @@ use bramble_core::schema::CompiledSchema;
 use pyo3::prelude::*;
 
 use crate::operation_directive_info::PyOperationDirectiveInfo;
+use crate::schema_directive_info::PySchemaDirectiveInfo;
 use crate::type_info::PyTypeInfo;
 use crate::union_info::PyUnionInfo;
 
@@ -25,7 +26,7 @@ pub struct PyCompiledSchema {
 /// `definition` fields), so this is just re-keying already-computed data by name, not re-deriving
 /// anything from the Python classes themselves.
 #[pyfunction]
-#[pyo3(signature = (*, query_type_name, mutation_type_name=None, subscription_type_name=None, types, unions, directives, scalar_names))]
+#[pyo3(signature = (*, query_type_name, mutation_type_name=None, subscription_type_name=None, types, unions, directives, schema_directives, scalar_names, auto_camel_case=true))]
 #[allow(clippy::too_many_arguments)]
 pub fn compile_schema(
     query_type_name: String,
@@ -34,7 +35,9 @@ pub fn compile_schema(
     types: Vec<PyRef<'_, PyTypeInfo>>,
     unions: Vec<PyRef<'_, PyUnionInfo>>,
     directives: Vec<PyRef<'_, PyOperationDirectiveInfo>>,
+    schema_directives: Vec<PyRef<'_, PySchemaDirectiveInfo>>,
     scalar_names: Vec<String>,
+    auto_camel_case: bool,
 ) -> PyResult<PyCompiledSchema> {
     let types = types
         .iter()
@@ -51,6 +54,11 @@ pub fn compile_schema(
         .map(|info| (info.definition.name.clone(), info.definition.clone()))
         .collect::<HashMap<_, _>>();
 
+    let schema_directives = schema_directives
+        .iter()
+        .map(|info| (info.definition.name.clone(), info.definition.clone()))
+        .collect::<HashMap<_, _>>();
+
     let schema = CompiledSchema {
         types,
         unions,
@@ -58,7 +66,9 @@ pub fn compile_schema(
         mutation_type_name,
         subscription_type_name,
         operation_directives,
+        schema_directives,
         scalar_names: scalar_names.into_iter().collect::<HashSet<_>>(),
+        auto_camel_case,
         persisted_query_cache: PersistedQueryCache::new(),
     };
 

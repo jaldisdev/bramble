@@ -91,30 +91,80 @@ mod tests {
         let error = GraphQLError::new("boom", ErrorCode::GraphqlParseFailed)
             .with_locations(vec![Location { line: 1, column: 2 }]);
 
-        let json = serde_json::to_value(&error).unwrap();
-
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "message": "boom",
-                "locations": [{"line": 1, "column": 2}],
-                "extensions": {"code": "GRAPHQL_PARSE_FAILED"},
-            })
-        );
+        insta::assert_json_snapshot!(error, @r###"
+        {
+          "message": "boom",
+          "locations": [
+            {
+              "line": 1,
+              "column": 2
+            }
+          ],
+          "extensions": {
+            "code": "GRAPHQL_PARSE_FAILED"
+          }
+        }
+        "###);
     }
 
     #[test]
     fn omits_absent_optional_fields() {
         let error = GraphQLError::new("boom", ErrorCode::GraphqlValidationFailed);
 
-        let json = serde_json::to_value(&error).unwrap();
+        insta::assert_json_snapshot!(error, @r###"
+        {
+          "message": "boom",
+          "extensions": {
+            "code": "GRAPHQL_VALIDATION_FAILED"
+          }
+        }
+        "###);
+    }
 
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "message": "boom",
-                "extensions": {"code": "GRAPHQL_VALIDATION_FAILED"},
-            })
-        );
+    #[test]
+    fn serializes_multiple_locations_and_a_path() {
+        let mut error = GraphQLError::new("field error", ErrorCode::FieldResolutionFailed)
+            .with_locations(vec![Location { line: 1, column: 2 }, Location { line: 3, column: 4 }]);
+        error.path = Some(vec![serde_json::json!("items"), serde_json::json!(0), serde_json::json!("value")]);
+
+        insta::assert_json_snapshot!(error, @r###"
+        {
+          "message": "field error",
+          "locations": [
+            {
+              "line": 1,
+              "column": 2
+            },
+            {
+              "line": 3,
+              "column": 4
+            }
+          ],
+          "path": [
+            "items",
+            0,
+            "value"
+          ],
+          "extensions": {
+            "code": "FIELD_RESOLUTION_FAILED"
+          }
+        }
+        "###);
+    }
+
+    #[test]
+    fn serializes_custom_extensions_flattened_alongside_code() {
+        let mut error = GraphQLError::new("not found", ErrorCode::UnknownField);
+        error.extensions.custom.insert("itemId".to_string(), serde_json::json!("42"));
+
+        insta::assert_json_snapshot!(error, @r###"
+        {
+          "message": "not found",
+          "extensions": {
+            "code": "UNKNOWN_FIELD",
+            "itemId": "42"
+          }
+        }
+        "###);
     }
 }

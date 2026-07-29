@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+from typing import Annotated, NewType, Union
+
+import bramble
+from bramble.directive import DirectiveLocation, DirectiveValue
+from bramble.schema.config import SchemaConfig
+from bramble.schema_directive import Location
+
+# `typing.get_type_hints` can only see module globals, never an enclosing test function's locals
+# (see test_schema.py's own comment on this) -- anything referenced *from another annotation*
+# (a field type, a directive's own DirectiveValue[T] parameter) has to live at module level here.
+
+
+@bramble.type
+class _Audio:
+    title: str
+
+
+@bramble.type
+class _Video:
+    title: str
+
+
+MediaItem = Annotated[Union[_Audio, _Video], bramble.union("MediaItem")]
+
+Base64 = NewType("Base64", bytes)
+
+
+@bramble.directive(locations=[DirectiveLocation.FIELD])
+def turn_uppercase(value: DirectiveValue[str]) -> str:
+    return value.upper()
+
+
+def test_to_sdl_renders_schema_block_and_object_type() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def greet(name: str) -> str:
+            return f"hi {name}"
+
+    schema = bramble.Schema(query=Query)
+    sdl = schema.to_sdl()
+
+    assert "schema {\n  query: Query\n}" in sdl
+    assert "type Query {\n  greet(name: String!): String!\n}" in sdl
+
+
+def test_str_of_schema_matches_to_sdl() -> None:
+    @bramble.type
+    class Query:
+        hello: str
+
+    schema = bramble.Schema(query=Query)
+
+    assert str(schema) == schema.to_sdl()
+
+
+def test_to_sdl_renders_type_description() -> None:
+    @bramble.type(description="The root query type")
+    class Query:
+        hello: str
+
+    schema = bramble.Schema(query=Query)
+
+    assert '"""The root query type"""\ntype Query' in schema.to_sdl()
+
+
+def test_to_sdl_renders_field_description() -> None:
+    @bramble.type
+    class Query:
+        hello: str = bramble.field(description="a greeting", default="hi")
+
+    schema = bramble.Schema(query=Query)
+
+    assert '"""a greeting"""\n  hello: String!' in schema.to_sdl()
+
+
+def test_to_sdl_renders_field_name_override() -> None:
+    @bramble.type
+    class Query:
+        internal: str = bramble.field(name="publicName", default="x")
+
+    schema = bramble.Schema(query=Query)
+
+    assert "publicName: String!" in schema.to_sdl()
+    assert "internal:" not in schema.to_sdl()
+
+
+def test_to_sdl_renders_applied_type_level_directive_with_arguments() -> None:
+    @bramble.schema_directive(locations=[Location.OBJECT])
+    class Keys:
+        fields: str
+
+    @bramble.type(directives=[Keys(fields="id")])
+    class User:
+        id: str
+
+    @bramble.type
+    class Query:
+        user: User
+
+    schema = bramble.Schema(query=Query, types=[User])
+    sdl = schema.to_sdl()
+
+    assert 'type User @keys(fields: "id") {' in sdl
+    assert "directive @keys(fields: String!) on OBJECT" in sdl
+
+
+def test_to_sdl_renders_applied_field_level_directive() -> None:
+    @bramble.schema_directive(locations=[Location.FIELD_DEFINITION])
+    class Deprecated:
+        reason: str
+
+    @bramble.type
+    class Query:
+        old: str = bramble.field(directives=[Deprecated(reason="use new")], default="x")
+
+    schema = bramble.Schema(query=Query)
+    sdl = schema.to_sdl()
+
+    assert 'old: String! @deprecated(reason: "use new")' in sdl
+    assert "directive @deprecated(reason: String!) on FIELD_DEFINITION" in sdl
+
+
+def test_to_sdl_renders_union() -> None:
+    @bramble.type
+    class Query:
+        media: MediaItem
+
+    schema = bramble.Schema(query=Query, types=[_Audio, _Video])
+
+    assert "union MediaItem = _Audio | _Video" in schema.to_sdl()
+
+
+def test_to_sdl_renders_custom_scalar() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def data() -> Base64:
+            return b""
+
+    schema = bramble.Schema(query=Query, config=SchemaConfig(scalar_map={Base64: bramble.scalar(name="Base64")}))
+
+    assert "scalar Base64" in schema.to_sdl()
+
+
+def test_to_sdl_renders_operation_directive() -> None:
+    @bramble.type
+    class Query:
+        hello: str
+
+    schema = bramble.Schema(query=Query, directives=[turn_uppercase])
+
+    assert "directive @turnUppercase on FIELD" in schema.to_sdl()
+
+
+def test_to_sdl_renders_mutation_in_schema_block() -> None:
+    @bramble.type
+    class Query:
+        hello: str
+
+    @bramble.type
+    class Mutation:
+        @bramble.field
+        def noop() -> str:
+            return "noop"
+
+    schema = bramble.Schema(query=Query, mutation=Mutation)
+
+    assert "schema {\n  query: Query\n  mutation: Mutation\n}" in schema.to_sdl()

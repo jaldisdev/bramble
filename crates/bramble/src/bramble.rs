@@ -7,6 +7,7 @@ mod operation_directive_info;
 mod persisted_query;
 mod resolver_binding;
 mod schema_directive_info;
+mod sdl;
 mod type_info;
 mod typing_utils;
 mod union_info;
@@ -44,5 +45,6 @@ fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<compiled_schema::PyCompiledSchema>()?;
     module.add_function(wrap_pyfunction!(validation::validate_query, module)?)?;
     module.add_function(wrap_pyfunction!(persisted_query::resolve_persisted_query, module)?)?;
+    module.add_function(wrap_pyfunction!(sdl::render_sdl, module)?)?;
     Ok(())
 }

@@ -127,3 +127,35 @@ def test_non_directive_objects_in_directives_are_ignored() -> None:
         value: int
 
     assert Harmless(value=1).value == 1
+
+
+def test_field_level_directive_at_field_definition_location_succeeds() -> None:
+    @bramble.schema_directive(locations=[Location.FIELD_DEFINITION])
+    class Deprecated:
+        reason: str
+
+    @bramble.type
+    class Query:
+        old_field: str = bramble.field(directives=[Deprecated(reason="use newField")], default="x")
+
+    assert Query().old_field == "x"
+
+
+def test_field_level_directive_at_disallowed_location_fails_with_clear_error() -> None:
+    @bramble.schema_directive(locations=[Location.OBJECT])
+    class ObjectOnly:
+        pass
+
+    with pytest.raises(bramble.SchemaError, match="FIELD_DEFINITION"):
+
+        @bramble.type
+        class Query:
+            f: str = bramble.field(directives=[ObjectOnly()], default="x")
+
+
+def test_non_directive_objects_in_field_directives_are_ignored() -> None:
+    @bramble.type
+    class Query:
+        f: str = bramble.field(directives=[object()], default="x")
+
+    assert Query().f == "x"

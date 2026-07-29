@@ -23,6 +23,26 @@ def test_nested_types() -> None:
     assert author_field.graphql_type == "Author!"
 
 
+def test_field_name_and_description_overrides_reach_the_schema_ir() -> None:
+    @bramble.type
+    class Query:
+        internal: str = bramble.field(name="publicName", description="a public field", default="x")
+
+    field_info = Query.__bramble_type_info__.fields[0]
+    assert field_info.graphql_name == "publicName"
+    assert field_info.description == "a public field"
+
+
+def test_field_without_overrides_has_no_graphql_name_or_description() -> None:
+    @bramble.type
+    class Query:
+        plain: str
+
+    field_info = Query.__bramble_type_info__.fields[0]
+    assert field_info.graphql_name is None
+    assert field_info.description is None
+
+
 def test_interface_inheritance_chain() -> None:
     @bramble.interface
     class Error:

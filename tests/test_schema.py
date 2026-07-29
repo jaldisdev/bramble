@@ -8,6 +8,7 @@ import pytest
 import bramble
 from bramble.directive import DirectiveLocation, DirectiveValue
 from bramble.schema.config import SchemaConfig
+from bramble.schema_directive import Location as SchemaDirectiveLocation
 
 # `typing.get_type_hints` can't see an enclosing test function's local scope (only module
 # globals), so a NewType/Annotated alias referenced by a field must live at module level here --
@@ -282,3 +283,63 @@ def test_optional_field_is_not_registered_as_a_union() -> None:
     schema = bramble.Schema(query=Query)
 
     assert schema.unions_by_name == {}
+
+
+def test_schema_directives_applied_to_a_type_are_discovered() -> None:
+    @bramble.schema_directive(locations=[SchemaDirectiveLocation.OBJECT])
+    class Keys:
+        fields: str
+
+    @bramble.type(directives=[Keys(fields="id")])
+    class User:
+        id: str
+
+    @bramble.type
+    class Query:
+        user: User
+
+    schema = bramble.Schema(query=Query, types=[User])
+
+    assert "keys" in schema.schema_directives_by_name
+    assert schema.schema_directives_by_name["keys"].locations == ["OBJECT"]
+
+
+def test_schema_directives_applied_to_a_field_are_discovered() -> None:
+    @bramble.schema_directive(locations=[SchemaDirectiveLocation.FIELD_DEFINITION])
+    class Deprecated:
+        reason: str
+
+    @bramble.type
+    class Query:
+        old_field: str = bramble.field(directives=[Deprecated(reason="use newField")], default="x")
+
+    schema = bramble.Schema(query=Query)
+
+    assert "deprecated" in schema.schema_directives_by_name
+
+
+def test_schema_directives_applied_to_an_interface_only_are_discovered() -> None:
+    """The interface is only reachable here through `ConcreteNode` (its implementor) -- the
+    query never references `Node` directly as a field's own annotation, which used to mean
+    `_discover_type` never ran on `Node` itself, silently dropping its own applied directives.
+    """
+
+    @bramble.schema_directive(locations=[SchemaDirectiveLocation.INTERFACE])
+    class InterfaceOnly:
+        pass
+
+    @bramble.interface(directives=[InterfaceOnly()])
+    class Node:
+        id: str
+
+    @bramble.type
+    class ConcreteNode(Node):
+        id: str
+
+    @bramble.type
+    class Query:
+        node: ConcreteNode
+
+    schema = bramble.Schema(query=Query, types=[ConcreteNode])
+
+    assert "interfaceOnly" in schema.schema_directives_by_name

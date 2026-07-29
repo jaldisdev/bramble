@@ -13,7 +13,7 @@ use crate::error::raise;
 /// GraphQL variable values (booleans, numbers, strings, null, lists, string-keyed objects).
 /// `PyBool` must be checked before numeric extraction: Python's `bool` is a subclass of `int`, so
 /// `value.extract::<i64>()` would otherwise silently accept `True`/`False` as `1`/`0`.
-fn python_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<JsonValue> {
+pub(crate) fn python_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<JsonValue> {
     if value.is_none() {
         return Ok(JsonValue::Null);
     }

@@ -1,9 +1,10 @@
-use bramble_core::schema::{ArgumentDefinition, FieldDefinition, GraphQLType, TypeDefinition, TypeKind};
+use bramble_core::schema::{AppliedDirective, ArgumentDefinition, FieldDefinition, GraphQLType, TypeDefinition, TypeKind};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
+use crate::lowering::python_to_json_value;
 use crate::resolver_binding::bind_resolver_arguments;
 use crate::typing_utils::resolve_graphql_type;
 
@@ -74,8 +75,10 @@ pub(crate) fn convert_argument(py: Python<'_>, argument: ArgumentDefinition) -> 
 #[pyclass(name = "FieldInfo", frozen, get_all, skip_from_py_object)]
 pub struct PyFieldInfo {
     pub name: String,
+    pub graphql_name: Option<String>,
     pub graphql_type: String,
     pub type_info: Py<PyGraphQLType>,
+    pub description: Option<String>,
     pub is_nullable: bool,
     pub has_resolver: bool,
     pub parent_parameter: Option<String>,
@@ -92,9 +95,11 @@ pub(crate) fn convert_field(py: Python<'_>, field: FieldDefinition) -> PyResult<
 
     Ok(PyFieldInfo {
         name: field.name,
+        graphql_name: field.graphql_name,
         is_nullable: field.graphql_type.is_nullable(),
         graphql_type: field.graphql_type.to_sdl_string(),
         type_info: Py::new(py, convert_graphql_type(py, &field.graphql_type)?)?,
+        description: field.description,
         has_resolver: field.has_resolver,
         parent_parameter: field.parent_parameter,
         info_parameter: field.info_parameter,
@@ -130,6 +135,40 @@ fn parse_kind(kind: &str) -> PyResult<TypeKind> {
             "unknown type kind '{other}' (expected 'type', 'interface', or 'input')"
         ))),
     }
+}
+
+/// Converts a sequence of applied schema-directive instances (§6) into `AppliedDirective`s ready
+/// for SDL rendering -- location legality is already checked in Python (`_validate_directive_locations`)
+/// before this runs, so this is purely value extraction: for each instance that actually is a
+/// `@bramble.schema_directive`-decorated object (anything else is silently ignored, matching
+/// `directives=[...]`'s existing "non-directive objects are ignored" behavior), read its own
+/// `__bramble_directive_info__` for the directive's name and declared fields, then read each
+/// field's *value* off the instance itself and convert it the same way a resolved argument value
+/// would be (`python_to_json_value`).
+fn extract_applied_directives(directives: &Bound<'_, PyAny>) -> PyResult<Vec<AppliedDirective>> {
+    let mut result = Vec::new();
+
+    for item in directives.try_iter()? {
+        let item = item?;
+        let Ok(info) = item.getattr("__bramble_directive_info__") else {
+            continue;
+        };
+
+        let name: String = info.getattr("name")?.extract()?;
+        let mut arguments = Vec::new();
+        for field in info.getattr("fields")?.try_iter()? {
+            let field = field?;
+            let field_name: String = field.getattr("name")?.extract()?;
+            let graphql_name: Option<String> = field.getattr("graphql_name")?.extract()?;
+            let key = graphql_name.unwrap_or_else(|| field_name.clone());
+            let value = item.getattr(field_name.as_str())?;
+            arguments.push((key, python_to_json_value(&value)?));
+        }
+
+        result.push(AppliedDirective { name, arguments });
+    }
+
+    Ok(result)
 }
 
 /// Reads `cls`'s fields off `dataclasses.fields(cls)` -- by the time this runs, `bramble._type`
@@ -171,6 +210,14 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
         .map(|dataclass_field| {
             let dataclass_field = dataclass_field?;
             let name: String = dataclass_field.getattr("name")?.extract()?;
+            let graphql_name: Option<String> = dataclass_field
+                .getattr("graphql_name")
+                .ok()
+                .and_then(|value| value.extract().ok());
+            let description: Option<String> = dataclass_field
+                .getattr("description")
+                .ok()
+                .and_then(|value| value.extract().ok());
             let raw_type = dataclass_field.getattr("type")?;
             let resolved_type = resolved_hints.get_item(&name)?.unwrap_or_else(|| raw_type.clone());
             let graphql_type = resolve_graphql_type(py, &typing, &resolved_type)?;
@@ -185,13 +232,23 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
                 (None, None, Vec::new())
             };
 
+            // A plain (non-`bramble.field`) dataclass field has no `.directives` attribute --
+            // `getattr`'s default handles that the same way `graphql_name`/`resolver` already do.
+            let field_directives = dataclass_field
+                .getattr("directives")
+                .unwrap_or_else(|_| pyo3::types::PyTuple::empty(py).into_any());
+            let applied_directives = extract_applied_directives(&field_directives)?;
+
             Ok(FieldDefinition {
                 name,
+                graphql_name,
                 graphql_type,
+                description,
                 has_resolver,
                 parent_parameter,
                 info_parameter,
                 arguments,
+                applied_directives,
             })
         })
         .collect()
@@ -213,7 +270,7 @@ pub fn process_type(
     directives: &Bound<'_, PyAny>,
     one_of: bool,
 ) -> PyResult<PyTypeInfo> {
-    let _ = directives;
+    let applied_directives = extract_applied_directives(directives)?;
 
     let type_kind = parse_kind(kind)?;
     let fields = read_fields(py, cls)?;
@@ -238,6 +295,7 @@ pub fn process_type(
         description,
         one_of,
         fields,
+        applied_directives,
     };
 
     let fields_info = definition
