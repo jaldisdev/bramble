@@ -31,6 +31,10 @@ pub enum ErrorCode {
     InvalidFragmentTarget,
     PersistedQueryNotFound,
     PersistedQueryMismatch,
+    /// Never raised from Rust -- kept in lockstep with `bramble._error.ErrorCode` (§8) so the
+    /// executor (pure Python, since it needs live resolved values) can report a resolver
+    /// exception using the same typed code space as every other bramble error.
+    FieldResolutionFailed,
 }
 
 #[derive(Serialize, Debug, Clone)]

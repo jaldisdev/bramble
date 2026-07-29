@@ -1,4 +1,4 @@
-use bramble_core::schema::{ArgumentDefinition, FieldDefinition, TypeDefinition, TypeKind};
+use bramble_core::schema::{ArgumentDefinition, FieldDefinition, GraphQLType, TypeDefinition, TypeKind};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -14,56 +14,92 @@ create_exception!(
     "Raised for bramble schema build-time errors."
 );
 
+/// A structured mirror of `bramble_core::schema::GraphQLType`, recursive through `of_type` the
+/// same way `NonNull`/`List` wrap an inner type. Exists alongside the flat SDL-string
+/// `graphql_type` (kept for display/backward compatibility) because execution (Task 11) needs to
+/// walk `NonNull`/`List` wrapping structurally for correct null-propagation -- a rendered
+/// `"[String!]!"` can't drive that logic without re-parsing it.
+#[pyclass(name = "GraphQLTypeInfo", frozen, get_all, skip_from_py_object)]
+pub struct PyGraphQLType {
+    pub kind: String,
+    pub name: Option<String>,
+    pub of_type: Option<Py<PyGraphQLType>>,
+}
+
+fn convert_graphql_type(py: Python<'_>, graphql_type: &GraphQLType) -> PyResult<PyGraphQLType> {
+    match graphql_type {
+        GraphQLType::Named(name) => Ok(PyGraphQLType {
+            kind: "NAMED".to_string(),
+            name: Some(name.clone()),
+            of_type: None,
+        }),
+        GraphQLType::List(inner) => Ok(PyGraphQLType {
+            kind: "LIST".to_string(),
+            name: None,
+            of_type: Some(Py::new(py, convert_graphql_type(py, inner)?)?),
+        }),
+        GraphQLType::NonNull(inner) => Ok(PyGraphQLType {
+            kind: "NON_NULL".to_string(),
+            name: None,
+            of_type: Some(Py::new(py, convert_graphql_type(py, inner)?)?),
+        }),
+    }
+}
+
 #[pyclass(name = "ArgumentInfo", frozen, get_all, skip_from_py_object)]
-#[derive(Clone)]
 pub struct PyArgumentInfo {
     pub name: String,
     pub graphql_name: Option<String>,
     pub graphql_type: String,
+    pub type_info: Py<PyGraphQLType>,
     pub is_nullable: bool,
     pub has_default: bool,
     pub description: Option<String>,
     pub deprecation_reason: Option<String>,
 }
 
-impl From<ArgumentDefinition> for PyArgumentInfo {
-    fn from(argument: ArgumentDefinition) -> Self {
-        Self {
-            name: argument.name,
-            graphql_name: argument.graphql_name,
-            is_nullable: argument.graphql_type.is_nullable(),
-            graphql_type: argument.graphql_type.to_sdl_string(),
-            has_default: argument.has_default,
-            description: argument.description,
-            deprecation_reason: argument.deprecation_reason,
-        }
-    }
+pub(crate) fn convert_argument(py: Python<'_>, argument: ArgumentDefinition) -> PyResult<PyArgumentInfo> {
+    Ok(PyArgumentInfo {
+        name: argument.name,
+        graphql_name: argument.graphql_name,
+        is_nullable: argument.graphql_type.is_nullable(),
+        graphql_type: argument.graphql_type.to_sdl_string(),
+        type_info: Py::new(py, convert_graphql_type(py, &argument.graphql_type)?)?,
+        has_default: argument.has_default,
+        description: argument.description,
+        deprecation_reason: argument.deprecation_reason,
+    })
 }
 
 #[pyclass(name = "FieldInfo", frozen, get_all, skip_from_py_object)]
-#[derive(Clone)]
 pub struct PyFieldInfo {
     pub name: String,
     pub graphql_type: String,
+    pub type_info: Py<PyGraphQLType>,
     pub is_nullable: bool,
     pub has_resolver: bool,
     pub parent_parameter: Option<String>,
     pub info_parameter: Option<String>,
-    pub arguments: Vec<PyArgumentInfo>,
+    pub arguments: Vec<Py<PyArgumentInfo>>,
 }
 
-impl From<FieldDefinition> for PyFieldInfo {
-    fn from(field: FieldDefinition) -> Self {
-        Self {
-            name: field.name,
-            is_nullable: field.graphql_type.is_nullable(),
-            graphql_type: field.graphql_type.to_sdl_string(),
-            has_resolver: field.has_resolver,
-            parent_parameter: field.parent_parameter,
-            info_parameter: field.info_parameter,
-            arguments: field.arguments.into_iter().map(PyArgumentInfo::from).collect(),
-        }
-    }
+pub(crate) fn convert_field(py: Python<'_>, field: FieldDefinition) -> PyResult<PyFieldInfo> {
+    let arguments = field
+        .arguments
+        .into_iter()
+        .map(|argument| Py::new(py, convert_argument(py, argument)?))
+        .collect::<PyResult<Vec<_>>>()?;
+
+    Ok(PyFieldInfo {
+        name: field.name,
+        is_nullable: field.graphql_type.is_nullable(),
+        graphql_type: field.graphql_type.to_sdl_string(),
+        type_info: Py::new(py, convert_graphql_type(py, &field.graphql_type)?)?,
+        has_resolver: field.has_resolver,
+        parent_parameter: field.parent_parameter,
+        info_parameter: field.info_parameter,
+        arguments,
+    })
 }
 
 #[pyclass(name = "TypeInfo", frozen)]
@@ -77,7 +113,7 @@ pub struct PyTypeInfo {
     #[pyo3(get)]
     pub one_of: bool,
     #[pyo3(get)]
-    pub fields: Vec<PyFieldInfo>,
+    pub fields: Vec<Py<PyFieldInfo>>,
     /// Not Python-exposed -- the original Rust IR, kept so `Schema()` (Task 8b's graph walker)
     /// can hand already-computed `TypeInfo`s straight to `compile_schema` (Task 9) without a
     /// lossy round-trip back through the display-friendly fields above (re-parsing SDL type
@@ -204,12 +240,19 @@ pub fn process_type(
         fields,
     };
 
+    let fields_info = definition
+        .fields
+        .iter()
+        .cloned()
+        .map(|field| Py::new(py, convert_field(py, field)?))
+        .collect::<PyResult<Vec<_>>>()?;
+
     Ok(PyTypeInfo {
         kind: kind.to_string(),
         name: definition.name.clone(),
         description: definition.description.clone(),
         one_of: definition.one_of,
-        fields: definition.fields.iter().cloned().map(PyFieldInfo::from).collect(),
+        fields: fields_info,
         definition,
     })
 }

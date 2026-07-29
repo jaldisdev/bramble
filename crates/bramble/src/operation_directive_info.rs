@@ -2,7 +2,7 @@ use bramble_core::schema::{OperationDirectiveDefinition, OperationDirectiveLocat
 use pyo3::prelude::*;
 
 use crate::resolver_binding::{classify_argument, resolve_annotations};
-use crate::type_info::{PyArgumentInfo, SchemaError};
+use crate::type_info::{convert_argument, PyArgumentInfo, SchemaError};
 
 #[pyclass(name = "OperationDirectiveInfo", frozen, skip_from_py_object)]
 pub struct PyOperationDirectiveInfo {
@@ -15,7 +15,7 @@ pub struct PyOperationDirectiveInfo {
     #[pyo3(get)]
     pub value_parameter: Option<String>,
     #[pyo3(get)]
-    pub arguments: Vec<PyArgumentInfo>,
+    pub arguments: Vec<Py<PyArgumentInfo>>,
     /// Not Python-exposed -- see `PyTypeInfo::definition`'s doc comment for why.
     pub definition: OperationDirectiveDefinition,
 }
@@ -137,12 +137,19 @@ pub fn describe_operation_directive(
         arguments,
     };
 
+    let arguments_info = definition
+        .arguments
+        .iter()
+        .cloned()
+        .map(|argument| Py::new(py, convert_argument(py, argument)?))
+        .collect::<PyResult<Vec<_>>>()?;
+
     Ok(PyOperationDirectiveInfo {
         name: definition.name.clone(),
         description: definition.description.clone(),
         locations: definition.locations.iter().copied().map(location_str).collect(),
         value_parameter: definition.value_parameter.clone(),
-        arguments: definition.arguments.iter().cloned().map(PyArgumentInfo::from).collect(),
+        arguments: arguments_info,
         definition,
     })
 }

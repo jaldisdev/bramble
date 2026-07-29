@@ -2,11 +2,11 @@ use pyo3::prelude::*;
 
 mod compiled_schema;
 mod error;
+mod lowering;
 mod operation_directive_info;
 mod persisted_query;
 mod resolver_binding;
 mod schema_directive_info;
-mod skip_include;
 mod type_info;
 mod typing_utils;
 mod union_info;
@@ -18,6 +18,7 @@ fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<type_info::PyTypeInfo>()?;
     module.add_class::<type_info::PyFieldInfo>()?;
     module.add_class::<type_info::PyArgumentInfo>()?;
+    module.add_class::<type_info::PyGraphQLType>()?;
     module.add(
         "SchemaError",
         module.py().get_type::<type_info::SchemaError>(),
@@ -31,8 +32,9 @@ fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_class::<schema_directive_info::PySchemaDirectiveInfo>()?;
     module.add_class::<schema_directive_info::PyDirectiveFieldInfo>()?;
-    module.add_function(wrap_pyfunction!(skip_include::prune_selections, module)?)?;
-    module.add_class::<skip_include::PyPrunedField>()?;
+    module.add_function(wrap_pyfunction!(lowering::lower_query, module)?)?;
+    module.add_class::<lowering::PyLoweredField>()?;
+    module.add_class::<lowering::PyLoweredDirective>()?;
     module.add_function(wrap_pyfunction!(
         operation_directive_info::describe_operation_directive,
         module

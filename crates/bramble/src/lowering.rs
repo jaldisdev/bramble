@@ -1,0 +1,230 @@
+use std::collections::HashMap;
+
+use async_graphql_value::Value;
+use bramble_core::error::{ErrorCode, GraphQLError as CoreGraphQLError};
+use bramble_core::lowering::{LoweredArgument, LoweredDirective, LoweredField, lower_document};
+use pyo3::prelude::*;
+use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
+use serde_json::Value as JsonValue;
+
+use crate::error::raise;
+
+/// Converts a Python value into `serde_json::Value`, covering the subset actually needed for
+/// GraphQL variable values (booleans, numbers, strings, null, lists, string-keyed objects).
+/// `PyBool` must be checked before numeric extraction: Python's `bool` is a subclass of `int`, so
+/// `value.extract::<i64>()` would otherwise silently accept `True`/`False` as `1`/`0`.
+fn python_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<JsonValue> {
+    if value.is_none() {
+        return Ok(JsonValue::Null);
+    }
+    if let Ok(boolean) = value.cast::<PyBool>() {
+        return Ok(JsonValue::Bool(boolean.is_true()));
+    }
+    if let Ok(integer) = value.extract::<i64>() {
+        return Ok(JsonValue::from(integer));
+    }
+    if let Ok(float) = value.extract::<f64>() {
+        return Ok(JsonValue::from(float));
+    }
+    if let Ok(string) = value.extract::<String>() {
+        return Ok(JsonValue::String(string));
+    }
+    if let Ok(list) = value.cast::<PyList>() {
+        let items = list
+            .iter()
+            .map(|item| python_to_json_value(&item))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(JsonValue::Array(items));
+    }
+    if let Ok(dict) = value.cast::<PyDict>() {
+        let mut map = serde_json::Map::new();
+        for (key, item_value) in dict.iter() {
+            let key: String = key.extract()?;
+            map.insert(key, python_to_json_value(&item_value)?);
+        }
+        return Ok(JsonValue::Object(map));
+    }
+    Err(pyo3::exceptions::PyValueError::new_err(format!(
+        "value of type '{}' is not JSON-serializable",
+        value.get_type().name()?
+    )))
+}
+
+/// Converts a parsed GraphQL literal `Value` into the Python object a resolver would receive as
+/// an argument -- `python_to_json_value`'s mirror, but starting from a query AST node instead of
+/// a Python value, and resolving `Value::Variable` by name against `variable_values` instead of
+/// erroring on an unhandled type. There's no unrepresentable-value failure mode here (every
+/// `Value` variant has some Python equivalent); the only way this fails is an undefined variable
+/// reference, since full variable-definition coercion (checking a use against its declared type)
+/// is out of scope until it's needed (see `check_value_matches_type`'s doc comment in
+/// `bramble-core`). `Value::Enum` becomes a plain Python `str` of its name -- bramble has no
+/// schema concept of enum types yet, so there's no richer target to coerce into.
+pub(crate) fn graphql_value_to_python(
+    py: Python<'_>,
+    value: &Value,
+    variable_values: &Bound<'_, PyDict>,
+) -> PyResult<Py<PyAny>> {
+    match value {
+        Value::Variable(name) => {
+            let name = name.as_str();
+            match variable_values.get_item(name)? {
+                Some(bound_value) => Ok(bound_value.unbind()),
+                None => Err(raise(
+                    py,
+                    Box::new(CoreGraphQLError::new(
+                        format!("query references undefined variable '${name}'"),
+                        ErrorCode::GraphqlValidationFailed,
+                    )),
+                )),
+            }
+        }
+        Value::Null => Ok(py.None()),
+        Value::Number(number) => {
+            if let Some(int_value) = number.as_i64() {
+                Ok(int_value.into_pyobject(py)?.into_any().unbind())
+            } else if let Some(float_value) = number.as_f64() {
+                Ok(float_value.into_pyobject(py)?.into_any().unbind())
+            } else {
+                Err(raise(
+                    py,
+                    Box::new(CoreGraphQLError::new(
+                        format!("number literal '{number}' is out of range"),
+                        ErrorCode::GraphqlValidationFailed,
+                    )),
+                ))
+            }
+        }
+        Value::String(string) => Ok(string.into_pyobject(py)?.into_any().unbind()),
+        Value::Boolean(boolean) => Ok(boolean.into_pyobject(py)?.to_owned().into_any().unbind()),
+        Value::Binary(bytes) => Ok(PyBytes::new(py, bytes).into_any().unbind()),
+        Value::Enum(name) => Ok(name.as_str().into_pyobject(py)?.into_any().unbind()),
+        Value::List(items) => {
+            let list = PyList::empty(py);
+            for item in items {
+                list.append(graphql_value_to_python(py, item, variable_values)?)?;
+            }
+            Ok(list.into_any().unbind())
+        }
+        Value::Object(map) => {
+            let dict = PyDict::new(py);
+            for (key, item_value) in map {
+                dict.set_item(key.as_str(), graphql_value_to_python(py, item_value, variable_values)?)?;
+            }
+            Ok(dict.into_any().unbind())
+        }
+    }
+}
+
+#[pyclass(name = "LoweredDirective", frozen, get_all, skip_from_py_object)]
+pub struct PyLoweredDirective {
+    pub name: String,
+    pub arguments: Py<PyDict>,
+}
+
+/// A field surviving `@skip`/`@include` pruning, ready for execution (§7a/§11): its arguments and
+/// custom directives' arguments are already resolved to real Python objects (variables substituted
+/// via `graphql_value_to_python`), but which resolver ultimately owns `field_name` -- and thus how
+/// `arguments`' GraphQL names map to the resolver's actual Python parameter names -- isn't decided
+/// here. For a field reached through an interface/union, that depends on the concrete value
+/// resolved at runtime (`type_condition` narrows *which* selections apply to that concrete type,
+/// but doesn't change that the binding itself is deferred); resolving it any earlier would bake in
+/// a possibly-wrong parameter mapping. See `bramble_core::lowering::LoweredField`'s own doc comment.
+#[pyclass(name = "LoweredField", frozen, get_all, skip_from_py_object)]
+pub struct PyLoweredField {
+    pub response_key: String,
+    pub field_name: String,
+    pub type_condition: Option<String>,
+    pub arguments: Py<PyDict>,
+    pub directives: Vec<Py<PyLoweredDirective>>,
+    pub selections: Vec<Py<PyLoweredField>>,
+}
+
+fn convert_arguments(
+    py: Python<'_>,
+    arguments: Vec<LoweredArgument>,
+    variable_values: &Bound<'_, PyDict>,
+) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    for argument in arguments {
+        let value = graphql_value_to_python(py, &argument.value, variable_values)?;
+        dict.set_item(argument.graphql_name, value)?;
+    }
+    Ok(dict.unbind())
+}
+
+fn convert_directive(
+    py: Python<'_>,
+    directive: LoweredDirective,
+    variable_values: &Bound<'_, PyDict>,
+) -> PyResult<PyLoweredDirective> {
+    Ok(PyLoweredDirective {
+        name: directive.name,
+        arguments: convert_arguments(py, directive.arguments, variable_values)?,
+    })
+}
+
+fn convert_field(py: Python<'_>, field: LoweredField, variable_values: &Bound<'_, PyDict>) -> PyResult<PyLoweredField> {
+    let directives = field
+        .directives
+        .into_iter()
+        .map(|directive| Py::new(py, convert_directive(py, directive, variable_values)?))
+        .collect::<PyResult<Vec<_>>>()?;
+    let selections = field
+        .selections
+        .into_iter()
+        .map(|selection| Py::new(py, convert_field(py, selection, variable_values)?))
+        .collect::<PyResult<Vec<_>>>()?;
+
+    Ok(PyLoweredField {
+        response_key: field.response_key,
+        field_name: field.field_name,
+        type_condition: field.type_condition,
+        arguments: convert_arguments(py, field.arguments, variable_values)?,
+        directives,
+        selections,
+    })
+}
+
+/// Parses `query` and lowers its (optionally named) operation into a `LoweredField` tree (§7a/§11):
+/// `@skip`/`@include`d selections pruned and fragment spreads/inline fragments flattened (evaluating
+/// each directive's `if` argument against `variable_values`, substituting `$variable` references
+/// throughout field/directive arguments the same way). Schema-agnostic, like `validate_query` and
+/// the pruning pass this replaces -- it only needs the query document and this request's variables,
+/// not the compiled schema, since resolver binding and interface/union type dispatch both need a
+/// concrete value that doesn't exist until execution actually reaches that field. Returns
+/// `(operation_type, fields)`: the operation type ("query"/"mutation"/"subscription") is what the
+/// execution bridge needs to pick the schema's matching root type before resolving anything.
+#[pyfunction]
+#[pyo3(signature = (query, *, variable_values, operation_name=None))]
+pub fn lower_query(
+    py: Python<'_>,
+    query: &str,
+    variable_values: &Bound<'_, PyDict>,
+    operation_name: Option<String>,
+) -> PyResult<(&'static str, Vec<Py<PyLoweredField>>)> {
+    let document = bramble_core::parse_document(query).map_err(|error| raise(py, error))?;
+
+    // Only used for `@skip`/`@include`'s own `if` argument, which is always a boolean (or a
+    // variable that should be one) -- a variable that can't convert to JSON at all (a `datetime`,
+    // a custom scalar's own object, ...) could never have legitimately been a boolean anyway, so
+    // it's left out of this map rather than failing the whole request over a variable that isn't
+    // even used for skip/include. Field/directive arguments never consult this map: they resolve
+    // straight from `variable_values` (the original Python objects) via `graphql_value_to_python`.
+    let mut variables = HashMap::with_capacity(variable_values.len());
+    for (key, value) in variable_values.iter() {
+        let key: String = key.extract()?;
+        if let Ok(json_value) = python_to_json_value(&value) {
+            variables.insert(key, json_value);
+        }
+    }
+
+    let (operation_type, lowered) =
+        lower_document(&document, &variables, operation_name.as_deref()).map_err(|error| raise(py, error))?;
+
+    let fields = lowered
+        .into_iter()
+        .map(|field| Py::new(py, convert_field(py, field, variable_values)?))
+        .collect::<PyResult<Vec<_>>>()?;
+
+    Ok((bramble_core::lowering::operation_type_str(operation_type), fields))
+}
