@@ -74,7 +74,7 @@ pytest
 
 - `crates/bramble-core` — pure Rust: parsing, validation, lowering, SDL
   rendering, error types. No Python dependency.
-- `crates/bramble` — PyO3 bindings exposing `bramble-core` to Python.
+- `crates/bramble-py` — PyO3 bindings exposing `bramble-core` to Python.
 - `bramble/` — the Python package: schema-declaration decorators, execution
   engine, and the public API.
 - `tests/` — Python test suite.

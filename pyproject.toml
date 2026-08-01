@@ -5,6 +5,9 @@ build-backend = "maturin"
 [project]
 name = "bramble"
 version = "0.1.0"
+authors = [
+    { name = "Mario Ritzerfeld" }
+]
 description = "A GraphQL library for Python with a Rust-based parser/validator"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
@@ -29,5 +32,5 @@ dev = [
 bramble = "bramble.cli.app:main"
 
 [tool.maturin]
-manifest-path = "crates/bramble/Cargo.toml"
+manifest-path = "crates/bramble-py/Cargo.toml"
 module-name = "bramble._bramble"
