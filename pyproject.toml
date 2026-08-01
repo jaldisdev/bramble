@@ -15,7 +15,7 @@ asgi = ["python-multipart>=0.0.9"]
 starlette = ["starlette>=0.37", "python-multipart>=0.0.9"]
 fastapi = ["fastapi>=0.100", "python-multipart>=0.0.9"]
 flask = ["flask>=2.0", "asgiref>=3.7", "python-multipart>=0.0.9"]
-django = ["django>=4.1", "channels>=4.0", "python-multipart>=0.0.9"]
+django = ["django>=4.2", "channels>=4.0", "python-multipart>=0.0.9"]
 cli = ["click>=8.1", "uvicorn>=0.30", "bramble[starlette]"]
 dev = [
     "pytest",

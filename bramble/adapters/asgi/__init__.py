@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import io
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, TypeGuard
 from urllib.parse import parse_qsl
 
@@ -17,6 +17,7 @@ from python_multipart.multipart import parse_form
 
 from bramble.http.async_base_view import AsyncBaseHTTPView
 from bramble.http.exceptions import HTTPException
+from bramble.http.multipart import multipart_content_type
 from bramble.subscriptions import GRAPHQL_TRANSPORT_WS_PROTOCOL
 
 if TYPE_CHECKING:
@@ -101,6 +102,29 @@ class _RawResponse:
         await send({"type": "http.response.body", "body": self.body})
 
 
+class _RawStreamingResponse:
+    """The `multipart/mixed` (§ incremental delivery) response shape -- unlike `_RawResponse`,
+    sends its body as a sequence of `more_body: True` chunks as `stream` itself produces them,
+    mirroring `_RawHTTPRequest.body()`'s existing chunked read on the request side.
+    """
+
+    def __init__(self, stream: AsyncIterator[bytes], content_type: str) -> None:
+        self._stream = stream
+        self.content_type = content_type
+
+    async def send(self, send: Send) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", self.content_type.encode("latin-1"))],
+            }
+        )
+        async for chunk in self._stream:
+            await send({"type": "http.response.body", "body": chunk, "more_body": True})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
 class _RawWebSocket:
     """Satisfies `bramble.subscriptions.graphql_transport_ws.WebSocketProtocol` directly against
     the raw ASGI websocket events -- no Starlette `WebSocket` involved.
@@ -147,7 +171,9 @@ class _RawWebSocket:
         await self._send(message)
 
 
-class GraphQL(AsyncBaseHTTPView[_RawHTTPRequest, _RawResponse, _RawWebSocket, _RawWebSocket]):
+class GraphQL(
+    AsyncBaseHTTPView[_RawHTTPRequest, _RawResponse | _RawStreamingResponse, _RawWebSocket, _RawWebSocket]
+):
     """A plain ASGI application serving `schema` over HTTP (GET/POST, JSON and multipart bodies,
     batching if `schema.config.batching_config` enables it, the GraphiQL IDE on a bare browser
     `GET`) and WebSocket (the `graphql-transport-ws` subscription protocol) -- functionally
@@ -191,6 +217,9 @@ class GraphQL(AsyncBaseHTTPView[_RawHTTPRequest, _RawResponse, _RawWebSocket, _R
 
     def create_html_response(self, html: str) -> _RawResponse:
         return _RawResponse(200, html.encode(), "text/html; charset=utf-8")
+
+    async def create_multipart_response(self, stream: AsyncIterator[bytes]) -> _RawStreamingResponse:
+        return _RawStreamingResponse(stream, multipart_content_type())
 
     def is_websocket_request(self, request: _RawHTTPRequest | _RawWebSocket) -> TypeGuard[_RawWebSocket]:
         return isinstance(request, _RawWebSocket)

@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, TypeGuard
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocket
 
 from bramble.http.async_base_view import AsyncBaseHTTPView
 from bramble.http.exceptions import HTTPException
+from bramble.http.multipart import multipart_content_type
 from bramble.subscriptions import GRAPHQL_TRANSPORT_WS_PROTOCOL
 
 if TYPE_CHECKING:
@@ -65,6 +66,9 @@ class GraphQL(AsyncBaseHTTPView[Request, Response, WebSocket, WebSocket]):
 
     def create_html_response(self, html: str) -> Response:
         return HTMLResponse(html)
+
+    async def create_multipart_response(self, stream: AsyncIterator[bytes]) -> Response:
+        return StreamingResponse(stream, media_type=multipart_content_type())
 
     def is_websocket_request(self, request: Request | WebSocket) -> TypeGuard[WebSocket]:
         return isinstance(request, WebSocket)

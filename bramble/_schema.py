@@ -16,6 +16,7 @@ from bramble._bramble import (
 )
 from bramble._execution import execute as _execute
 from bramble._execution import execute_async as _execute_async
+from bramble._execution import execute_incremental as _execute_incremental
 from bramble._execution import subscribe_async as _subscribe_async
 from bramble._lazy import LazyType, namespace_for_callable, namespace_for_class
 from bramble._private import is_private
@@ -452,6 +453,34 @@ class Schema:
             root_value=root_value,
             operation_name=operation_name,
         )
+
+    async def execute_incremental(
+        self,
+        query: str,
+        *,
+        variable_values: dict[str, Any] | None = None,
+        context: Any = None,
+        root_value: Any = None,
+        operation_name: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Executes a query/mutation operation using `@defer`/`@stream`, yielding the initial
+        `{"data": ..., "hasNext": bool}` payload followed by zero or more `{"incremental": [...],
+        "hasNext": bool}` patches. See `bramble._execution.execute_incremental` for the concrete
+        payload shape/scope this implements. Async-only, like `subscribe_async` -- an incremental
+        delivery is as open-ended as a subscription's own event stream, so there's no synchronous
+        `asyncio.run`-based convenience wrapper here either. A query/mutation with no active
+        `@defer`/`@stream` marker should go through `execute_async` instead -- it's the
+        zero-overhead path for that overwhelmingly common case.
+        """
+        async for response in _execute_incremental(
+            self,
+            query,
+            variable_values=variable_values,
+            context=context,
+            root_value=root_value,
+            operation_name=operation_name,
+        ):
+            yield response
 
     async def subscribe_async(
         self,

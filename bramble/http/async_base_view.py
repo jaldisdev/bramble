@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeGuard, TypeVar
 
+from bramble._bramble import lower_query
 from bramble._error import GraphQLError, error_to_dict
+from bramble._execution import _has_incremental_markers
 from bramble.http.base import BaseRequestProtocol, BaseView
 from bramble.http.exceptions import HTTPException
+from bramble.http.multipart import MULTIPART_MIXED_BOUNDARY, encode_multipart_stream
 from bramble.http.parse_content_type import parse_content_type
 from bramble.http.types import GraphQLRequestData
 from bramble.subscriptions.graphql_transport_ws import GRAPHQL_TRANSPORT_WS_PROTOCOL, GraphQLTransportWSHandler
@@ -58,6 +61,17 @@ class AsyncBaseHTTPView(
         raise NotImplementedError
 
     def create_html_response(self, html: str) -> Response:
+        raise NotImplementedError
+
+    async def create_multipart_response(self, stream: AsyncIterator[bytes]) -> Response:
+        """Builds a `multipart/mixed` streaming response (§ incremental delivery) from
+        `stream`'s already-framed bytes (`bramble.http.multipart.encode_multipart_stream`'s own
+        output) -- only ever called for a single (non-batch), `@defer`/`@stream`-using POST
+        operation; a concrete adapter that can't stream a chunked response (none currently can't --
+        see each adapter's own module for how it does) would raise here instead.
+        `bramble.http.multipart.multipart_content_type()` gives the matching top-level
+        `Content-Type` header value to set on whatever response object this constructs.
+        """
         raise NotImplementedError
 
     def is_websocket_request(self, request: Request | WebSocketRequest) -> TypeGuard[WebSocketRequest]:
@@ -123,6 +137,40 @@ class AsyncBaseHTTPView(
             # `errors` list -- still rendered in the same spec shape, just as the whole response.
             return {"data": None, "errors": [error_to_dict(error)]}
 
+    def _needs_incremental_delivery(self, request_data: GraphQLRequestData) -> bool:
+        """A cheap lowering peek to decide whether this single operation uses `@defer`/`@stream`
+        at all -- mirrors `GraphQLTransportWSHandler._run_operation`'s identical "peek, then let
+        the real call re-lower properly" pattern (`bramble/subscriptions/graphql_transport_ws.py`).
+        A malformed query is deliberately not raised here -- `_execute`'s own real
+        `schema.execute_async` call surfaces that error in the normal (non-streamed) response
+        shape, which is simpler for a client to handle than a malformed query arriving as a
+        `multipart/mixed` stream.
+        """
+        if request_data.query is None:
+            return False
+        try:
+            _, fields = lower_query(
+                request_data.query,
+                variable_values=request_data.variables or {},
+                operation_name=request_data.operation_name,
+            )
+        except GraphQLError:
+            return False
+        return _has_incremental_markers(fields)
+
+    async def _stream_incremental(
+        self, request_data: GraphQLRequestData, context: Any, root_value: Any
+    ) -> AsyncIterator[dict[str, Any]]:
+        assert request_data.query is not None
+        async for payload in self.schema.execute_incremental(
+            request_data.query,
+            variable_values=request_data.variables,
+            context=context,
+            root_value=root_value,
+            operation_name=request_data.operation_name,
+        ):
+            yield payload
+
     async def _run_websocket(self, request: WebSocketRequest) -> WebSocketResponse:
         subprotocol = await self.pick_websocket_subprotocol(request)
         websocket = await self.create_websocket_response(request, subprotocol)
@@ -162,5 +210,15 @@ class AsyncBaseHTTPView(
             )
             return self.create_response(list(results))
 
-        result = await self._execute(request_data_list[0], context, root_value)
+        request_data = request_data_list[0]
+
+        # `@defer`/`@stream` delivery is `multipart/mixed` over POST only (§ incremental delivery
+        # scope notes) -- a single, non-batched operation, never a GET query or a batch entry (the
+        # reference incremental-delivery spec itself only ever streams a single operation's own
+        # response, not a batch of them).
+        if protocol_request.method == "POST" and self._needs_incremental_delivery(request_data):
+            stream = encode_multipart_stream(self._stream_incremental(request_data, context, root_value))
+            return await self.create_multipart_response(stream)
+
+        result = await self._execute(request_data, context, root_value)
         return self.create_response(result)

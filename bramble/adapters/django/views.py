@@ -8,13 +8,14 @@ dispatch) -- no extra wiring needed beyond defining the view as a plain coroutin
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from typing import TYPE_CHECKING, Any
 
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 
 from bramble.http.async_base_view import AsyncBaseHTTPView
 from bramble.http.exceptions import HTTPException
+from bramble.http.multipart import multipart_content_type
 
 if TYPE_CHECKING:
     from django.core.files.uploadedfile import UploadedFile
@@ -79,6 +80,9 @@ class _GraphQLHTTPHandler(AsyncBaseHTTPView[HttpRequest, HttpResponse, Any, Any]
 
     def create_html_response(self, html: str) -> HttpResponse:
         return HttpResponse(html, content_type="text/html; charset=utf-8")
+
+    async def create_multipart_response(self, stream: AsyncIterator[bytes]) -> HttpResponse:
+        return StreamingHttpResponse(stream, content_type=multipart_content_type())
 
     def is_websocket_request(self, request: Any) -> Any:
         return False

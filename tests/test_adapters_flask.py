@@ -25,6 +25,22 @@ class _Query:
         return len(content)
 
 
+@bramble.type
+class _Author:
+    name: str
+
+
+@bramble.type
+class _DeferrableQuery:
+    @bramble.field
+    def id() -> str:
+        return "q1"
+
+    @bramble.field
+    def author() -> _Author:
+        return _Author(name="Ada")
+
+
 def _make_client(schema: bramble.Schema) -> FlaskClient:
     app = Flask(__name__)
     app.register_blueprint(graphql_view(schema, path="/graphql"))
@@ -98,6 +114,28 @@ def test_post_multipart_upload_executes() -> None:
 
     assert response.status_code == 200
     assert response.get_json() == {"data": {"uploadSize": len(b"hello upload")}}
+
+
+def test_defer_query_streams_a_multipart_mixed_response() -> None:
+    schema = bramble.Schema(query=_DeferrableQuery, types=[_Author])
+    client = _make_client(schema)
+
+    response = client.post("/graphql", json={"query": "query { id ... @defer { author { name } } }"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == 'multipart/mixed; boundary="graphql"'
+    body = response.get_data()
+    assert body == (
+        b"--graphql\r\n"
+        b"Content-Type: application/json; charset=utf-8\r\n"
+        b"\r\n"
+        b'{"data": {"id": "q1"}, "hasNext": true}\r\n'
+        b"--graphql\r\n"
+        b"Content-Type: application/json; charset=utf-8\r\n"
+        b"\r\n"
+        b'{"incremental": [{"data": {"author": {"name": "Ada"}}, "path": []}], "hasNext": false}\r\n'
+        b"--graphql--\r\n"
+    )
 
 
 def test_disallowed_method_returns_405() -> None:

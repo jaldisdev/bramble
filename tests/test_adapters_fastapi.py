@@ -28,6 +28,22 @@ class _Subscription:
             yield i
 
 
+@bramble.type
+class _Author:
+    name: str
+
+
+@bramble.type
+class _DeferrableQuery:
+    @bramble.field
+    def id() -> str:
+        return "q1"
+
+    @bramble.field
+    def author() -> _Author:
+        return _Author(name="Ada")
+
+
 def _make_client(schema: bramble.Schema) -> TestClient:
     app = FastAPI()
     app.include_router(GraphQLRouter(schema, path="/graphql"))
@@ -90,3 +106,19 @@ def test_disallowed_method_returns_405() -> None:
     response = client.delete("/graphql")
 
     assert response.status_code == 405
+
+
+def test_defer_query_streams_a_multipart_mixed_response() -> None:
+    schema = bramble.Schema(query=_DeferrableQuery, types=[_Author])
+    client = _make_client(schema)
+
+    with client.stream(
+        "POST", "/graphql", json={"query": "query { id ... @defer { author { name } } }"}
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"] == 'multipart/mixed; boundary="graphql"'
+        body = response.read()
+
+    assert b'{"data": {"id": "q1"}, "hasNext": true}' in body
+    assert b'"author": {"name": "Ada"}' in body
+    assert body.endswith(b"--graphql--\r\n")

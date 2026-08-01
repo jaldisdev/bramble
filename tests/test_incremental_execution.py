@@ -227,3 +227,21 @@ def test_execute_async_rejects_a_query_using_stream() -> None:
     with pytest.raises(GraphQLError) as excinfo:
         asyncio.run(run())
     assert "execute_incremental" in excinfo.value.message
+
+
+# --- Schema.execute_incremental (thin wrapper) ----------------------------------------------------
+
+
+def test_schema_execute_incremental_delegates_correctly() -> None:
+    async def run() -> list[dict]:
+        return [
+            payload
+            async for payload in schema.execute_incremental(
+                'query { id ... @defer(label: "extra") { author { name } } }'
+            )
+        ]
+
+    payloads = asyncio.run(run())
+    assert payloads[0] == {"data": {"id": "q1"}, "hasNext": True}
+    assert payloads[1]["incremental"][0]["label"] == "extra"
+    assert payloads[1]["hasNext"] is False

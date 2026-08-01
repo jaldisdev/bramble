@@ -45,6 +45,22 @@ class _Subscription:
             yield i
 
 
+@bramble.type
+class _Author:
+    name: str
+
+
+@bramble.type
+class _DeferrableQuery:
+    @bramble.field
+    def id() -> str:
+        return "q1"
+
+    @bramble.field
+    def author() -> _Author:
+        return _Author(name="Ada")
+
+
 def test_view_is_a_coroutine_function() -> None:
     schema = bramble.Schema(query=_Query)
     view = graphql_view(schema)
@@ -130,6 +146,38 @@ def test_disallowed_method_returns_405() -> None:
     response = asyncio.run(view(request))
 
     assert response.status_code == 405
+
+
+def test_defer_query_streams_a_multipart_mixed_response() -> None:
+    schema = bramble.Schema(query=_DeferrableQuery, types=[_Author])
+    view = graphql_view(schema)
+    factory = RequestFactory()
+    request = factory.post(
+        "/graphql",
+        data={"query": "query { id ... @defer { author { name } } }"},
+        content_type="application/json",
+    )
+
+    async def scenario() -> tuple[int, str, bytes]:
+        response = await view(request)
+        body = b"".join([chunk async for chunk in response])
+        return response.status_code, response["content-type"], body
+
+    status_code, content_type, body = asyncio.run(scenario())
+
+    assert status_code == 200
+    assert content_type == 'multipart/mixed; boundary="graphql"'
+    assert body == (
+        b"--graphql\r\n"
+        b"Content-Type: application/json; charset=utf-8\r\n"
+        b"\r\n"
+        b'{"data": {"id": "q1"}, "hasNext": true}\r\n'
+        b"--graphql\r\n"
+        b"Content-Type: application/json; charset=utf-8\r\n"
+        b"\r\n"
+        b'{"incremental": [{"data": {"author": {"name": "Ada"}}, "path": []}], "hasNext": false}\r\n'
+        b"--graphql--\r\n"
+    )
 
 
 def test_websocket_subscription_streams_events_then_completes() -> None:
