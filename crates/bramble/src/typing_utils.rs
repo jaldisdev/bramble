@@ -71,6 +71,7 @@ struct OriginCache {
     async_generator: Py<PyAny>,
     async_iterator: Py<PyAny>,
     async_iterable: Py<PyAny>,
+    streamable: Py<PyAny>,
 }
 
 static ORIGIN_CACHE: PyOnceLock<OriginCache> = PyOnceLock::new();
@@ -84,6 +85,7 @@ fn origin_cache(py: Python<'_>) -> PyResult<&OriginCache> {
             async_generator: collections_abc.getattr("AsyncGenerator")?.unbind(),
             async_iterator: collections_abc.getattr("AsyncIterator")?.unbind(),
             async_iterable: collections_abc.getattr("AsyncIterable")?.unbind(),
+            streamable: py.import("bramble._resolver")?.getattr("Streamable")?.unbind(),
         })
     })
 }
@@ -205,6 +207,18 @@ fn resolve_core(
         let args = typing.call_method1("get_args", (annotation,))?;
         let element = args.get_item(0)?;
         return resolve_core(py, typing, &element);
+    }
+
+    // A `@stream`-capable field's resolver is *also* an async generator at runtime, but unlike a
+    // subscription's `AsyncGenerator[T, None]` (whose field type unwraps to plain `T`, since each
+    // event is its own independent top-level response), its yielded items are elements of one
+    // response array -- so `bramble.Streamable[T]` (a distinct marker, deliberately not just
+    // `AsyncGenerator[T, None]` again) resolves to `[T]` here instead of unwrapping past the list.
+    if origin.eq(cache.streamable.bind(py))? {
+        let args = typing.call_method1("get_args", (annotation,))?;
+        let element = args.get_item(0)?;
+        let inner = resolve_graphql_type(py, typing, &element)?;
+        return Ok((GraphQLType::List(Box::new(inner)), false));
     }
 
     if origin.eq(py.get_type::<pyo3::types::PyList>())? || origin.eq(py.get_type::<pyo3::types::PyTuple>())? {

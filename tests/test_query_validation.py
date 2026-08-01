@@ -14,6 +14,7 @@ class Author:
 @bramble.type
 class Query:
     author: Author
+    tags: list[str]
 
     @bramble.field
     def greet(name: str, shout: bool = False) -> str:
@@ -94,6 +95,72 @@ def test_unknown_directive_fails() -> None:
     schema = _schema()
     with pytest.raises(bramble.GraphQLError) as excinfo:
         schema.validate_query('query { greet(name: "Ada") @madeUpDirective }')
+
+    assert excinfo.value.code is bramble.ErrorCode.INVALID_DIRECTIVE_LOCATION
+
+
+# --- @defer/@stream ------------------------------------------------------------------------------
+
+
+def test_defer_on_an_inline_fragment_passes() -> None:
+    _schema().validate_query("query { ... @defer(label: \"extra\") { author { name } } }")
+
+
+def test_defer_on_a_fragment_spread_passes() -> None:
+    _schema().validate_query(
+        'query { ...Extra @defer(label: "extra") } fragment Extra on Query { author { name } }'
+    )
+
+
+def test_defer_on_a_field_fails() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError) as excinfo:
+        schema.validate_query("query { author @defer { name } }")
+
+    assert excinfo.value.code is bramble.ErrorCode.INVALID_DIRECTIVE_LOCATION
+
+
+def test_defer_with_a_non_string_label_fails() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError) as excinfo:
+        schema.validate_query("query { ... @defer(label: 123) { author { name } } }")
+
+    assert excinfo.value.code is bramble.ErrorCode.ARGUMENT_TYPE_MISMATCH
+
+
+def test_defer_with_an_unknown_argument_fails() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError) as excinfo:
+        schema.validate_query('query { ... @defer(bogus: "x") { author { name } } }')
+
+    assert excinfo.value.code is bramble.ErrorCode.UNKNOWN_ARGUMENT
+
+
+def test_stream_on_a_list_field_passes() -> None:
+    _schema().validate_query("query { tags @stream(initialCount: 1) }")
+
+
+def test_stream_on_a_non_list_field_fails() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError) as excinfo:
+        schema.validate_query("query { author @stream { name } }")
+
+    assert excinfo.value.code is bramble.ErrorCode.INVALID_DIRECTIVE_LOCATION
+    assert "@stream" in excinfo.value.message
+
+
+def test_stream_with_a_non_integer_initial_count_fails() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError) as excinfo:
+        schema.validate_query('query { tags @stream(initialCount: "one") }')
+
+    assert excinfo.value.code is bramble.ErrorCode.ARGUMENT_TYPE_MISMATCH
+
+
+def test_stream_on_a_fragment_spread_fails() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError) as excinfo:
+        schema.validate_query('query { ...Extra @stream } fragment Extra on Query { tags }')
 
     assert excinfo.value.code is bramble.ErrorCode.INVALID_DIRECTIVE_LOCATION
 

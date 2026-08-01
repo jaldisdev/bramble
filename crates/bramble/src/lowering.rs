@@ -142,6 +142,17 @@ pub struct PyLoweredField {
     /// validation error already does.
     pub line: usize,
     pub column: usize,
+    /// Whether this field is only deliverable after the initial payload, per `@defer` -- see
+    /// `bramble_core::lowering::LoweredField`'s own doc comment for the exclusivity rule deciding
+    /// this. Flattened out of the Rust-side `Option<DeferMarker>` into two plain fields (rather
+    /// than a nested pyclass) to keep this type's Python-facing shape simple.
+    pub is_deferred: bool,
+    pub defer_label: Option<String>,
+    /// Whether this field carries `@stream` directly -- only ever legal on a list-typed field
+    /// (enforced during validation, not here). Same flattening rationale as `is_deferred` above.
+    pub is_streamed: bool,
+    pub stream_initial_count: Option<i64>,
+    pub stream_label: Option<String>,
 }
 
 fn convert_arguments(
@@ -180,6 +191,15 @@ fn convert_field(py: Python<'_>, field: LoweredField, variable_values: &Bound<'_
         .map(|selection| Py::new(py, convert_field(py, selection, variable_values)?))
         .collect::<PyResult<Vec<_>>>()?;
 
+    let (is_deferred, defer_label) = match field.deferred {
+        Some(marker) => (true, marker.label),
+        None => (false, None),
+    };
+    let (is_streamed, stream_initial_count, stream_label) = match field.streamed {
+        Some(marker) => (true, Some(marker.initial_count), marker.label),
+        None => (false, None, None),
+    };
+
     Ok(PyLoweredField {
         response_key: field.response_key,
         field_name: field.field_name,
@@ -189,6 +209,11 @@ fn convert_field(py: Python<'_>, field: LoweredField, variable_values: &Bound<'_
         selections,
         line: field.location.line,
         column: field.location.column,
+        is_deferred,
+        defer_label,
+        is_streamed,
+        stream_initial_count,
+        stream_label,
     })
 }
 

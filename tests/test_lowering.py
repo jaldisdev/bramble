@@ -243,3 +243,108 @@ def test_fragment_spread_type_condition_is_preserved() -> None:
 def test_field_without_fragment_has_no_type_condition() -> None:
     _, result = lower_query("query { a }", variable_values={})
     assert result[0].type_condition is None
+
+
+# --- @defer/@stream ------------------------------------------------------------------------------
+
+
+def _by_response_key(fields, key: str):
+    return next(f for f in fields if f.response_key == key)
+
+
+def test_field_exclusive_to_a_deferred_fragment_is_marked_deferred() -> None:
+    query = """
+    query {
+        id
+        ... @defer(label: "extra") {
+            name
+        }
+    }
+    """
+    _, result = lower_query(query, variable_values={})
+
+    assert _by_response_key(result, "id").is_deferred is False
+    name = _by_response_key(result, "name")
+    assert name.is_deferred is True
+    assert name.defer_label == "extra"
+
+
+def test_deferred_field_with_no_label_has_none_label() -> None:
+    _, result = lower_query("query { ... @defer { a } }", variable_values={})
+    assert result[0].defer_label is None
+
+
+def test_field_colliding_with_a_non_deferred_sibling_is_not_deferred() -> None:
+    query = """
+    query {
+        a
+        ... @defer {
+            a
+        }
+    }
+    """
+    _, result = lower_query(query, variable_values={})
+    assert all(f.is_deferred is False for f in result)
+
+
+def test_defer_if_false_does_not_defer() -> None:
+    _, result = lower_query("query { ... @defer(if: false) { a } }", variable_values={})
+    assert result[0].is_deferred is False
+
+
+def test_defer_if_driven_by_variable() -> None:
+    query = "query($shouldDefer: Boolean!) { ... @defer(if: $shouldDefer) { a } }"
+    _, deferred = lower_query(query, variable_values={"shouldDefer": True})
+    assert deferred[0].is_deferred is True
+
+    _, not_deferred = lower_query(query, variable_values={"shouldDefer": False})
+    assert not_deferred[0].is_deferred is False
+
+
+def test_deferred_fragment_spread_is_recognized() -> None:
+    query = """
+    query {
+        id
+        ...Extra @defer
+    }
+    fragment Extra on Query {
+        name
+    }
+    """
+    _, result = lower_query(query, variable_values={})
+    assert _by_response_key(result, "id").is_deferred is False
+    assert _by_response_key(result, "name").is_deferred is True
+
+
+def test_stream_marker_on_a_field() -> None:
+    _, result = lower_query('query { items @stream(initialCount: 2, label: "batch") }', variable_values={})
+    items = result[0]
+    assert items.is_streamed is True
+    assert items.stream_initial_count == 2
+    assert items.stream_label == "batch"
+
+
+def test_stream_initial_count_defaults_to_zero() -> None:
+    _, result = lower_query("query { items @stream }", variable_values={})
+    assert result[0].stream_initial_count == 0
+
+
+def test_stream_initial_count_driven_by_variable() -> None:
+    query = "query($n: Int!) { items @stream(initialCount: $n) }"
+    _, result = lower_query(query, variable_values={"n": 5})
+    assert result[0].stream_initial_count == 5
+
+
+def test_stream_if_false_does_not_stream() -> None:
+    _, result = lower_query("query { items @stream(if: false) }", variable_values={})
+    assert result[0].is_streamed is False
+
+
+def test_field_with_neither_defer_nor_stream_has_both_unset() -> None:
+    _, result = lower_query("query { a }", variable_values={})
+    field_info = result[0]
+    assert field_info.is_deferred is False
+    assert field_info.defer_label is None
+    assert field_info.is_streamed is False
+    assert field_info.stream_initial_count is None
+    assert field_info.stream_label is None

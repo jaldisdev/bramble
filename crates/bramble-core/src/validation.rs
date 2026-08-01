@@ -22,11 +22,57 @@ fn error_at(message: impl Into<String>, code: ErrorCode, pos: async_graphql_pars
     Box::new(GraphQLError::new(message, code).with_locations(vec![Location::from(pos)]))
 }
 
+/// Checks a built-in incremental-delivery directive's (`@defer`/`@stream`) own arguments against a
+/// fixed, hardcoded shape -- these are never schema-registered (like `@skip`/`@include`, they're
+/// always legal, built in), so there's no `OperationDirectiveDefinition` to check against the way
+/// `check_arguments` does for a real custom directive; this is a small, self-contained stand-in
+/// reusing `check_value_matches_type` for the actual per-argument type-checking.
+fn validate_incremental_directive_arguments(
+    arguments: &[(Positioned<Name>, Positioned<Value>)],
+    known: &[(&str, GraphQLType)],
+    directive_name: &str,
+    schema: &CompiledSchema,
+) -> GraphQLResult<()> {
+    for (arg_name, arg_value) in arguments {
+        let name = arg_name.node.as_str();
+        let Some((_, expected_type)) = known.iter().find(|(known_name, _)| *known_name == name) else {
+            return Err(error_at(
+                format!("unknown argument '{name}' on '@{directive_name}'"),
+                ErrorCode::UnknownArgument,
+                arg_name.pos,
+            ));
+        };
+
+        check_value_matches_type(&arg_value.node, expected_type, schema).map_err(|reason| {
+            error_at(
+                format!("argument '{name}' on '@{directive_name}' {reason}"),
+                ErrorCode::ArgumentTypeMismatch,
+                arg_value.pos,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn defer_argument_shape() -> Vec<(&'static str, GraphQLType)> {
+    vec![("if", GraphQLType::Named("Boolean".to_string())), ("label", GraphQLType::Named("String".to_string()))]
+}
+
+fn stream_argument_shape() -> Vec<(&'static str, GraphQLType)> {
+    vec![
+        ("if", GraphQLType::Named("Boolean".to_string())),
+        ("label", GraphQLType::Named("String".to_string())),
+        ("initialCount", GraphQLType::Named("Int".to_string())),
+    ]
+}
+
 /// Checks every directive on a selection against the schema's registered custom operation
-/// directives (`@skip`/`@include` are always legal, built in, never registered as such) --
-/// both that the directive is known at all, and that it's used at a location its declaration
-/// allows. Argument type-checking for a directive's own arguments reuses `check_arguments`,
-/// the same logic a field's arguments go through.
+/// directives (`@skip`/`@include` are always legal, built in, never registered as such; `@defer`/
+/// `@stream` are also always legal and built in, but -- unlike skip/include -- have real argument
+/// shapes and location constraints of their own to check, per `validate_incremental_directive_arguments`
+/// above) -- both that the directive is known at all, and that it's used at a location its
+/// declaration allows. Argument type-checking for a custom directive's own arguments reuses
+/// `check_arguments`, the same logic a field's arguments go through.
 fn validate_directives(
     directives: &[Positioned<Directive>],
     location: OperationDirectiveLocation,
@@ -35,6 +81,36 @@ fn validate_directives(
     for directive in directives {
         let name = directive.node.name.node.as_str();
         if name == "skip" || name == "include" {
+            continue;
+        }
+
+        if name == "defer" {
+            if !matches!(location, OperationDirectiveLocation::InlineFragment | OperationDirectiveLocation::FragmentSpread) {
+                return Err(error_at(
+                    format!(
+                        "directive '@defer' is not allowed at this location ({})",
+                        operation_directive_location_str(location)
+                    ),
+                    ErrorCode::InvalidDirectiveLocation,
+                    directive.pos,
+                ));
+            }
+            validate_incremental_directive_arguments(&directive.node.arguments, &defer_argument_shape(), "defer", schema)?;
+            continue;
+        }
+
+        if name == "stream" {
+            if location != OperationDirectiveLocation::Field {
+                return Err(error_at(
+                    format!(
+                        "directive '@stream' is not allowed at this location ({})",
+                        operation_directive_location_str(location)
+                    ),
+                    ErrorCode::InvalidDirectiveLocation,
+                    directive.pos,
+                ));
+            }
+            validate_incremental_directive_arguments(&directive.node.arguments, &stream_argument_shape(), "stream", schema)?;
             continue;
         }
 
@@ -189,6 +265,16 @@ fn check_arguments(
     Ok(())
 }
 
+/// Whether `graphql_type` is a list at any nullability -- `[T]`, `[T]!`, both count; `T`/`T!`
+/// (a bare named type, even non-null) doesn't.
+fn is_list_type(graphql_type: &GraphQLType) -> bool {
+    match graphql_type {
+        GraphQLType::List(_) => true,
+        GraphQLType::NonNull(inner) => is_list_type(inner),
+        GraphQLType::Named(_) => false,
+    }
+}
+
 fn field_key(field: &FieldDefinition, auto_camel_case: bool) -> String {
     if let Some(graphql_name) = &field.graphql_name {
         return graphql_name.clone();
@@ -222,6 +308,19 @@ fn validate_field(
     })?;
 
     check_arguments(&field.node.arguments, &field_def.arguments, field_name, field.pos, schema)?;
+
+    if let Some(stream_directive) = field.node.directives.iter().find(|directive| directive.node.name.node.as_str() == "stream")
+        && !is_list_type(&field_def.graphql_type)
+    {
+        return Err(error_at(
+            format!(
+                "directive '@stream' can only be applied to a list-typed field, but '{field_name}' is '{}'",
+                field_def.graphql_type.to_sdl_string()
+            ),
+            ErrorCode::InvalidDirectiveLocation,
+            stream_directive.pos,
+        ));
+    }
 
     if !field.node.selection_set.node.items.is_empty()
         && let Some(nested_type) = schema.types.get(field_def.graphql_type.inner_name())

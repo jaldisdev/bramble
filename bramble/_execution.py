@@ -6,7 +6,7 @@ import decimal
 import inspect
 import uuid
 from collections.abc import AsyncGenerator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from bramble._bramble import lower_query, validate_query
@@ -627,6 +627,659 @@ async def _execute_selection_set(
     return result
 
 
+# --- @defer/@stream incremental delivery ---------------------------------------------------------
+#
+# Targets the *simpler* `path`/`data`/`hasNext` payload shape (not the newer `pending`/`id`/
+# `completed` tracking revision some other implementations have moved to) -- see the roadmap's own
+# scope notes for why. Two deliberate scope narrowings, both "fall back to eager/immediate
+# resolution" rather than silently wrong or hard-erroring:
+#   - `@defer` requires *exclusive* fields (already enforced during lowering, `LoweredField.is_deferred`
+#     is only ever set when nothing else at that same level also selects that response key) --
+#     the real spec's defer-aware `CollectFields` merge (which would still defer a field selected by
+#     two *different* deferred fragments, combining their labels) isn't implemented.
+#   - `@stream` requires the field's own resolver to already be an async generator (mirroring
+#     `Schema.subscribe_async`'s identical requirement of a subscription root field) -- not a
+#     generic "chunk any already-resolved `list[T]`" mechanism.
+
+
+@dataclass
+class _JobTracker:
+    """Tracks in-flight `@defer`/`@stream` background jobs for one `execute_incremental` call -- a
+    plain mutable counter, no lock needed: asyncio is single-threaded/cooperative, and every
+    increment/decrement here happens in a stretch of code with no `await` in between, so there's no
+    interleaving risk. Incremented synchronously right before a job's own `asyncio.Task` is created,
+    decremented by the job itself only once its own work is truly finished (a deferred job: after
+    its one-shot resolve; a streamed job: after its generator is fully drained) -- a job that itself
+    discovers *more* deferred/streamed markers while running increments this further before
+    decrementing for itself, so the count never touches zero while real work remains, even nested.
+
+    `any_spawned` is a separate, monotonic (set once, never unset) flag alongside `outstanding` --
+    a job with no real async I/O of its own (a toy resolver, say) can run to completion, put its
+    patch on the queue, and decrement `outstanding` back to `0` *before* `execute_incremental`'s own
+    frame gets back around to checking it (`asyncio.create_task` only schedules a task to run at the
+    next opportunity, and "the next opportunity" can arrive well before control returns to the code
+    that created it). Checking `outstanding` directly for "should the initial payload's own
+    `hasNext` be true" or "should I bother draining the queue at all" would then wrongly see `0` even
+    though a real patch is already sitting in the queue -- `any_spawned` sidesteps that race
+    entirely, since it's read-only from that point on.
+    """
+
+    outstanding: int = 0
+    any_spawned: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _IncrementalContext:
+    """Threaded through the incremental-aware execution call chain alongside `_ExecutionState`:
+    where a background job's own completed patch gets sent, and how many jobs are still in flight.
+    """
+
+    patch_queue: "asyncio.Queue[dict[str, Any]]"
+    tracker: _JobTracker
+
+
+def _path_as_list(path: Path | None) -> list[str | int]:
+    return path.as_list() if path is not None else []
+
+
+def _has_incremental_markers(selections: Sequence["LoweredField"]) -> bool:
+    """Whether `selections` (or anything nested under them) contains an active `@defer`/`@stream`
+    marker -- decides whether a query needs `execute_incremental` at all. `execute_async` stays a
+    thin, zero-overhead delegate to the plain (non-incremental) path for the overwhelmingly common
+    case where it doesn't.
+    """
+    for selection in selections:
+        if selection.is_deferred or selection.is_streamed:
+            return True
+        if _has_incremental_markers(selection.selections):
+            return True
+    return False
+
+
+async def _execute_field_incremental(
+    *,
+    field_info: "FieldInfo",
+    lowered_field: "LoweredField",
+    selections: Sequence["LoweredField"],
+    parent_value: Any,
+    concrete_type: type,
+    path: Path,
+    state: _ExecutionState,
+    incremental: _IncrementalContext,
+) -> Any:
+    """`_execute_field`'s incremental-aware sibling -- identical resolver-calling/error-handling,
+    just threading `incremental` through to `_finish_field_incremental` so a nested object
+    selection set can keep discovering further `@defer`/`@stream` markers arbitrarily deep.
+    """
+    is_non_null = field_info.type_info.kind == "NON_NULL"
+    info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
+
+    try:
+        raw_value = await _resolve_field_value(field_info, lowered_field, parent_value, info, concrete_type, state.schema)
+    except _PropagateNull:
+        raise
+    except Exception as error:  # noqa: BLE001 -- deliberately broad: any resolver failure becomes a field error, per §8.
+        state.errors.append(_error_from_exception(error, path, lowered_field))
+        if is_non_null:
+            raise _PropagateNull from error
+        return None
+
+    return await _finish_field_incremental(
+        field_info=field_info,
+        lowered_field=lowered_field,
+        selections=selections,
+        raw_value=raw_value,
+        path=path,
+        state=state,
+        incremental=incremental,
+    )
+
+
+async def _finish_field_incremental(
+    *,
+    field_info: "FieldInfo",
+    lowered_field: "LoweredField",
+    selections: Sequence["LoweredField"],
+    raw_value: Any,
+    path: Path,
+    state: _ExecutionState,
+    incremental: _IncrementalContext,
+) -> Any:
+    is_non_null = field_info.type_info.kind == "NON_NULL"
+
+    try:
+        raw_value = await _apply_custom_directives(lowered_field.directives, raw_value, state.schema)
+    except _PropagateNull:
+        raise
+    except Exception as error:  # noqa: BLE001 -- deliberately broad: any directive failure becomes a field error, per §8.
+        state.errors.append(_error_from_exception(error, path, lowered_field))
+        if is_non_null:
+            raise _PropagateNull from error
+        return None
+
+    try:
+        return await _complete_value_incremental(
+            type_info=field_info.type_info,
+            raw_value=raw_value,
+            lowered_field=lowered_field,
+            selections=selections,
+            path=path,
+            state=state,
+            incremental=incremental,
+        )
+    except _PropagateNull:
+        if is_non_null:
+            raise
+        return None
+
+
+async def _complete_value_incremental(
+    *,
+    type_info: "GraphQLTypeInfo",
+    raw_value: Any,
+    lowered_field: "LoweredField",
+    selections: Sequence["LoweredField"],
+    path: Path,
+    state: _ExecutionState,
+    incremental: _IncrementalContext,
+) -> Any:
+    """`_complete_value`'s incremental-aware sibling -- identical `NonNull`/`List`/scalar handling;
+    only the object/interface/union recursion differs, calling `_execute_selection_set_incremental`
+    instead of `_execute_selection_set` so a nested selection set can itself discover further
+    `@defer`/`@stream` markers.
+    """
+    if type_info.kind == "NON_NULL":
+        if raw_value is None:
+            state.errors.append(_build_error("Cannot return null for non-nullable field.", path, lowered_field))
+            raise _PropagateNull
+        return await _complete_value_incremental(
+            type_info=type_info.of_type,
+            raw_value=raw_value,
+            lowered_field=lowered_field,
+            selections=selections,
+            path=path,
+            state=state,
+            incremental=incremental,
+        )
+
+    if raw_value is None:
+        return None
+
+    if type_info.kind == "LIST":
+
+        async def _complete_item(index: int, item: Any) -> Any:
+            return await _complete_value_incremental(
+                type_info=type_info.of_type,
+                raw_value=item,
+                lowered_field=lowered_field,
+                selections=selections,
+                path=Path(key=index, prev=path),
+                state=state,
+                incremental=incremental,
+            )
+
+        outcomes = await asyncio.gather(
+            *(_complete_item(index, item) for index, item in enumerate(raw_value)), return_exceptions=True
+        )
+
+        item_type_non_null = type_info.of_type.kind == "NON_NULL"
+        results = []
+        propagate: _PropagateNull | None = None
+        for outcome in outcomes:
+            if isinstance(outcome, _PropagateNull):
+                if item_type_non_null:
+                    propagate = propagate or outcome
+                results.append(None)
+                continue
+            if isinstance(outcome, BaseException):
+                raise outcome
+            results.append(outcome)
+        if propagate is not None:
+            raise propagate
+        return results
+
+    type_name = type_info.name
+    assert type_name is not None  # NAMED is the only remaining kind, and it always carries a name.
+
+    if type_name in state.schema.types_by_name or type_name in state.schema.union_members_by_name:
+        info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
+        concrete_type = _resolve_concrete_type(type_name, raw_value, state.schema, info)
+        return await _execute_selection_set_incremental(
+            selections=selections,
+            concrete_type=concrete_type,
+            parent_value=raw_value,
+            path=path,
+            state=state,
+            incremental=incremental,
+        )
+
+    return _serialize_scalar(type_name, raw_value, state.schema)
+
+
+async def _start_streamed_field(
+    *,
+    field_info: "FieldInfo",
+    lowered_field: "LoweredField",
+    selections: Sequence["LoweredField"],
+    parent_value: Any,
+    concrete_type: type,
+    path: Path,
+    state: _ExecutionState,
+    incremental: _IncrementalContext,
+) -> list[Any]:
+    """Starts a `@stream`-marked field: calls its resolver (which must itself be an async generator
+    -- the same convention `Schema.subscribe_async` already requires of a subscription root field's
+    own resolver), eagerly consumes exactly `initialCount` items for the initial payload, then hands
+    the still-open generator to a background job delivering the rest as incremental `items` patches,
+    one per item.
+    """
+    # Pessimistically reserve a background-job slot in `outstanding` *before* any real `await`
+    # happens below (the resolver call, item consumption) -- undone further down if it turns out
+    # unnecessary (the generator exhausts during eager consumption). A sibling stream field with no
+    # real async work of its own could otherwise run to completion and decrement `outstanding` back
+    # to `0` before *this* field even finishes deciding whether it needs a job of its own -- see
+    # `_JobTracker`'s own docstring for the general shape of this race.
+    #
+    # Deliberately does NOT set `any_spawned` yet -- unlike `outstanding` (which must be
+    # pessimistic to close the sibling race above), `any_spawned` must stay `False` until a job is
+    # *genuinely* confirmed (further down), since it's never reset back if the reservation here
+    # turns out unneeded; setting it this early caused a real bug (caught by testing): a stream
+    # whose `initialCount` covers its entire list, spawning no job at all, still left
+    # `any_spawned=True`, so `execute_incremental`'s consumer loop waited forever on a patch that
+    # was never coming.
+    incremental.tracker.outstanding += 1
+
+    info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
+    resolver = getattr(concrete_type, field_info.name)
+    kwargs = _bind_resolver_kwargs(field_info, lowered_field, parent_value, info, state.schema)
+    result = resolver(**kwargs)
+
+    if not inspect.isasyncgen(result):
+        incremental.tracker.outstanding -= 1
+        if inspect.iscoroutine(result):
+            # A plain `async def` resolver (not an async generator) returns an unawaited coroutine
+            # here -- close it explicitly, or Python warns about it at GC time.
+            result.close()
+        raise GraphQLError(
+            f"'@stream' field '{lowered_field.field_name}' must be an async generator resolver",
+            code=ErrorCode.FIELD_RESOLUTION_FAILED,
+        )
+
+    # `field_info.type_info` here is the list field's own declared type -- unwrap exactly one
+    # `NON_NULL` (if present) then one `LIST` layer to get each item's own type, the same unwrapping
+    # `_complete_value`'s own LIST branch does for a non-streamed list. Validation (Rust, Phase 0)
+    # already guarantees this field's declared type really is a list.
+    item_type_info = field_info.type_info
+    if item_type_info.kind == "NON_NULL":
+        item_type_info = item_type_info.of_type
+    item_type_info = item_type_info.of_type
+
+    initial_items: list[Any] = []
+    index = 0
+    initial_count = lowered_field.stream_initial_count or 0
+    exhausted = False
+    while index < initial_count:
+        try:
+            item = await result.__anext__()
+        except StopAsyncIteration:
+            exhausted = True
+            break
+        try:
+            value = await _complete_value_incremental(
+                type_info=item_type_info,
+                raw_value=item,
+                lowered_field=lowered_field,
+                selections=selections,
+                path=Path(key=index, prev=path),
+                state=state,
+                incremental=incremental,
+            )
+        except _PropagateNull:
+            value = None
+        initial_items.append(value)
+        index += 1
+
+    if exhausted:
+        incremental.tracker.outstanding -= 1  # undo the pessimistic reservation above -- no job needed
+    else:
+        incremental.tracker.any_spawned = True  # genuinely confirmed now -- see this function's own note above
+        asyncio.create_task(
+            _run_streamed_job(
+                label=lowered_field.stream_label,
+                path=path,
+                item_type_info=item_type_info,
+                lowered_field=lowered_field,
+                selections=selections,
+                generator=result,
+                next_index=index,
+                state=state,
+                incremental=incremental,
+            )
+        )
+    return initial_items
+
+
+async def _run_streamed_job(
+    *,
+    label: str | None,
+    path: Path,
+    item_type_info: "GraphQLTypeInfo",
+    lowered_field: "LoweredField",
+    selections: Sequence["LoweredField"],
+    generator: AsyncGenerator[Any, None],
+    next_index: int,
+    state: _ExecutionState,
+    incremental: _IncrementalContext,
+) -> None:
+    """Delivers the rest of a `@stream`-marked field's already-open async generator, one incremental
+    `items` patch per item. Looks one item ahead before sending each patch purely to compute that
+    patch's own `hasNext` correctly: the simpler payload shape this targets has no separate "this
+    stream is now closed" signal, so the *last* item's own patch has to be the one reporting
+    `hasNext: false`, which means knowing an item is the last one before sending its patch.
+
+    The generator itself (not just an individual item's own completion) can raise -- unlike a
+    plain `_PropagateNull`/completion error on one item (already handled per-item, below, without
+    ending the stream), a failure *fetching the next item* has no item to attach the error to and
+    ends the stream there. This still has to reach `patch_queue` as a proper terminal patch (never
+    just silently stop): the consumer side (`execute_incremental`) only knows a delivery is finished
+    once it sees a patch with `hasNext: false`, so a job that vanishes without ever sending one would
+    hang that consumer forever.
+    """
+    index = next_index
+    path_list = _path_as_list(path)
+    decremented = False
+
+    def _decrement_once() -> None:
+        nonlocal decremented
+        if not decremented:
+            incremental.tracker.outstanding -= 1
+            decremented = True
+
+    async def _send_final_error(error: Exception) -> None:
+        _decrement_once()
+        entry: dict[str, Any] = {
+            "items": [],
+            "path": path_list,
+            "errors": [_error_to_dict(GraphQLError(str(error), code=ErrorCode.FIELD_RESOLUTION_FAILED, path=path_list))],
+        }
+        if label is not None:
+            entry["label"] = label
+        await incremental.patch_queue.put({"incremental": [entry], "hasNext": incremental.tracker.outstanding > 0})
+
+    try:
+        try:
+            current = await generator.__anext__()
+        except StopAsyncIteration:
+            return
+        except Exception as error:  # noqa: BLE001 -- the generator failed before yielding anything; still needs its own terminal patch, not a hang.
+            await _send_final_error(error)
+            return
+
+        while True:
+            next_item_error: Exception | None = None
+            try:
+                next_item: Any = await generator.__anext__()
+                is_last = False
+            except StopAsyncIteration:
+                next_item = None
+                is_last = True
+            except Exception as error:  # noqa: BLE001 -- surfaced as a separate terminal patch right after this item's own, below.
+                next_item = None
+                is_last = True
+                next_item_error = error
+
+            item_errors: list[GraphQLError] = []
+            item_state = replace(state, errors=item_errors)
+            try:
+                value = await _complete_value_incremental(
+                    type_info=item_type_info,
+                    raw_value=current,
+                    lowered_field=lowered_field,
+                    selections=selections,
+                    path=Path(key=index, prev=path),
+                    state=item_state,
+                    incremental=incremental,
+                )
+            except _PropagateNull:
+                value = None
+
+            # Only decrement (and let this patch claim `hasNext: false`) if this item's own patch
+            # really is the last one this job will ever send -- when the *next* item's fetch itself
+            # failed, one more patch (the error one, via `_send_final_error` below) is still coming
+            # from this same job, so this one must not claim finality yet.
+            if is_last and next_item_error is None:
+                _decrement_once()
+
+            entry: dict[str, Any] = {"items": [value], "path": path_list}
+            if label is not None:
+                entry["label"] = label
+            if item_errors:
+                entry["errors"] = [_error_to_dict(error) for error in item_errors]
+            await incremental.patch_queue.put({"incremental": [entry], "hasNext": incremental.tracker.outstanding > 0})
+
+            if next_item_error is not None:
+                await _send_final_error(next_item_error)
+                return
+            if is_last:
+                return
+            current = next_item
+            index += 1
+    finally:
+        _decrement_once()
+
+
+def _spawn_deferred_jobs(
+    deferred_groups: dict[str | None, list[tuple[str, "FieldInfo | None", "LoweredField", list["LoweredField"]]]],
+    *,
+    path: Path | None,
+    parent_value: Any,
+    concrete_type: type,
+    state: _ExecutionState,
+    incremental: _IncrementalContext,
+) -> None:
+    for label, group_fields in deferred_groups.items():
+        incremental.tracker.outstanding += 1
+        incremental.tracker.any_spawned = True
+        asyncio.create_task(
+            _run_deferred_job(
+                label=label,
+                path=path,
+                fields=group_fields,
+                parent_value=parent_value,
+                concrete_type=concrete_type,
+                state=state,
+                incremental=incremental,
+            )
+        )
+
+
+async def _run_deferred_job(
+    *,
+    label: str | None,
+    path: Path | None,
+    fields: list[tuple[str, "FieldInfo", "LoweredField", list["LoweredField"]]],
+    parent_value: Any,
+    concrete_type: type,
+    state: _ExecutionState,
+    incremental: _IncrementalContext,
+) -> None:
+    """Resolves every field exclusive to one `@defer` application (identified by its shared
+    `label`, `None` included), merging them into one `data` object delivered as a single incremental
+    patch at the deferred fragment's own enclosing path.
+    """
+    job_errors: list[GraphQLError] = []
+    job_state = replace(state, errors=job_errors)
+    data: dict[str, Any] | None = {}
+
+    async def _resolve_one(
+        response_key: str, field_info: "FieldInfo | None", lowered_field: "LoweredField", selections: list["LoweredField"]
+    ) -> tuple[str, Any]:
+        if lowered_field.field_name == "__typename":
+            return response_key, concrete_type.__bramble_type_info__.name
+
+        assert field_info is not None
+        field_path = Path(key=response_key, prev=path)
+        value = await _execute_field_incremental(
+            field_info=field_info,
+            lowered_field=lowered_field,
+            selections=selections,
+            parent_value=parent_value,
+            concrete_type=concrete_type,
+            path=field_path,
+            state=job_state,
+            incremental=incremental,
+        )
+        return response_key, value
+
+    try:
+        outcomes = await asyncio.gather(*(_resolve_one(*entry) for entry in fields), return_exceptions=True)
+        propagate = False
+        for outcome in outcomes:
+            if isinstance(outcome, _PropagateNull):
+                propagate = True
+                continue
+            if isinstance(outcome, BaseException):
+                raise outcome
+            key, value = outcome
+            data[key] = value
+        if propagate:
+            data = None
+    finally:
+        incremental.tracker.outstanding -= 1
+        entry = {"data": data, "path": _path_as_list(path)}
+        if label is not None:
+            entry["label"] = label
+        if job_errors:
+            entry["errors"] = [_error_to_dict(error) for error in job_errors]
+        await incremental.patch_queue.put({"incremental": [entry], "hasNext": incremental.tracker.outstanding > 0})
+
+
+async def _execute_selection_set_incremental(
+    *,
+    selections: Sequence["LoweredField"],
+    concrete_type: type,
+    parent_value: Any,
+    path: Path | None,
+    state: _ExecutionState,
+    incremental: _IncrementalContext,
+    serial: bool = False,
+) -> dict[str, Any]:
+    """`_execute_selection_set`'s incremental-delivery-aware sibling: identical field-grouping and
+    concurrent-resolution for any field with no active `@defer`/`@stream` marker, but a
+    `@defer`-marked field is held back from this selection set's own result entirely -- grouped with
+    any sibling deferred fields sharing the same label into one background job (`_spawn_deferred_jobs`)
+    -- and a `@stream`-marked field resolves only its own `initialCount` items eagerly
+    (`_start_streamed_field`), handing the rest of its resolver's async generator to a second kind
+    of background job.
+    """
+    grouped = _group_by_response_key(_applicable_selections(selections, concrete_type, state.schema))
+
+    deferred_groups: dict[str | None, list[tuple[str, "FieldInfo | None", "LoweredField", list["LoweredField"]]]] = {}
+    resolvable: list[tuple[str, "FieldInfo", "LoweredField", list["LoweredField"]]] = []
+
+    # A synchronous classification pass -- no `await` anywhere in this loop -- so every deferred
+    # field at this level is grouped (by label) *before* any sibling field, deferred or not, starts
+    # actually resolving. `_spawn_deferred_jobs` right after this loop then registers all of them
+    # with `incremental.tracker` before the eager/stream gather below even begins: without this
+    # ordering, a `@stream` field with no real async work of its own could run to completion and
+    # decrement `outstanding` back to `0` before a slower-to-register deferred sibling is even known
+    # to exist, ending the whole delivery early (see `_JobTracker`'s own docstring).
+    for response_key, occurrences in grouped.items():
+        primary = occurrences[0]
+
+        if primary.field_name == "__typename":
+            if primary.is_deferred:
+                deferred_groups.setdefault(primary.defer_label, []).append(
+                    (response_key, None, primary, [])  # type: ignore[arg-type]
+                )
+            else:
+                resolvable.append((response_key, None, primary, []))  # type: ignore[arg-type]
+            continue
+
+        field_info = _find_field_info(
+            concrete_type, primary.field_name, auto_camel_case=state.schema.config.auto_camel_case
+        )
+        if field_info is None:
+            raise GraphQLError(
+                f"field '{primary.field_name}' does not exist on type "
+                f"'{concrete_type.__bramble_type_info__.name}'",
+                code=ErrorCode.UNKNOWN_FIELD,
+            )
+
+        merged_selections = [selection for occurrence in occurrences for selection in occurrence.selections]
+
+        if primary.is_deferred:
+            deferred_groups.setdefault(primary.defer_label, []).append(
+                (response_key, field_info, primary, merged_selections)
+            )
+            continue
+
+        resolvable.append((response_key, field_info, primary, merged_selections))
+
+    _spawn_deferred_jobs(
+        deferred_groups, path=path, parent_value=parent_value, concrete_type=concrete_type, state=state, incremental=incremental
+    )
+
+    async def _resolve_group(
+        response_key: str, field_info: "FieldInfo | None", primary: "LoweredField", merged_selections: list["LoweredField"]
+    ) -> tuple[str, Any]:
+        if primary.field_name == "__typename":
+            return response_key, concrete_type.__bramble_type_info__.name
+
+        assert field_info is not None
+        field_path = Path(key=response_key, prev=path)
+
+        if primary.is_streamed:
+            value = await _start_streamed_field(
+                field_info=field_info,
+                lowered_field=primary,
+                selections=merged_selections,
+                parent_value=parent_value,
+                concrete_type=concrete_type,
+                path=field_path,
+                state=state,
+                incremental=incremental,
+            )
+            return response_key, value
+
+        value = await _execute_field_incremental(
+            field_info=field_info,
+            lowered_field=primary,
+            selections=merged_selections,
+            parent_value=parent_value,
+            concrete_type=concrete_type,
+            path=field_path,
+            state=state,
+            incremental=incremental,
+        )
+        return response_key, value
+
+    if serial:
+        result: dict[str, Any] = {}
+        for response_key, field_info, primary, merged_selections in resolvable:
+            key, value = await _resolve_group(response_key, field_info, primary, merged_selections)
+            result[key] = value
+        return result
+
+    outcomes = await asyncio.gather(
+        *(_resolve_group(response_key, field_info, primary, merged_selections) for response_key, field_info, primary, merged_selections in resolvable),
+        return_exceptions=True,
+    )
+    result = {}
+    propagate = None
+    for outcome in outcomes:
+        if isinstance(outcome, _PropagateNull):
+            propagate = propagate or outcome
+            continue
+        if isinstance(outcome, BaseException):
+            raise outcome
+        key, value = outcome
+        result[key] = value
+    if propagate is not None:
+        raise propagate
+    return result
+
+
 _ROOT_TYPE_ATTRIBUTE_BY_OPERATION = {
     "query": "query",
     "mutation": "mutation",
@@ -664,6 +1317,13 @@ async def execute_async(
     if operation_type == "subscription":
         raise GraphQLError(
             "execute_async cannot run a subscription operation -- use Schema.subscribe_async instead",
+            code=ErrorCode.GRAPHQL_VALIDATION_FAILED,
+        )
+
+    if _has_incremental_markers(fields):
+        raise GraphQLError(
+            "execute_async cannot run a query/mutation using @defer/@stream -- use "
+            "Schema.execute_incremental instead",
             code=ErrorCode.GRAPHQL_VALIDATION_FAILED,
         )
 
@@ -724,6 +1384,89 @@ def execute(
             operation_name=operation_name,
         )
     )
+
+
+async def execute_incremental(
+    schema: "Schema",
+    query: str,
+    *,
+    variable_values: dict[str, Any] | None = None,
+    context: Any = None,
+    root_value: Any = None,
+    operation_name: str | None = None,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Executes a query/mutation operation using `@defer`/`@stream`, yielding one spec-shaped
+    payload at a time: the initial `{"data": ..., "hasNext": bool}` (deferred subtrees omitted,
+    streamed lists truncated to their own `initialCount`), then zero or more
+    `{"incremental": [...], "hasNext": bool}` patches as each deferred fragment resolves or each
+    streamed item becomes available -- see this module's own "@defer/@stream incremental delivery"
+    section header for the concrete subset of the spec this implements (payload shape,
+    defer-exclusivity, stream-requires-async-generator-resolver).
+
+    A query/mutation with *no* active `@defer`/`@stream` marker still works here (degenerating to a
+    single `hasNext: false` payload identical to what `execute_async` would produce), but
+    `execute_async` is the zero-overhead path for that overwhelmingly common case -- this function
+    is for when at least one marker is actually present.
+    """
+    resolved_variable_values = variable_values or {}
+
+    validate_query(query, schema._compiled, operation_name)
+    operation_type, fields = lower_query(query, variable_values=resolved_variable_values, operation_name=operation_name)
+
+    if operation_type not in ("query", "mutation"):
+        raise GraphQLError(
+            "execute_incremental only supports query/mutation operations",
+            code=ErrorCode.GRAPHQL_VALIDATION_FAILED,
+        )
+
+    root_type = getattr(schema, _ROOT_TYPE_ATTRIBUTE_BY_OPERATION[operation_type])
+    if root_type is None:
+        raise GraphQLError(f"schema has no {operation_type} type", code=ErrorCode.GRAPHQL_VALIDATION_FAILED)
+
+    context = _resolve_execution_context(schema, context)
+
+    errors: list[GraphQLError] = []
+    state = _ExecutionState(
+        schema=schema,
+        context=context,
+        root_value=root_value,
+        variable_values=resolved_variable_values,
+        query=query,
+        errors=errors,
+    )
+    incremental = _IncrementalContext(patch_queue=asyncio.Queue(), tracker=_JobTracker())
+
+    try:
+        data: dict[str, Any] | None = await _execute_selection_set_incremental(
+            selections=fields,
+            concrete_type=root_type,
+            parent_value=root_value,
+            path=None,
+            state=state,
+            incremental=incremental,
+            serial=operation_type == "mutation",
+        )
+    except _PropagateNull:
+        data = None
+
+    # `any_spawned` (not `tracker.outstanding`, which may have already raced back down to `0` --
+    # see `_JobTracker`'s own docstring) is what correctly answers "does more data follow".
+    initial: dict[str, Any] = {"data": data, "hasNext": incremental.tracker.any_spawned}
+    if errors:
+        initial["errors"] = [_error_to_dict(error) for error in errors]
+    yield initial
+
+    if not incremental.tracker.any_spawned:
+        return
+
+    # Each patch's own `hasNext` (computed by the job that produced it, at the exact synchronous
+    # moment its own completion was decided) is the authoritative "is this the last one" signal --
+    # not another read of `tracker.outstanding` here, for the same race-avoidance reason as above.
+    while True:
+        patch = await incremental.patch_queue.get()
+        yield patch
+        if not patch.get("hasNext", False):
+            return
 
 
 async def subscribe_async(

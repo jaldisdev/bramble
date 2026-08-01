@@ -1,11 +1,26 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any, Generic, TypeVar
 
 ParentType = TypeVar("ParentType")
 ContextType = TypeVar("ContextType")
 RootValueType = TypeVar("RootValueType")
+StreamedItemType = TypeVar("StreamedItemType")
+
+
+class Streamable(AsyncGenerator[StreamedItemType, None]):
+    """Return-type annotation for a `@stream`-capable field's resolver -- write the resolver
+    exactly like a subscription's own async-generator resolver (`async def resolver() ->
+    Streamable[T]: yield ...`), but bramble treats the field's own GraphQL type as `[T!]!` (a list),
+    not `T`. Deliberately distinct from a bare `AsyncGenerator[T, None]` return type (what a
+    subscription root field uses instead): a subscription's each yielded event is delivered as its
+    own independent top-level response, never appended to one array, so its field type unwraps to
+    plain `T`; `@stream`'s yielded items *are* elements of one list, so the field type must stay
+    `[T!]!`. Never instantiated -- purely a type-checker-friendly spelling of "this is an async
+    generator resolver" that bramble's own schema-building can tell apart from a subscription's.
+    """
+
 
 
 class Parent(Generic[ParentType]):

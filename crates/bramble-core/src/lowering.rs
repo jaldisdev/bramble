@@ -30,13 +30,30 @@ fn lower_arguments(arguments: &[(Positioned<Name>, Positioned<Value>)]) -> Vec<L
         .collect()
 }
 
-/// A custom operation directive application (§7) surviving lowering -- `@skip`/`@include` never
-/// appear here, since they're structural pruning decided during lowering itself, not a per-field
-/// transform applied after resolution.
+/// A custom operation directive application (§7) surviving lowering -- `@skip`/`@include`/
+/// `@defer`/`@stream` never appear here, since they're all structural (pruning, or incremental-
+/// delivery marking) decided during lowering itself, not a per-field transform applied after
+/// resolution.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoweredDirective {
     pub name: String,
     pub arguments: Vec<LoweredArgument>,
+}
+
+/// `@defer`'s own marker, carried on a field that came *exclusively* from a `@defer`-applied
+/// fragment spread/inline fragment at its enclosing selection set's level -- see
+/// `lower_selection_set`'s own doc comment for the exclusivity rule this depends on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeferMarker {
+    pub label: Option<String>,
+}
+
+/// `@stream`'s own marker, carried on the list-typed field it was directly applied to.
+/// `initial_count` is `@stream(initialCount: ...)`'s resolved value (spec default `0`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamMarker {
+    pub initial_count: i64,
+    pub label: Option<String>,
 }
 
 /// A field that survived `@skip`/`@include` pruning, with fragment spreads and inline fragments
@@ -63,6 +80,13 @@ pub struct LoweredField {
     /// resolver exception, a "cannot return null for non-null field") report `locations` the same
     /// way a parse/validation error already does, instead of only ever having `path`.
     pub location: Location,
+    /// Set when this field is deliverable only after the initial payload, per `@defer` (§ incremental
+    /// delivery). See `lower_selection_set`'s doc comment for the exclusivity rule deciding this.
+    pub deferred: Option<DeferMarker>,
+    /// Set when this field carries `@stream` directly (only ever legal on a list-typed field --
+    /// enforced during validation, not here; lowering just carries the marker through structurally
+    /// the same way it does for `deferred`).
+    pub streamed: Option<StreamMarker>,
 }
 
 fn resolve_boolean_argument(
@@ -91,6 +115,125 @@ fn resolve_boolean_argument(
             ErrorCode::GraphqlValidationFailed,
         ))),
     }
+}
+
+fn resolve_int_argument(
+    value: &Value,
+    variable_values: &HashMap<String, JsonValue>,
+    directive_name: &str,
+    argument_name: &str,
+) -> GraphQLResult<i64> {
+    match value {
+        Value::Number(number) if number.is_i64() => Ok(number.as_i64().unwrap()),
+        Value::Variable(name) => {
+            let name = name.as_str();
+            match variable_values.get(name) {
+                Some(JsonValue::Number(number)) if number.is_i64() => Ok(number.as_i64().unwrap()),
+                Some(_) => Err(Box::new(GraphQLError::new(
+                    format!("variable '${name}' used in @{directive_name}({argument_name}: ...) must be an integer"),
+                    ErrorCode::GraphqlValidationFailed,
+                ))),
+                None => Err(Box::new(GraphQLError::new(
+                    format!("@{directive_name}({argument_name}: ${name}) references undefined variable '${name}'"),
+                    ErrorCode::GraphqlValidationFailed,
+                ))),
+            }
+        }
+        _ => Err(Box::new(GraphQLError::new(
+            format!("@{directive_name}({argument_name}: ...) argument must be an integer or a variable"),
+            ErrorCode::GraphqlValidationFailed,
+        ))),
+    }
+}
+
+fn resolve_label_argument(
+    value: &Value,
+    directive_name: &str,
+) -> GraphQLResult<String> {
+    match value {
+        Value::String(label) => Ok(label.clone()),
+        _ => Err(Box::new(GraphQLError::new(
+            format!("@{directive_name}(label: ...) must be a static string, not a variable"),
+            ErrorCode::GraphqlValidationFailed,
+        ))),
+    }
+}
+
+/// Evaluates a fragment spread/inline fragment's own `@defer` directive (if any): `Ok(None)` if
+/// absent, or present with `if: false`; `Ok(Some(label))` if actively deferred (`label` is
+/// `@defer`'s own optional `label: "..."` argument -- must be a static string per spec, never a
+/// variable, since the client needs it to identify which patch a label belongs to without waiting
+/// for the operation to actually execute).
+fn defer_label(
+    directives: &[Positioned<async_graphql_parser::types::Directive>],
+    variable_values: &HashMap<String, JsonValue>,
+) -> GraphQLResult<Option<Option<String>>> {
+    for directive in directives {
+        if directive.node.name.node.as_str() != "defer" {
+            continue;
+        }
+
+        let if_argument =
+            directive.node.arguments.iter().find(|(name, _)| name.node.as_str() == "if").map(|(_, value)| &value.node);
+        let active = match if_argument {
+            Some(value) => resolve_boolean_argument(value, variable_values, "defer")?,
+            None => true,
+        };
+        if !active {
+            return Ok(None);
+        }
+
+        let label = directive
+            .node
+            .arguments
+            .iter()
+            .find(|(name, _)| name.node.as_str() == "label")
+            .map(|(_, value)| resolve_label_argument(&value.node, "defer"))
+            .transpose()?;
+        return Ok(Some(label));
+    }
+    Ok(None)
+}
+
+/// Evaluates a field's own `@stream` directive (if any) -- mirrors `defer_label` but for
+/// `@stream`'s own argument shape (`initialCount: Int = 0` in addition to `if`/`label`).
+fn stream_marker(
+    directives: &[Positioned<async_graphql_parser::types::Directive>],
+    variable_values: &HashMap<String, JsonValue>,
+) -> GraphQLResult<Option<StreamMarker>> {
+    for directive in directives {
+        if directive.node.name.node.as_str() != "stream" {
+            continue;
+        }
+
+        let if_argument =
+            directive.node.arguments.iter().find(|(name, _)| name.node.as_str() == "if").map(|(_, value)| &value.node);
+        let active = match if_argument {
+            Some(value) => resolve_boolean_argument(value, variable_values, "stream")?,
+            None => true,
+        };
+        if !active {
+            return Ok(None);
+        }
+
+        let initial_count = directive
+            .node
+            .arguments
+            .iter()
+            .find(|(name, _)| name.node.as_str() == "initialCount")
+            .map(|(_, value)| resolve_int_argument(&value.node, variable_values, "stream", "initialCount"))
+            .transpose()?
+            .unwrap_or(0);
+        let label = directive
+            .node
+            .arguments
+            .iter()
+            .find(|(name, _)| name.node.as_str() == "label")
+            .map(|(_, value)| resolve_label_argument(&value.node, "stream"))
+            .transpose()?;
+        return Ok(Some(StreamMarker { initial_count, label }));
+    }
+    Ok(None)
 }
 
 /// Evaluates a selection's own `@skip`/`@include` directives (if any), per the spec's combined
@@ -135,7 +278,7 @@ fn lower_directives(directives: &[Positioned<async_graphql_parser::types::Direct
         .iter()
         .filter(|directive| {
             let name = directive.node.name.node.as_str();
-            name != "skip" && name != "include"
+            name != "skip" && name != "include" && name != "defer" && name != "stream"
         })
         .map(|directive| LoweredDirective {
             name: directive.node.name.node.as_str().to_string(),
@@ -144,13 +287,29 @@ fn lower_directives(directives: &[Positioned<async_graphql_parser::types::Direct
         .collect()
 }
 
+/// Lowers one selection set, applying `@skip`/`@include` pruning and flattening fragment
+/// boundaries exactly as before, **plus** deciding which fields (if any) are `@defer`-deliverable.
+///
+/// A field is only ever marked `deferred` if it came from a `@defer`-applied fragment spread/
+/// inline fragment *and* no other selection at this same level also produces that field's own
+/// response key -- i.e. it's genuinely exclusive to the deferred fragment. This is a deliberate
+/// simplification of the spec's own defer-aware `CollectFields` (which would, among other things,
+/// let two *different* deferred fragments both contributing the same response key still defer it,
+/// merged under one combined label): a field selected both inside and outside a deferred fragment
+/// is needed for the initial payload regardless, so deferring it would be actively wrong; two
+/// deferred fragments colliding on the same key is rarer and, for now, simply also falls back to
+/// immediate (non-deferred) resolution rather than attempting a real merge. Both cases are a
+/// conservative "resolve eagerly instead of deferring" fallback, never silently dropped data.
 fn lower_selection_set(
     selection_set: &SelectionSet,
     fragments: &HashMap<Name, Positioned<FragmentDefinition>>,
     variable_values: &HashMap<String, JsonValue>,
     type_condition: Option<&str>,
 ) -> GraphQLResult<Vec<LoweredField>> {
-    let mut result = Vec::new();
+    // Each entry's `Option<Option<String>>` mirrors `defer_label`'s own return shape: `None` if
+    // this particular occurrence isn't deferred at all, `Some(label)` if it is (with `label`
+    // itself possibly absent).
+    let mut collected: Vec<(LoweredField, Option<Option<String>>)> = Vec::new();
 
     for selection in &selection_set.items {
         match &selection.node {
@@ -162,28 +321,35 @@ fn lower_selection_set(
                 let field_name = field.node.name.node.as_str().to_string();
                 let selections =
                     lower_selection_set(&field.node.selection_set.node, fragments, variable_values, None)?;
-                result.push(LoweredField {
-                    response_key,
-                    field_name,
-                    type_condition: type_condition.map(str::to_string),
-                    arguments: lower_arguments(&field.node.arguments),
-                    directives: lower_directives(&field.node.directives),
-                    selections,
-                    location: Location::from(field.pos),
-                });
+                let streamed = stream_marker(&field.node.directives, variable_values)?;
+                collected.push((
+                    LoweredField {
+                        response_key,
+                        field_name,
+                        type_condition: type_condition.map(str::to_string),
+                        arguments: lower_arguments(&field.node.arguments),
+                        directives: lower_directives(&field.node.directives),
+                        selections,
+                        location: Location::from(field.pos),
+                        deferred: None,
+                        streamed,
+                    },
+                    None,
+                ));
             }
             Selection::InlineFragment(inline) => {
                 if should_prune(&inline.node.directives, variable_values)? {
                     continue;
                 }
                 let nested_condition = inline.node.type_condition.as_ref().map(|condition| condition.node.on.node.as_str());
+                let label = defer_label(&inline.node.directives, variable_values)?;
                 let nested = lower_selection_set(
                     &inline.node.selection_set.node,
                     fragments,
                     variable_values,
                     nested_condition.or(type_condition),
                 )?;
-                result.extend(nested);
+                collected.extend(nested.into_iter().map(|field| (field, label.clone())));
             }
             Selection::FragmentSpread(spread) => {
                 if should_prune(&spread.node.directives, variable_values)? {
@@ -199,6 +365,9 @@ fn lower_selection_set(
                 if should_prune(&fragment.node.directives, variable_values)? {
                     continue;
                 }
+                // `@defer` is read off the spread itself (`...Foo @defer`), matching where the
+                // spec allows it -- never off the `fragment Foo on Type { ... }` definition.
+                let label = defer_label(&spread.node.directives, variable_values)?;
                 let nested_condition = fragment.node.type_condition.node.on.node.as_str();
                 let nested = lower_selection_set(
                     &fragment.node.selection_set.node,
@@ -206,10 +375,27 @@ fn lower_selection_set(
                     variable_values,
                     Some(nested_condition),
                 )?;
-                result.extend(nested);
+                collected.extend(nested.into_iter().map(|field| (field, label.clone())));
             }
         }
     }
+
+    let mut occurrences_by_key: HashMap<String, usize> = HashMap::new();
+    for (field, _) in &collected {
+        *occurrences_by_key.entry(field.response_key.clone()).or_insert(0) += 1;
+    }
+
+    let result = collected
+        .into_iter()
+        .map(|(mut field, label)| {
+            if let Some(label) = label
+                && occurrences_by_key[&field.response_key] == 1
+            {
+                field.deferred = Some(DeferMarker { label });
+            }
+            field
+        })
+        .collect();
 
     Ok(result)
 }
@@ -244,4 +430,108 @@ pub fn lower_document(
     let operation = select_operation(document, operation_name)?;
     let fields = lower_selection_set(&operation.selection_set.node, &document.fragments, variable_values, None)?;
     Ok((operation.ty, fields))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_document;
+
+    fn lower(query: &str, variable_values: &HashMap<String, JsonValue>) -> Vec<LoweredField> {
+        let document = parse_document(query).expect("query parses");
+        let (_, fields) = lower_document(&document, variable_values, None).expect("query lowers");
+        fields
+    }
+
+    fn field<'a>(fields: &'a [LoweredField], response_key: &str) -> &'a LoweredField {
+        fields.iter().find(|field| field.response_key == response_key).expect("field present")
+    }
+
+    #[test]
+    fn a_field_exclusive_to_a_deferred_fragment_is_marked_deferred() {
+        let query = r#"
+            query {
+                id
+                ... @defer(label: "extra") {
+                    name
+                }
+            }
+        "#;
+        let fields = lower(query, &HashMap::new());
+
+        assert!(field(&fields, "id").deferred.is_none());
+        let name = field(&fields, "name");
+        assert_eq!(name.deferred, Some(DeferMarker { label: Some("extra".to_string()) }));
+    }
+
+    #[test]
+    fn a_field_selected_both_inside_and_outside_a_deferred_fragment_is_not_deferred() {
+        let query = r#"
+            query {
+                name
+                ... @defer {
+                    name
+                }
+            }
+        "#;
+        let fields = lower(query, &HashMap::new());
+
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().all(|field| field.deferred.is_none()));
+    }
+
+    #[test]
+    fn defer_if_false_does_not_defer() {
+        let query = r#"
+            query {
+                ... @defer(if: false) {
+                    name
+                }
+            }
+        "#;
+        let fields = lower(query, &HashMap::new());
+
+        assert!(field(&fields, "name").deferred.is_none());
+    }
+
+    #[test]
+    fn a_deferred_fragment_spread_is_also_recognized() {
+        let query = r#"
+            query {
+                id
+                ...Extra @defer
+            }
+            fragment Extra on Query {
+                name
+            }
+        "#;
+        let fields = lower(query, &HashMap::new());
+
+        assert!(field(&fields, "id").deferred.is_none());
+        assert_eq!(field(&fields, "name").deferred, Some(DeferMarker { label: None }));
+    }
+
+    #[test]
+    fn stream_marker_reads_a_variable_supplied_initial_count() {
+        let query = r#"
+            query($n: Int!) {
+                items @stream(initialCount: $n, label: "batch")
+            }
+        "#;
+        let mut variable_values = HashMap::new();
+        variable_values.insert("n".to_string(), JsonValue::from(2));
+        let fields = lower(query, &variable_values);
+
+        assert_eq!(
+            field(&fields, "items").streamed,
+            Some(StreamMarker { initial_count: 2, label: Some("batch".to_string()) })
+        );
+    }
+
+    #[test]
+    fn stream_initial_count_defaults_to_zero() {
+        let fields = lower("query { items @stream }", &HashMap::new());
+
+        assert_eq!(field(&fields, "items").streamed, Some(StreamMarker { initial_count: 0, label: None }));
+    }
 }
