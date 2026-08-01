@@ -26,13 +26,13 @@ class Location(enum.Enum):
 
 
 class DirectiveField(dataclasses.Field):
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, default: Any = dataclasses.MISSING) -> None:
         kwargs: dict[str, Any] = {"kw_only": True}
         if sys.version_info >= (3, 14):
             kwargs["doc"] = None
 
         super().__init__(
-            default=dataclasses.MISSING,
+            default=default,
             default_factory=dataclasses.MISSING,
             init=True,
             repr=True,
@@ -44,8 +44,8 @@ class DirectiveField(dataclasses.Field):
         self.graphql_name = name
 
 
-def directive_field(name: str) -> Any:
-    return DirectiveField(name)
+def directive_field(name: str, *, default: Any = dataclasses.MISSING) -> Any:
+    return DirectiveField(name, default=default)
 
 
 def schema_directive(
@@ -53,6 +53,7 @@ def schema_directive(
     *,
     name: str | None = None,
     description: str | None = None,
+    repeatable: bool = False,
 ) -> Any:
     def wrap(cls: _type) -> _type:
         cls = dataclasses.dataclass(cls, kw_only=True)
@@ -61,6 +62,7 @@ def schema_directive(
             locations=[location.value for location in locations],
             name=name,
             description=description,
+            repeatable=repeatable,
         )
         return cls
 

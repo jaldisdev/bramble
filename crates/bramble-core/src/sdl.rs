@@ -179,6 +179,9 @@ fn render_schema_directive(directive: &SchemaDirectiveDefinition, auto_camel_cas
             directive.fields.iter().map(|field| render_directive_field(field, auto_camel_case)).collect();
         out.push_str(&format!("({})", rendered.join(", ")));
     }
+    if directive.repeatable {
+        out.push_str(" repeatable");
+    }
     out.push_str(" on ");
     let locations: Vec<&str> = directive.locations.iter().copied().map(schema_directive_location_str).collect();
     out.push_str(&locations.join(" | "));
@@ -186,7 +189,9 @@ fn render_schema_directive(directive: &SchemaDirectiveDefinition, auto_camel_cas
 }
 
 fn render_schema_block(schema: &CompiledSchema) -> String {
-    let mut out = String::from("schema {\n");
+    let mut out = String::from("schema");
+    out.push_str(&render_applied_directives(&schema.schema_applied_directives));
+    out.push_str(" {\n");
     out.push_str(&format!("  query: {}\n", schema.query_type_name));
     if let Some(mutation) = &schema.mutation_type_name {
         out.push_str(&format!("  mutation: {mutation}\n"));
@@ -264,6 +269,7 @@ mod tests {
             subscription_type_name: None,
             operation_directives: HashMap::new(),
             schema_directives: HashMap::new(),
+            schema_applied_directives: Vec::new(),
             scalar_names: HashSet::new(),
             scalar_applied_directives: HashMap::new(),
             scalar_descriptions: HashMap::new(),
@@ -491,6 +497,7 @@ mod tests {
                     graphql_name: None,
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
                 }],
+                repeatable: false,
             },
         );
         schema.operation_directives.insert(
@@ -514,6 +521,44 @@ mod tests {
 
         """Marks a type's key fields"""
         directive @keys(fields: String!) on OBJECT
+        "###);
+    }
+
+    #[test]
+    fn renders_a_repeatable_directive_declaration() {
+        let mut schema = empty_schema();
+        schema.schema_directives.insert(
+            "key".to_string(),
+            SchemaDirectiveDefinition {
+                name: "key".to_string(),
+                description: None,
+                locations: vec![SchemaDirectiveLocation::Object, SchemaDirectiveLocation::Interface],
+                fields: vec![DirectiveFieldDefinition {
+                    name: "fields".to_string(),
+                    graphql_name: None,
+                    graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("FieldSet".to_string()))),
+                }],
+                repeatable: true,
+            },
+        );
+
+        let sdl = render_sdl(&schema);
+        assert!(sdl.contains("directive @key(fields: FieldSet!) repeatable on OBJECT | INTERFACE"));
+    }
+
+    #[test]
+    fn renders_applied_directives_on_the_schema_block() {
+        let mut schema = empty_schema();
+        schema.schema_applied_directives = vec![AppliedDirective {
+            name: "link".to_string(),
+            arguments: vec![("url".to_string(), serde_json::json!("https://specs.apollo.dev/federation/v2.6"))],
+        }];
+
+        let sdl = render_sdl(&schema);
+        insta::assert_snapshot!(sdl, @r###"
+        schema @link(url: "https://specs.apollo.dev/federation/v2.6") {
+          query: Query
+        }
         "###);
     }
 

@@ -26,7 +26,7 @@ pub struct PyCompiledSchema {
 /// `definition` fields), so this is just re-keying already-computed data by name, not re-deriving
 /// anything from the Python classes themselves.
 #[pyfunction]
-#[pyo3(signature = (*, query_type_name, mutation_type_name=None, subscription_type_name=None, types, unions, directives, schema_directives, scalar_names, scalar_directives=Vec::new(), scalar_descriptions=Vec::new(), auto_camel_case=true))]
+#[pyo3(signature = (*, query_type_name, mutation_type_name=None, subscription_type_name=None, types, unions, directives, schema_directives, scalar_names, scalar_directives=Vec::new(), scalar_descriptions=Vec::new(), auto_camel_case=true, schema_applied_directives=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn compile_schema(
     query_type_name: String,
@@ -40,6 +40,7 @@ pub fn compile_schema(
     scalar_directives: Vec<(String, Bound<'_, PyAny>)>,
     scalar_descriptions: Vec<(String, Option<String>)>,
     auto_camel_case: bool,
+    schema_applied_directives: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyCompiledSchema> {
     let types = types
         .iter()
@@ -75,6 +76,14 @@ pub fn compile_schema(
         .filter_map(|(name, description)| description.map(|description| (name, description)))
         .collect::<HashMap<_, _>>();
 
+    let schema_applied_directives = match &schema_applied_directives {
+        Some(directives) => {
+            validate_directive_locations(directives, "SCHEMA", "schema")?;
+            extract_applied_directives(directives)?
+        }
+        None => Vec::new(),
+    };
+
     let schema = CompiledSchema {
         types,
         unions,
@@ -83,6 +92,7 @@ pub fn compile_schema(
         subscription_type_name,
         operation_directives,
         schema_directives,
+        schema_applied_directives,
         scalar_names: scalar_names.into_iter().collect::<HashSet<_>>(),
         scalar_applied_directives,
         scalar_descriptions,

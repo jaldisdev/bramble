@@ -106,6 +106,7 @@ fn sample_schema() -> CompiledSchema {
         subscription_type_name: None,
         operation_directives: HashMap::new(),
         schema_directives: HashMap::new(),
+        schema_applied_directives: Vec::new(),
         scalar_names: HashSet::new(),
         scalar_applied_directives: HashMap::new(),
         scalar_descriptions: HashMap::new(),

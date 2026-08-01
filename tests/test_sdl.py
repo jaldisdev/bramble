@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Annotated, NewType, Union
 
+import pytest
+
 import bramble
 from bramble.directive import DirectiveLocation, DirectiveValue
 from bramble.schema.config import SchemaConfig
@@ -121,6 +123,31 @@ def test_to_sdl_renders_applied_field_level_directive() -> None:
 
     assert 'old: String! @deprecated(reason: "use new")' in sdl
     assert "directive @deprecated(reason: String!) on FIELD_DEFINITION" in sdl
+
+
+def test_to_sdl_renders_schema_level_applied_directive_and_repeatable_declaration() -> None:
+    @bramble.schema_directive(locations=[Location.SCHEMA], repeatable=True)
+    class Link:
+        url: str
+
+    @bramble.type
+    class Query:
+        greet: str
+
+    schema = bramble.Schema(query=Query, schema_directives=[Link(url="https://example.com/spec")])
+    sdl = schema.to_sdl()
+
+    assert 'schema @link(url: "https://example.com/spec") {' in sdl
+    assert "directive @link(url: String!) repeatable on SCHEMA" in sdl
+
+
+def test_schema_directives_rejects_a_non_directive_instance() -> None:
+    @bramble.type
+    class Query:
+        greet: str
+
+    with pytest.raises(bramble.SchemaError, match="not a @bramble.schema_directive instance"):
+        bramble.Schema(query=Query, schema_directives=[object()])
 
 
 def test_to_sdl_renders_union() -> None:

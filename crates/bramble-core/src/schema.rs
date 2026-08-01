@@ -140,6 +140,12 @@ pub struct SchemaDirectiveDefinition {
     pub description: Option<String>,
     pub locations: Vec<SchemaDirectiveLocation>,
     pub fields: Vec<DirectiveFieldDefinition>,
+    /// Whether this directive's own declaration carries GraphQL's `repeatable` keyword (e.g.
+    /// Apollo Federation's `directive @key(...) repeatable on OBJECT | INTERFACE`) -- lets the
+    /// same directive be applied more than once to one type/field, which bramble's
+    /// `Vec<AppliedDirective>` (§6) already allows at the *application* site regardless of this
+    /// flag; this only controls whether the *declaration* advertises that as intentional.
+    pub repeatable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -179,6 +185,10 @@ pub struct CompiledSchema {
     pub subscription_type_name: Option<String>,
     pub operation_directives: HashMap<String, OperationDirectiveDefinition>,
     pub schema_directives: HashMap<String, SchemaDirectiveDefinition>,
+    /// Directives applied to the `schema { ... }` block itself (e.g. Apollo Federation's
+    /// `schema @link(url: "...") { ... }`) -- distinct from `schema_directives` above, which holds
+    /// *declarations* (`directive @name(...) on ...`), not applications.
+    pub schema_applied_directives: Vec<AppliedDirective>,
     pub scalar_names: HashSet<String>,
     /// Applied directives (§6) for a registered scalar, keyed by its GraphQL name -- separate
     /// from `scalar_names` (a flat set) since a scalar has no other Rust-side IR of its own to

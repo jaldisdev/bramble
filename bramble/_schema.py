@@ -277,6 +277,7 @@ class Schema:
         extensions: Sequence[object] = (),
         config: SchemaConfig | None = None,
         execution_context_class: _type | None = None,
+        schema_directives: Sequence[object] = (),
     ) -> None:
         if getattr(query, "__bramble_type_info__", None) is None:
             raise SchemaError("Schema(query=...) must be a @bramble.type-decorated class")
@@ -286,6 +287,18 @@ class Schema:
                 function_name = getattr(directive_function, "__name__", directive_function)
                 raise SchemaError(f"'{function_name}' passed to Schema(directives=...) is not a @bramble.directive")
 
+        # Distinct from `directives=` above (custom *operation* directive functions):
+        # `schema_directives=` holds applied schema-directive *instances* (e.g. `Link(url=...)`),
+        # attached to the `schema { ... }` block itself rather than any type/field -- there is no
+        # `@bramble.type`-decorated class for the schema itself to hang these off of, unlike every
+        # other applied-directive site.
+        for schema_directive_instance in schema_directives:
+            if getattr(schema_directive_instance, "__bramble_directive_info__", None) is None:
+                raise SchemaError(
+                    f"'{schema_directive_instance}' passed to Schema(schema_directives=...) is not a "
+                    "@bramble.schema_directive instance"
+                )
+
         self.query = query
         self.mutation = mutation
         self.subscription = subscription
@@ -294,6 +307,7 @@ class Schema:
         self.extensions = tuple(extensions)
         self.config = config if config is not None else SchemaConfig()
         self.execution_context_class = execution_context_class
+        self.schema_directives = tuple(schema_directives)
 
         roots = [root for root in (query, mutation, subscription, *types) if root is not None]
         localns = {root.__name__: root for root in roots}
@@ -318,6 +332,12 @@ class Schema:
                 _discover_annotation(annotation, graph=graph)
 
         _validate_interface_implementations(graph)
+
+        # `schema_directives=[...]` instances (e.g. `Link(url=...)`) are applied to the schema
+        # block itself, never attached to any type/field the graph walk above already visits --
+        # their *declarations* need registering here explicitly, the same way the walk registers
+        # every other applied directive's declaration as it's discovered.
+        _register_schema_directive_definitions(self.schema_directives, graph=graph)
 
         # The compiled schema: assembled and validated once, here, per §7b -- every subsequent
         # request's parse/validate/execute cycle (Tasks 9/11) operates against this, not against
@@ -365,6 +385,7 @@ class Schema:
             scalar_directives=scalar_directives,
             scalar_descriptions=scalar_descriptions,
             auto_camel_case=self.config.auto_camel_case,
+            schema_applied_directives=list(self.schema_directives),
         )
 
     def validate_query(self, query: str, *, operation_name: str | None = None) -> None:

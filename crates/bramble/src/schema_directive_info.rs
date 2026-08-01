@@ -33,6 +33,8 @@ pub struct PySchemaDirectiveInfo {
     pub locations: Vec<String>,
     #[pyo3(get)]
     pub fields: Vec<PyDirectiveFieldInfo>,
+    #[pyo3(get)]
+    pub repeatable: bool,
     /// Not Python-exposed -- see `PyTypeInfo::definition`'s doc comment for why. Lets
     /// `compile_schema` (§9/§12) re-key an already-computed `SchemaDirectiveInfo` by name for SDL
     /// rendering, the same way it already does for types/unions/operation directives.
@@ -88,13 +90,14 @@ fn class_name_to_directive_name(class_name: &str) -> String {
 }
 
 #[pyfunction]
-#[pyo3(signature = (cls, *, locations, name=None, description=None))]
+#[pyo3(signature = (cls, *, locations, name=None, description=None, repeatable=false))]
 pub fn describe_schema_directive(
     py: Python<'_>,
     cls: &Bound<'_, PyType>,
     locations: Vec<String>,
     name: Option<String>,
     description: Option<String>,
+    repeatable: bool,
 ) -> PyResult<PySchemaDirectiveInfo> {
     let parsed_locations = locations
         .iter()
@@ -147,6 +150,7 @@ pub fn describe_schema_directive(
         description,
         locations: parsed_locations,
         fields,
+        repeatable,
     };
 
     Ok(PySchemaDirectiveInfo {
@@ -159,6 +163,7 @@ pub fn describe_schema_directive(
             .map(|location| location_str(location).to_string())
             .collect(),
         fields: definition.fields.iter().cloned().map(PyDirectiveFieldInfo::from).collect(),
+        repeatable: definition.repeatable,
         definition,
     })
 }
