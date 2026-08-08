@@ -83,6 +83,14 @@ If `Schema(execution_context_class=SomeClass)` was set, `info.context`
 defaults to a fresh `SomeClass()` instance whenever a caller doesn't pass
 `context=` explicitly.
 
+## `Depends[T]`
+
+Annotate a parameter `Annotated[T, bramble.Depends(provider)]` to receive a
+value produced by `provider` -- dependency injection, invisible to the
+GraphQL schema exactly like `Parent[T]`/`Info`. See
+[Dependency injection](dependency-injection.md) for the full reference
+(provider shapes, caching scope, nested dependencies).
+
 ## Arguments
 
 Every other annotated parameter becomes a GraphQL argument, named after the

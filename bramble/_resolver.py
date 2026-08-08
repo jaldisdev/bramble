@@ -19,13 +19,14 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any, Generic, TypeVar
 
 ParentType = TypeVar("ParentType")
 ContextType = TypeVar("ContextType")
 RootValueType = TypeVar("RootValueType")
 StreamedItemType = TypeVar("StreamedItemType")
+ProvidedType = TypeVar("ProvidedType")
 
 
 class Streamable(AsyncGenerator[StreamedItemType, None]):
@@ -66,6 +67,48 @@ class Info(Generic[ContextType, RootValueType]):
     path: "Path"
     selected_fields: list["SelectedField"]
     schema: "Schema"
+
+
+class Depends(Generic[ProvidedType]):
+    """Marker used in a resolver (or custom operation directive, or another provider's own)
+    parameter's annotation to receive a value produced by `provider` -- dependency injection (§3c),
+    a bramble addition not present in Strawberry:
+
+        async def get_gel_client(info: bramble.Info) -> AsyncIterator[GelClient]:
+            client = await create_gel_client(info.context["dsn"])
+            try:
+                yield client
+            finally:
+                await client.aclose()
+
+        @bramble.field
+        async def some_query(
+            client: Annotated[GelClient, bramble.Depends(get_gel_client)],
+        ) -> SomeResult:
+            return await client.query(...)
+
+    Only ever appears as `Annotated[T, bramble.Depends(provider)]` metadata (never a bare
+    `Depends[T]` subscript the way `Parent[T]`/`Info` are) -- `Generic[T]` here is purely for a type
+    checker's benefit, tying `provider`'s own return type to the annotated parameter's type.
+
+    `provider` may be a plain function returning `T`, an `async def` returning (an awaitable of)
+    `T`, or an async-generator function `yield`-ing exactly one `T` (for setup/teardown around it,
+    `try`/`finally` style, as `get_gel_client` above does) -- see `bramble._dependency` for the
+    runtime resolution, caching, and teardown semantics.
+
+    `use_cache=False` opts this specific injection site out of the per-request/per-subscription
+    cache (both reading and writing it) -- matches FastAPI's own `use_cache` behavior, including
+    that it's per-injection-site, not per-provider globally.
+    """
+
+    def __init__(
+        self,
+        provider: Callable[..., "ProvidedType | Awaitable[ProvidedType] | AsyncIterator[ProvidedType]"],
+        *,
+        use_cache: bool = True,
+    ) -> None:
+        self.provider = provider
+        self.use_cache = use_cache
 
 
 class Argument:

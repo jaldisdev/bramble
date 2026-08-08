@@ -439,9 +439,14 @@ class Schema:
         context: Any = None,
         root_value: Any = None,
         operation_name: str | None = None,
+        resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
     ) -> dict[str, Any]:
         """Executes `query` against this schema (§7a/§8/§11), returning a spec-shaped
         `{"data": ..., "errors": [...]}` response. See `bramble._execution.execute_async`.
+
+        `resolved_dependencies` (§3c) pre-seeds this request's dependency-injection cache, keyed by
+        provider-callable identity -- a value supplied this way is used without its provider ever
+        being called, and (since bramble never owned it) never torn down by bramble either.
         """
         return await _execute_async(
             self,
@@ -450,6 +455,7 @@ class Schema:
             context=context,
             root_value=root_value,
             operation_name=operation_name,
+            resolved_dependencies=resolved_dependencies,
         )
 
     def execute(
@@ -460,6 +466,7 @@ class Schema:
         context: Any = None,
         root_value: Any = None,
         operation_name: str | None = None,
+        resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
     ) -> dict[str, Any]:
         """Synchronous convenience wrapper around `execute_async` -- see its own docstring for the
         caveat about not being callable from within an already-running event loop.
@@ -471,6 +478,7 @@ class Schema:
             context=context,
             root_value=root_value,
             operation_name=operation_name,
+            resolved_dependencies=resolved_dependencies,
         )
 
     async def execute_incremental(
@@ -481,6 +489,7 @@ class Schema:
         context: Any = None,
         root_value: Any = None,
         operation_name: str | None = None,
+        resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Executes a query/mutation operation using `@defer`/`@stream`, yielding the initial
         `{"data": ..., "hasNext": bool}` payload followed by zero or more `{"incremental": [...],
@@ -490,16 +499,30 @@ class Schema:
         `asyncio.run`-based convenience wrapper here either. A query/mutation with no active
         `@defer`/`@stream` marker should go through `execute_async` instead -- it's the
         zero-overhead path for that overwhelmingly common case.
+
+        `resolved_dependencies` (§3c) -- see `execute_async`'s own docstring.
         """
-        async for response in _execute_incremental(
+        generator = _execute_incremental(
             self,
             query,
             variable_values=variable_values,
             context=context,
             root_value=root_value,
             operation_name=operation_name,
-        ):
-            yield response
+            resolved_dependencies=resolved_dependencies,
+        )
+        try:
+            async for response in generator:
+                yield response
+        finally:
+            # `async for` alone does *not* propagate an early `.aclose()` (a consumer stopping
+            # iteration on *this* wrapper generator) down to `generator` itself -- without this
+            # explicit `finally`, the inner generator would only ever get closed later, by
+            # Python's own async-generator GC finalizer, not synchronously as part of this
+            # generator's own shutdown. That's a real gap once a dependency's own generator-based
+            # provider (§3c) is involved: its teardown needs to run reliably and promptly, not
+            # "eventually, whenever GC gets to it."
+            await generator.aclose()
 
     async def subscribe_async(
         self,
@@ -509,21 +532,33 @@ class Schema:
         context: Any = None,
         root_value: Any = None,
         operation_name: str | None = None,
+        resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Executes a subscription operation, yielding one spec-shaped `{"data": ..., "errors":
         [...]}` response per event. See `bramble._execution.subscribe_async`. Async-only -- unlike
         `execute`/`execute_async`, there's no synchronous convenience wrapper, since a subscription
         is an open-ended event stream, not a single value `asyncio.run` could meaningfully block on.
+
+        `resolved_dependencies` (§3c) -- see `execute_async`'s own docstring.
         """
-        async for response in _subscribe_async(
+        generator = _subscribe_async(
             self,
             query,
             variable_values=variable_values,
             context=context,
             root_value=root_value,
             operation_name=operation_name,
-        ):
-            yield response
+            resolved_dependencies=resolved_dependencies,
+        )
+        try:
+            async for response in generator:
+                yield response
+        finally:
+            # See `execute_incremental`'s identical `finally` above for why this is needed: without
+            # it, a client unsubscribing/disconnecting only closes *this* wrapper generator, never
+            # `generator` itself -- so a `Depends` provider's own generator-based teardown (§3c)
+            # wouldn't run promptly on disconnect, only eventually via GC.
+            await generator.aclose()
 
     def to_sdl(self) -> str:
         """Renders this schema's GraphQL SDL (§6/§9/§12): every reachable type/union/scalar, plus

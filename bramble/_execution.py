@@ -24,11 +24,12 @@ import datetime
 import decimal
 import inspect
 import uuid
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from bramble._bramble import lower_query, validate_query
+from bramble._dependency import DependencyScope, resolve_dependencies
 from bramble._error import ErrorCode, GraphQLError
 from bramble._error import error_to_dict as _error_to_dict
 from bramble._interface import resolve_interface_type
@@ -106,6 +107,7 @@ class _ExecutionState:
     variable_values: dict[str, Any]
     query: str | None
     errors: list[GraphQLError]
+    dependency_scope: DependencyScope
 
 
 def _build_info(
@@ -220,12 +222,15 @@ def _coerce_value(type_info: "GraphQLTypeInfo", value: Any, schema: "Schema") ->
     return value
 
 
-def _bind_resolver_kwargs(
+async def _bind_resolver_kwargs(
     field_info: "FieldInfo",
     lowered_field: "LoweredField",
     parent_value: Any,
     info: Info,
     schema: "Schema",
+    resolver: Callable[..., Any],
+    concrete_type: type,
+    scope: DependencyScope,
 ) -> dict[str, Any]:
     kwargs = _map_arguments(field_info.arguments, lowered_field.arguments, auto_camel_case=schema.config.auto_camel_case)
     for argument in field_info.arguments:
@@ -235,6 +240,7 @@ def _bind_resolver_kwargs(
         kwargs[field_info.parent_parameter] = parent_value
     if field_info.info_parameter is not None:
         kwargs[field_info.info_parameter] = info
+    kwargs.update(await resolve_dependencies(resolver, cls=concrete_type, info=info, scope=scope))
     return kwargs
 
 
@@ -245,22 +251,27 @@ async def _resolve_field_value(
     info: Info,
     concrete_type: type,
     schema: "Schema",
+    scope: DependencyScope,
 ) -> Any:
     if not field_info.has_resolver:
         return getattr(parent_value, field_info.name)
 
     resolver = getattr(concrete_type, field_info.name)
-    kwargs = _bind_resolver_kwargs(field_info, lowered_field, parent_value, info, schema)
+    kwargs = await _bind_resolver_kwargs(field_info, lowered_field, parent_value, info, schema, resolver, concrete_type, scope)
     result = resolver(**kwargs)
     if inspect.isawaitable(result):
         result = await result
     return result
 
 
-async def _apply_custom_directives(directives: Sequence[Any], value: Any, schema: "Schema") -> Any:
+async def _apply_custom_directives(
+    directives: Sequence[Any], value: Any, schema: "Schema", *, info: Info, scope: DependencyScope
+) -> Any:
     """Applies a field's custom operation directives in order (§7), each receiving the previous
     one's output -- `@skip`/`@include` never appear here, since `lower_query` already applied them
-    structurally rather than carrying them through to execution.
+    structurally rather than carrying them through to execution. `info`/`scope` support a directive
+    function's own `Info`/`Depends[T]` parameters (§3c) -- injectable in a custom operation
+    directive the same way they are in a resolver.
     """
     for directive in directives:
         directive_function = schema.directive_functions_by_name.get(directive.name)
@@ -276,10 +287,7 @@ async def _apply_custom_directives(directives: Sequence[Any], value: Any, schema
         for argument in directive_info.arguments:
             if argument.name in mapped_arguments:
                 mapped_arguments[argument.name] = _coerce_value(argument.type_info, mapped_arguments[argument.name], schema)
-        result = apply_directive(directive_function, value, mapped_arguments)
-        if inspect.isawaitable(result):
-            result = await result
-        value = result
+        value = await apply_directive(directive_function, value, mapped_arguments, info=info, scope=scope)
     return value
 
 
@@ -480,18 +488,25 @@ async def _finish_field(
     raw_value: Any,
     path: Path,
     state: _ExecutionState,
+    info: Info,
 ) -> Any:
     """The part of field execution that happens *after* a raw value is already in hand (custom
     directives, then `CompleteValue`) -- shared by `_execute_field` (whose raw value comes from
     calling the field's own resolver) and subscription event dispatch (§ subscriptions, whose raw
     value is instead each event a subscription resolver's async generator yields; that resolver is
     only ever called once, to create the stream, never per event -- there's no second "resolve"
-    step to run here, only completion of the event itself as the field's value).
+    step to run here, only completion of the event itself as the field's value). `info` is always
+    the same one built for this field itself (rebuilt per event for a subscription, since each
+    event's own errors need their own scope, but describing the same field/path/selections every
+    time) -- passed through to `_apply_custom_directives` for a directive's own `Info`/`Depends[T]`
+    parameters (§3c).
     """
     is_non_null = field_info.type_info.kind == "NON_NULL"
 
     try:
-        raw_value = await _apply_custom_directives(lowered_field.directives, raw_value, state.schema)
+        raw_value = await _apply_custom_directives(
+            lowered_field.directives, raw_value, state.schema, info=info, scope=state.dependency_scope
+        )
     except _PropagateNull:
         raise
     except Exception as error:  # noqa: BLE001 -- deliberately broad: any directive failure becomes a field error, per §8.
@@ -529,7 +544,9 @@ async def _execute_field(
     info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
 
     try:
-        raw_value = await _resolve_field_value(field_info, lowered_field, parent_value, info, concrete_type, state.schema)
+        raw_value = await _resolve_field_value(
+            field_info, lowered_field, parent_value, info, concrete_type, state.schema, state.dependency_scope
+        )
     except _PropagateNull:
         raise
     except Exception as error:  # noqa: BLE001 -- deliberately broad: any resolver failure becomes a field error, per §8.
@@ -545,6 +562,7 @@ async def _execute_field(
         raw_value=raw_value,
         path=path,
         state=state,
+        info=info,
     )
 
 
@@ -734,7 +752,9 @@ async def _execute_field_incremental(
     info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
 
     try:
-        raw_value = await _resolve_field_value(field_info, lowered_field, parent_value, info, concrete_type, state.schema)
+        raw_value = await _resolve_field_value(
+            field_info, lowered_field, parent_value, info, concrete_type, state.schema, state.dependency_scope
+        )
     except _PropagateNull:
         raise
     except Exception as error:  # noqa: BLE001 -- deliberately broad: any resolver failure becomes a field error, per §8.
@@ -751,6 +771,7 @@ async def _execute_field_incremental(
         path=path,
         state=state,
         incremental=incremental,
+        info=info,
     )
 
 
@@ -763,11 +784,14 @@ async def _finish_field_incremental(
     path: Path,
     state: _ExecutionState,
     incremental: _IncrementalContext,
+    info: Info,
 ) -> Any:
     is_non_null = field_info.type_info.kind == "NON_NULL"
 
     try:
-        raw_value = await _apply_custom_directives(lowered_field.directives, raw_value, state.schema)
+        raw_value = await _apply_custom_directives(
+            lowered_field.directives, raw_value, state.schema, info=info, scope=state.dependency_scope
+        )
     except _PropagateNull:
         raise
     except Exception as error:  # noqa: BLE001 -- deliberately broad: any directive failure becomes a field error, per §8.
@@ -910,7 +934,9 @@ async def _start_streamed_field(
 
     info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
     resolver = getattr(concrete_type, field_info.name)
-    kwargs = _bind_resolver_kwargs(field_info, lowered_field, parent_value, info, state.schema)
+    kwargs = await _bind_resolver_kwargs(
+        field_info, lowered_field, parent_value, info, state.schema, resolver, concrete_type, state.dependency_scope
+    )
     result = resolver(**kwargs)
 
     if not inspect.isasyncgen(result):
@@ -1320,6 +1346,7 @@ async def execute_async(
     context: Any = None,
     root_value: Any = None,
     operation_name: str | None = None,
+    resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
 ) -> dict[str, Any]:
     """Executes `query` against `schema` (§7a/§8/§11): validates and lowers it, then walks the
     result with full null-bubbling. A malformed query, a schema-shape validation failure, or an
@@ -1327,6 +1354,10 @@ async def execute_async(
     `Schema.validate_query`/`resolve_persisted_query`'s own behavior, these are request-level
     failures, not partial-response ones. Once execution actually starts, a resolver/completion
     failure instead becomes an entry in the returned `errors` list, per spec.
+
+    `resolved_dependencies` (§3c) pre-seeds this request's own dependency-injection cache, keyed by
+    provider-callable identity -- a value supplied this way skips its provider entirely (never
+    invoked, and its own teardown is never run by bramble, which never owned it to begin with).
     """
     resolved_variable_values = variable_values or {}
 
@@ -1352,6 +1383,8 @@ async def execute_async(
 
     context = _resolve_execution_context(schema, context)
 
+    scope = DependencyScope()
+    scope.seed(resolved_dependencies)
     errors: list[GraphQLError] = []
     state = _ExecutionState(
         schema=schema,
@@ -1360,19 +1393,23 @@ async def execute_async(
         variable_values=resolved_variable_values,
         query=query,
         errors=errors,
+        dependency_scope=scope,
     )
 
     try:
-        data: dict[str, Any] | None = await _execute_selection_set(
-            selections=fields,
-            concrete_type=root_type,
-            parent_value=root_value,
-            path=None,
-            state=state,
-            serial=operation_type == "mutation",
-        )
-    except _PropagateNull:
-        data = None
+        try:
+            data: dict[str, Any] | None = await _execute_selection_set(
+                selections=fields,
+                concrete_type=root_type,
+                parent_value=root_value,
+                path=None,
+                state=state,
+                serial=operation_type == "mutation",
+            )
+        except _PropagateNull:
+            data = None
+    finally:
+        await scope.aclose()
 
     response: dict[str, Any] = {"data": data}
     if errors:
@@ -1388,6 +1425,7 @@ def execute(
     context: Any = None,
     root_value: Any = None,
     operation_name: str | None = None,
+    resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
 ) -> dict[str, Any]:
     """Synchronous convenience wrapper around `execute_async` for schemas whose resolvers are all
     synchronous. Uses `asyncio.run`, so (like that function) it cannot be called from within an
@@ -1401,6 +1439,7 @@ def execute(
             context=context,
             root_value=root_value,
             operation_name=operation_name,
+            resolved_dependencies=resolved_dependencies,
         )
     )
 
@@ -1413,6 +1452,7 @@ async def execute_incremental(
     context: Any = None,
     root_value: Any = None,
     operation_name: str | None = None,
+    resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Executes a query/mutation operation using `@defer`/`@stream`, yielding one spec-shaped
     payload at a time: the initial `{"data": ..., "hasNext": bool}` (deferred subtrees omitted,
@@ -1426,6 +1466,10 @@ async def execute_incremental(
     single `hasNext: false` payload identical to what `execute_async` would produce), but
     `execute_async` is the zero-overhead path for that overwhelmingly common case -- this function
     is for when at least one marker is actually present.
+
+    `resolved_dependencies` (§3c) -- see `execute_async`'s own docstring; this request's dependency
+    cache spans the whole incremental delivery, including every deferred/streamed background job,
+    not just the initial payload.
     """
     resolved_variable_values = variable_values or {}
 
@@ -1444,6 +1488,8 @@ async def execute_incremental(
 
     context = _resolve_execution_context(schema, context)
 
+    scope = DependencyScope()
+    scope.seed(resolved_dependencies)
     errors: list[GraphQLError] = []
     state = _ExecutionState(
         schema=schema,
@@ -1452,40 +1498,45 @@ async def execute_incremental(
         variable_values=resolved_variable_values,
         query=query,
         errors=errors,
+        dependency_scope=scope,
     )
     incremental = _IncrementalContext(patch_queue=asyncio.Queue(), tracker=_JobTracker())
 
     try:
-        data: dict[str, Any] | None = await _execute_selection_set_incremental(
-            selections=fields,
-            concrete_type=root_type,
-            parent_value=root_value,
-            path=None,
-            state=state,
-            incremental=incremental,
-            serial=operation_type == "mutation",
-        )
-    except _PropagateNull:
-        data = None
+        try:
+            data: dict[str, Any] | None = await _execute_selection_set_incremental(
+                selections=fields,
+                concrete_type=root_type,
+                parent_value=root_value,
+                path=None,
+                state=state,
+                incremental=incremental,
+                serial=operation_type == "mutation",
+            )
+        except _PropagateNull:
+            data = None
 
-    # `any_spawned` (not `tracker.outstanding`, which may have already raced back down to `0` --
-    # see `_JobTracker`'s own docstring) is what correctly answers "does more data follow".
-    initial: dict[str, Any] = {"data": data, "hasNext": incremental.tracker.any_spawned}
-    if errors:
-        initial["errors"] = [_error_to_dict(error) for error in errors]
-    yield initial
+        # `any_spawned` (not `tracker.outstanding`, which may have already raced back down to `0`
+        # -- see `_JobTracker`'s own docstring) is what correctly answers "does more data follow".
+        initial: dict[str, Any] = {"data": data, "hasNext": incremental.tracker.any_spawned}
+        if errors:
+            initial["errors"] = [_error_to_dict(error) for error in errors]
+        yield initial
 
-    if not incremental.tracker.any_spawned:
-        return
-
-    # Each patch's own `hasNext` (computed by the job that produced it, at the exact synchronous
-    # moment its own completion was decided) is the authoritative "is this the last one" signal --
-    # not another read of `tracker.outstanding` here, for the same race-avoidance reason as above.
-    while True:
-        patch = await incremental.patch_queue.get()
-        yield patch
-        if not patch.get("hasNext", False):
+        if not incremental.tracker.any_spawned:
             return
+
+        # Each patch's own `hasNext` (computed by the job that produced it, at the exact
+        # synchronous moment its own completion was decided) is the authoritative "is this the
+        # last one" signal -- not another read of `tracker.outstanding` here, for the same
+        # race-avoidance reason as above.
+        while True:
+            patch = await incremental.patch_queue.get()
+            yield patch
+            if not patch.get("hasNext", False):
+                return
+    finally:
+        await scope.aclose()
 
 
 async def subscribe_async(
@@ -1496,6 +1547,7 @@ async def subscribe_async(
     context: Any = None,
     root_value: Any = None,
     operation_name: str | None = None,
+    resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Executes a subscription operation, yielding one spec-shaped `{"data": ..., "errors": [...]}`
     response per event. Per the GraphQL spec's two-phase model: `CreateSourceEventStream` (the
@@ -1511,6 +1563,16 @@ async def subscribe_async(
     propagates out of this generator entirely (a stream-level failure); an error confined to
     completing one single event becomes that event's own `errors` entry instead, without ending
     the subscription -- one bad event shouldn't kill the stream.
+
+    `resolved_dependencies` (§3c) seeds one dependency-injection cache scoped to this subscription's
+    own lifetime -- created once here (reused by the root resolver call that creates the source
+    stream, and by every event's own field completion), torn down exactly once when this generator
+    itself ends, via `finally` below: normal completion (the source stream itself ends), the
+    consumer unsubscribing/disconnecting (`GeneratorExit`, raised by `.aclose()` on this generator
+    at whatever `await`/`yield` point it's suspended at), or an error propagating out. Deliberately
+    *not* per-connection (a connection can carry multiple concurrent subscriptions, which must not
+    share dependency instances) and *not* per-emitted-event (which would re-run every provider on
+    every single message).
     """
     resolved_variable_values = variable_values or {}
 
@@ -1551,54 +1613,64 @@ async def subscribe_async(
             code=ErrorCode.UNKNOWN_FIELD,
         )
 
-    setup_state = _ExecutionState(
-        schema=schema,
-        context=context,
-        root_value=root_value,
-        variable_values=resolved_variable_values,
-        query=query,
-        errors=[],
-    )
-    info = _build_info(field_name=primary.field_name, path=field_path, selections=merged_selections, state=setup_state)
-
-    resolver = getattr(root_type, field_info.name)
-    kwargs = _bind_resolver_kwargs(field_info, primary, root_value, info, schema)
-    source_stream = resolver(**kwargs)
-    if not inspect.isasyncgen(source_stream):
-        if inspect.iscoroutine(source_stream):
-            # A plain `async def` resolver (not an async generator) returns an unawaited
-            # coroutine here -- close it explicitly, or Python warns about it at GC time.
-            source_stream.close()
-        raise GraphQLError(
-            f"subscription field '{primary.field_name}' must be an async generator resolver",
-            code=ErrorCode.FIELD_RESOLUTION_FAILED,
-        )
-
-    async for event in source_stream:
-        # A fresh errors list per event -- each yielded response reports only its own errors, not
-        # ones accumulated from earlier events.
-        event_state = _ExecutionState(
+    scope = DependencyScope()
+    scope.seed(resolved_dependencies)
+    try:
+        setup_state = _ExecutionState(
             schema=schema,
             context=context,
             root_value=root_value,
             variable_values=resolved_variable_values,
             query=query,
             errors=[],
+            dependency_scope=scope,
         )
-        try:
-            value = await _finish_field(
-                field_info=field_info,
-                lowered_field=primary,
-                selections=merged_selections,
-                raw_value=event,
-                path=field_path,
-                state=event_state,
-            )
-            data: dict[str, Any] | None = {response_key: value}
-        except _PropagateNull:
-            data = None
+        info = _build_info(field_name=primary.field_name, path=field_path, selections=merged_selections, state=setup_state)
 
-        response: dict[str, Any] = {"data": data}
-        if event_state.errors:
-            response["errors"] = [_error_to_dict(error) for error in event_state.errors]
-        yield response
+        resolver = getattr(root_type, field_info.name)
+        kwargs = await _bind_resolver_kwargs(field_info, primary, root_value, info, schema, resolver, root_type, scope)
+        source_stream = resolver(**kwargs)
+        if not inspect.isasyncgen(source_stream):
+            if inspect.iscoroutine(source_stream):
+                # A plain `async def` resolver (not an async generator) returns an unawaited
+                # coroutine here -- close it explicitly, or Python warns about it at GC time.
+                source_stream.close()
+            raise GraphQLError(
+                f"subscription field '{primary.field_name}' must be an async generator resolver",
+                code=ErrorCode.FIELD_RESOLUTION_FAILED,
+            )
+
+        async for event in source_stream:
+            # A fresh errors list per event -- each yielded response reports only its own errors,
+            # not ones accumulated from earlier events -- but the *same* dependency scope
+            # throughout, so a dependency used across events (or by the root resolver above) is
+            # still cached/torn down once for the whole subscription, not once per event.
+            event_state = _ExecutionState(
+                schema=schema,
+                context=context,
+                root_value=root_value,
+                variable_values=resolved_variable_values,
+                query=query,
+                errors=[],
+                dependency_scope=scope,
+            )
+            try:
+                value = await _finish_field(
+                    field_info=field_info,
+                    lowered_field=primary,
+                    selections=merged_selections,
+                    raw_value=event,
+                    path=field_path,
+                    state=event_state,
+                    info=info,
+                )
+                data: dict[str, Any] | None = {response_key: value}
+            except _PropagateNull:
+                data = None
+
+            response: dict[str, Any] = {"data": data}
+            if event_state.errors:
+                response["errors"] = [_error_to_dict(error) for error in event_state.errors]
+            yield response
+    finally:
+        await scope.aclose()

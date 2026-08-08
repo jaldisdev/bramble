@@ -20,7 +20,7 @@
 use bramble_core::schema::{OperationDirectiveDefinition, OperationDirectiveLocation};
 use pyo3::prelude::*;
 
-use crate::resolver_binding::{classify_argument, resolve_annotations};
+use crate::resolver_binding::classify_parameters;
 use crate::type_info::{convert_argument, PyArgumentInfo, SchemaError};
 
 #[pyclass(name = "OperationDirectiveInfo", frozen, skip_from_py_object)]
@@ -33,6 +33,8 @@ pub struct PyOperationDirectiveInfo {
     pub locations: Vec<String>,
     #[pyo3(get)]
     pub value_parameter: Option<String>,
+    #[pyo3(get)]
+    pub info_parameter: Option<String>,
     #[pyo3(get)]
     pub arguments: Vec<Py<PyArgumentInfo>>,
     /// Not Python-exposed -- see `PyTypeInfo::definition`'s doc comment for why.
@@ -82,11 +84,13 @@ fn snake_to_camel_case(name: &str) -> String {
     result
 }
 
-/// Classifies a custom operation directive function's parameters per §7: `DirectiveValue[T]` ->
-/// the field's already-resolved value, anything else -> one of the directive's own arguments at
-/// its use site in the query (reusing Task 4's exact argument-binding rules via
-/// `classify_argument`). Unlike resolver binding, there's no enclosing class to seed
-/// `typing.get_type_hints`'s `localns` with -- a directive is always a standalone function.
+/// Classifies a custom operation directive function's parameters per §7/§3c via the same shared
+/// `classify_parameters` resolver binding uses: `DirectiveValue[T]` -> the field's already-resolved
+/// value, `Info` -> the execution context (§3c -- a directive supports `Info` injection the same
+/// way a resolver does), `Depends[T]` -> excluded from the argument list entirely, anything else ->
+/// one of the directive's own arguments at its use site in the query. Unlike resolver binding,
+/// there's no enclosing class to seed `typing.get_type_hints`'s `localns` with -- a directive is
+/// always a standalone function.
 #[pyfunction]
 #[pyo3(signature = (func, *, locations, name=None, description=None))]
 pub fn describe_operation_directive(
@@ -101,47 +105,15 @@ pub fn describe_operation_directive(
         .map(|value| parse_location(value))
         .collect::<PyResult<Vec<_>>>()?;
 
-    let inspect = py.import("inspect")?;
-    let typing = py.import("typing")?;
     let directive_value_class = py.import("bramble.directive")?.getattr("DirectiveValue")?;
-    let empty = inspect.getattr("Parameter")?.getattr("empty")?;
-
-    let signature = inspect.call_method1("signature", (func,))?;
-    let parameters = signature.getattr("parameters")?.call_method0("values")?;
-    let resolved_hints = resolve_annotations(py, &typing, None, func)?;
-
-    let mut value_parameter: Option<String> = None;
-    let mut arguments = Vec::new();
-
-    for parameter in parameters.try_iter()? {
-        let parameter = parameter?;
-        let parameter_name: String = parameter.getattr("name")?.extract()?;
-        let raw_annotation = parameter.getattr("annotation")?;
-
-        if raw_annotation.is(&empty) {
-            return Err(SchemaError::new_err(format!(
-                "directive parameter '{parameter_name}' has no type annotation; annotate it as \
-                 DirectiveValue[T] or a concrete argument type"
-            )));
-        }
-
-        let annotation = resolved_hints.get_item(&parameter_name)?.unwrap_or(raw_annotation);
-        let origin = typing.call_method1("get_origin", (&annotation,))?;
-
-        if annotation.is(&directive_value_class) || origin.is(&directive_value_class) {
-            if value_parameter.is_some() {
-                return Err(SchemaError::new_err(
-                    "directive declares more than one DirectiveValue[T] parameter",
-                ));
-            }
-            value_parameter = Some(parameter_name);
-            continue;
-        }
-
-        let default = parameter.getattr("default")?;
-        let has_default = !default.is(&empty);
-        arguments.push(classify_argument(py, &typing, parameter_name, annotation, has_default)?);
-    }
+    let classified = classify_parameters(
+        py,
+        None,
+        func,
+        None,
+        Some(&directive_value_class),
+        "DirectiveValue[T], Info, Depends[T], or a concrete argument type",
+    )?;
 
     let resolved_name = match name {
         Some(name) => name,
@@ -152,8 +124,9 @@ pub fn describe_operation_directive(
         name: resolved_name,
         description,
         locations: parsed_locations,
-        value_parameter,
-        arguments,
+        value_parameter: classified.value_parameter,
+        info_parameter: classified.info_parameter,
+        arguments: classified.arguments,
     };
 
     let arguments_info = definition
@@ -168,6 +141,7 @@ pub fn describe_operation_directive(
         description: definition.description.clone(),
         locations: definition.locations.iter().copied().map(location_str).collect(),
         value_parameter: definition.value_parameter.clone(),
+        info_parameter: definition.info_parameter.clone(),
         arguments: arguments_info,
         definition,
     })

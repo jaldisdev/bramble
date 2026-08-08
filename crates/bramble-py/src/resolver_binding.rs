@@ -116,30 +116,57 @@ pub(crate) fn resolve_annotations<'py>(
     Ok(hints.cast::<PyDict>()?.clone())
 }
 
-/// Classifies a resolver's parameters per §3/§3a: `Parent[T]` -> the parent/root value,
-/// `Info` -> the execution context, anything else -> a GraphQL field argument (optionally
-/// carrying `Annotated[T, bramble.argument(...)]` metadata). A parameter's role is determined
-/// solely by its annotation, never its name or position -- except that a completely *unannotated*
-/// parameter named `self`/`root` gets a more helpful error pointing at `Parent[T]`, since that's
-/// the mistake someone coming from a framework with implicit self-binding is most likely to make.
-pub fn bind_resolver_arguments(
-    py: Python<'_>,
-    cls: &Bound<'_, PyType>,
-    resolver: &Bound<'_, PyAny>,
-) -> PyResult<ResolverBinding> {
+/// The result of classifying one function's parameters (a resolver, or a custom operation
+/// directive) into their special-marker slots plus everything left over as GraphQL arguments.
+pub(crate) struct ClassifiedParameters {
+    pub parent_parameter: Option<String>,
+    pub info_parameter: Option<String>,
+    pub value_parameter: Option<String>,
+    pub arguments: Vec<ArgumentDefinition>,
+}
+
+/// The one shared classifier behind both `bind_resolver_arguments` (§3/§3a) and
+/// `describe_operation_directive` (§7): `Parent[T]` -> the parent/root value (resolvers only --
+/// `parent_class` is `None` for a directive, which has no such concept), `Info` -> the execution
+/// context (both), `DirectiveValue[T]` -> the field's already-resolved value (directives only --
+/// `value_class` is `None` for a resolver), `Annotated[T, bramble.Depends(...)]` (§3c) -> excluded
+/// from the GraphQL-visible argument list entirely (like `Parent`/`Info`, invisible to the schema),
+/// anything else -> a GraphQL argument (optionally carrying `Annotated[T, bramble.argument(...)]`
+/// metadata). A parameter's role is determined solely by its annotation, never its name or
+/// position -- except that a completely *unannotated* parameter named `self`/`root` on a resolver
+/// gets a more helpful error pointing at `Parent[T]`, since that's the mistake someone coming from
+/// a framework with implicit self-binding is most likely to make.
+///
+/// `Depends`-marked parameters are recognized here (so their exclusion from `arguments` is
+/// consistent everywhere `Info` is injectable) but otherwise ignored by this function -- the
+/// actual provider callable + `use_cache` flag live on the original Python annotation, read back
+/// out at runtime by `bramble._dependency`'s own mirror of this same classification rule, not
+/// carried through this Rust-side IR. Unlike `Parent`/`Info` (at most one such slot per function),
+/// a signature can carry many independent `Depends(...)` instances, each wrapping a live Python
+/// provider callable to invoke -- that's an execution-time concern, not a schema-shape one, so it
+/// has no business being threaded through `bramble_core`'s own (Python-free) schema IR.
+pub(crate) fn classify_parameters<'py>(
+    py: Python<'py>,
+    cls: Option<&Bound<'py, PyType>>,
+    func: &Bound<'py, PyAny>,
+    parent_class: Option<&Bound<'py, PyAny>>,
+    value_class: Option<&Bound<'py, PyAny>>,
+    unannotated_hint: &str,
+) -> PyResult<ClassifiedParameters> {
     let inspect = py.import("inspect")?;
     let typing = py.import("typing")?;
     let resolver_module = py.import("bramble._resolver")?;
-    let parent_class = resolver_module.getattr("Parent")?;
     let info_class = resolver_module.getattr("Info")?;
+    let depends_class = resolver_module.getattr("Depends")?;
     let empty = inspect.getattr("Parameter")?.getattr("empty")?;
 
-    let signature = inspect.call_method1("signature", (resolver,))?;
+    let signature = inspect.call_method1("signature", (func,))?;
     let parameters = signature.getattr("parameters")?.call_method0("values")?;
-    let resolved_hints = resolve_annotations(py, &typing, Some(cls), resolver)?;
+    let resolved_hints = resolve_annotations(py, &typing, cls, func)?;
 
     let mut parent_parameter: Option<String> = None;
     let mut info_parameter: Option<String> = None;
+    let mut value_parameter: Option<String> = None;
     let mut arguments = Vec::new();
 
     for parameter in parameters.try_iter()? {
@@ -148,7 +175,7 @@ pub fn bind_resolver_arguments(
         let raw_annotation = parameter.getattr("annotation")?;
 
         if raw_annotation.is(&empty) {
-            if parameter_name == "self" || parameter_name == "root" {
+            if parent_class.is_some() && (parameter_name == "self" || parameter_name == "root") {
                 return Err(SchemaError::new_err(format!(
                     "resolver parameter '{parameter_name}' has no type annotation -- bramble \
                      does not bind an implicit parent value by name; annotate it as \
@@ -156,8 +183,7 @@ pub fn bind_resolver_arguments(
                 )));
             }
             return Err(SchemaError::new_err(format!(
-                "resolver parameter '{parameter_name}' has no type annotation; annotate it as \
-                 Parent[T], Info, or a concrete argument type"
+                "parameter '{parameter_name}' has no type annotation; annotate it as {unannotated_hint}"
             )));
         }
 
@@ -166,7 +192,9 @@ pub fn bind_resolver_arguments(
             .unwrap_or(raw_annotation);
         let origin = typing.call_method1("get_origin", (&annotation,))?;
 
-        if origin.is(&parent_class) {
+        if let Some(parent_class) = parent_class
+            && origin.is(parent_class)
+        {
             if parent_parameter.is_some() {
                 return Err(SchemaError::new_err(
                     "resolver declares more than one Parent[T] parameter",
@@ -178,9 +206,26 @@ pub fn bind_resolver_arguments(
 
         if annotation.is(&info_class) || origin.is(&info_class) {
             if info_parameter.is_some() {
-                return Err(SchemaError::new_err("resolver declares more than one Info parameter"));
+                return Err(SchemaError::new_err("declares more than one Info parameter"));
             }
             info_parameter = Some(parameter_name);
+            continue;
+        }
+
+        let (_, metadata) = unwrap_annotated(&typing, annotation.clone())?;
+        if find_marker(&metadata, &depends_class)?.is_some() {
+            continue;
+        }
+
+        if let Some(value_class) = value_class
+            && (annotation.is(value_class) || origin.is(value_class))
+        {
+            if value_parameter.is_some() {
+                return Err(SchemaError::new_err(
+                    "directive declares more than one DirectiveValue[T] parameter",
+                ));
+            }
+            value_parameter = Some(parameter_name);
             continue;
         }
 
@@ -189,9 +234,37 @@ pub fn bind_resolver_arguments(
         arguments.push(classify_argument(py, &typing, parameter_name, annotation, has_default)?);
     }
 
-    Ok(ResolverBinding {
+    Ok(ClassifiedParameters {
         parent_parameter,
         info_parameter,
+        value_parameter,
         arguments,
+    })
+}
+
+/// Classifies a resolver's parameters per §3/§3a/§3c -- see `classify_parameters` for the shared
+/// algorithm. Resolver-specific: recognizes `Parent[T]`, and reports the friendlier "annotate it
+/// as Parent[T] instead" hint for an unannotated `self`/`root` parameter.
+pub fn bind_resolver_arguments(
+    py: Python<'_>,
+    cls: &Bound<'_, PyType>,
+    resolver: &Bound<'_, PyAny>,
+) -> PyResult<ResolverBinding> {
+    let resolver_module = py.import("bramble._resolver")?;
+    let parent_class = resolver_module.getattr("Parent")?;
+
+    let classified = classify_parameters(
+        py,
+        Some(cls),
+        resolver,
+        Some(&parent_class),
+        None,
+        "Parent[T], Info, Depends[T], or a concrete argument type",
+    )?;
+
+    Ok(ResolverBinding {
+        parent_parameter: classified.parent_parameter,
+        info_parameter: classified.info_parameter,
+        arguments: classified.arguments,
     })
 }

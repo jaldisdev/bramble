@@ -19,17 +19,31 @@
 
 from __future__ import annotations
 
-from typing import NewType
+import asyncio
+from collections.abc import Callable
+from typing import Any, NewType
 
 import pytest
 
 import bramble
+from bramble._dependency import DependencyScope
+from bramble._resolver import Info
 from bramble.directive import DirectiveLocation, DirectiveValue, apply_directive
 from bramble.schema.config import SchemaConfig
 
 # `typing.get_type_hints` can't see an enclosing test function's local scope, so a NewType used
 # only as a directive argument's annotation must live at module level (same gotcha elsewhere).
 Slug = NewType("Slug", str)
+
+
+def _apply(
+    directive_function: Callable[..., Any], value: Any, arguments: dict[str, Any] | None = None
+) -> Any:
+    """`apply_directive` itself is async (§3c: it may need to resolve `Info`/`Depends[T]`
+    parameters) -- this wraps it with a throwaway `Info`/`DependencyScope` pair for tests that only
+    care about `DirectiveValue`/argument binding, not execution context or dependency injection.
+    """
+    return asyncio.run(apply_directive(directive_function, value, arguments, info=Info(), scope=DependencyScope()))
 
 
 @bramble.input
@@ -48,7 +62,7 @@ def test_turn_uppercase_example_from_spec() -> None:
     assert info.value_parameter == "value"
     assert info.arguments == []
 
-    assert apply_directive(turn_uppercase, "hello") == "HELLO"
+    assert _apply(turn_uppercase, "hello") == "HELLO"
 
 
 def test_directive_name_defaults_to_camel_case_of_function_name() -> None:
@@ -77,7 +91,7 @@ def test_directive_with_arguments_binds_and_applies_correctly() -> None:
     argument_names = {argument.name for argument in info.arguments}
     assert argument_names == {"old", "new"}
 
-    result = apply_directive(replace, "JohnDoe", {"old": "John", "new": "Jane"})
+    result = _apply(replace, "JohnDoe", {"old": "John", "new": "Jane"})
     assert result == "JaneDoe"
 
 
@@ -90,8 +104,8 @@ def test_directives_can_be_chained() -> None:
     def turn_uppercase(value: DirectiveValue[str]) -> str:
         return value.upper()
 
-    value = apply_directive(replace, "JohnDoe", {"old": "John", "new": "Jane"})
-    value = apply_directive(turn_uppercase, value)
+    value = _apply(replace, "JohnDoe", {"old": "John", "new": "Jane"})
+    value = _apply(turn_uppercase, value)
 
     assert value == "JANEDOE"
 
@@ -105,8 +119,8 @@ def test_directive_argument_with_default() -> None:
     argument = next(a for a in info.arguments if a.name == "width")
     assert argument.has_default is True
 
-    assert apply_directive(pad, "hi") == "hi".rjust(10)
-    assert apply_directive(pad, "hi", {"width": 3}) == "hi".rjust(3)
+    assert _apply(pad, "hi") == "hi".rjust(10)
+    assert _apply(pad, "hi", {"width": 3}) == "hi".rjust(3)
 
 
 def test_directive_without_directive_value_parameter() -> None:
@@ -124,7 +138,7 @@ def test_applying_non_directive_function_raises_schema_error() -> None:
         return value
 
     with pytest.raises(bramble.SchemaError):
-        apply_directive(not_a_directive, "x")
+        _apply(not_a_directive, "x")
 
 
 def test_untyped_parameter_raises_schema_error() -> None:

@@ -43,6 +43,23 @@ def repeat(value: DirectiveValue[str], times: int = 2) -> str:
 A directive function can be `async def` -- bramble awaits it like any other
 resolver.
 
+## `Info` and `Depends[T]`
+
+A directive function supports the same `Info`/`Annotated[T, bramble.Depends(...)]`
+injection a resolver does -- both go through the identical classifier, so
+`Info`/`Depends[T]` parameters are excluded from the directive's own
+GraphQL arguments exactly like they are for a resolver's field arguments:
+
+```python
+@bramble.directive(locations=[DirectiveLocation.FIELD])
+def audit_log(value: DirectiveValue[str], info: bramble.Info) -> str:
+    print(f"resolved {info.field_name}")
+    return value
+```
+
+See [Dependency injection](dependency-injection.md) for `Depends[T]`'s full
+reference.
+
 ## Locations
 
 `DirectiveLocation` covers the *executable* directive locations (where a

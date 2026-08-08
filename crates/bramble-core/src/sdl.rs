@@ -526,6 +526,7 @@ mod tests {
                 description: None,
                 locations: vec![OperationDirectiveLocation::Field],
                 value_parameter: Some("value".to_string()),
+                info_parameter: None,
                 arguments: Vec::new(),
             },
         );

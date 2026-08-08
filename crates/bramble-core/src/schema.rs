@@ -186,6 +186,10 @@ pub struct OperationDirectiveDefinition {
     pub locations: Vec<OperationDirectiveLocation>,
     /// The parameter bound to the field's already-resolved value (`DirectiveValue[T]`), if any.
     pub value_parameter: Option<String>,
+    /// The parameter bound to the execution context (`Info`), if any -- mirrors
+    /// `FieldDefinition::info_parameter`; a custom operation directive supports `Info` injection
+    /// the same way a resolver does (§3c).
+    pub info_parameter: Option<String>,
     /// The directive's remaining parameters, each an argument supplied at the directive's use
     /// site in the query -- reuses `ArgumentDefinition` since the binding rules (§3a) are
     /// identical to a resolver's own arguments.

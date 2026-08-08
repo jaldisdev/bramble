@@ -20,10 +20,16 @@
 from __future__ import annotations
 
 import enum
+import inspect
 from collections.abc import Callable, Sequence
-from typing import Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from bramble._bramble import SchemaError, describe_operation_directive
+from bramble._dependency import resolve_dependencies
+
+if TYPE_CHECKING:
+    from bramble._dependency import DependencyScope
+    from bramble._resolver import Info
 
 T = TypeVar("T")
 
@@ -62,24 +68,34 @@ def directive(
     return wrap
 
 
-def apply_directive(
+async def apply_directive(
     directive_function: Callable[..., Any],
     value: Any,
-    arguments: dict[str, Any] | None = None,
+    arguments: dict[str, Any] | None,
+    *,
+    info: "Info",
+    scope: "DependencyScope",
 ) -> Any:
     """Applies one custom operation directive to an already-resolved value (§7), binding it to
     whichever parameter was classified as the `DirectiveValue[T]` and the given query-supplied
-    arguments to the rest. Chaining several directives on the same field
-    (`@replace(...) @include(if: $x)`) is just calling this repeatedly, feeding each result into
-    the next -- there's no separate "chain" mechanism to build.
+    arguments to the rest -- plus, per §3c, the execution context (`Info`) and any
+    `Depends[T]`-marked parameters, exactly like a resolver. Chaining several directives on the
+    same field (`@replace(...) @include(if: $x)`) is just calling this repeatedly, feeding each
+    result into the next -- there's no separate "chain" mechanism to build.
     """
-    info = getattr(directive_function, "__bramble_directive_info__", None)
-    if info is None:
+    directive_info = getattr(directive_function, "__bramble_directive_info__", None)
+    if directive_info is None:
         function_name = getattr(directive_function, "__name__", directive_function)
         raise SchemaError(f"'{function_name}' is not a @bramble.directive")
 
     kwargs = dict(arguments or {})
-    if info.value_parameter is not None:
-        kwargs[info.value_parameter] = value
+    if directive_info.value_parameter is not None:
+        kwargs[directive_info.value_parameter] = value
+    if directive_info.info_parameter is not None:
+        kwargs[directive_info.info_parameter] = info
+    kwargs.update(await resolve_dependencies(directive_function, info=info, scope=scope))
 
-    return directive_function(**kwargs)
+    result = directive_function(**kwargs)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
