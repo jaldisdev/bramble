@@ -27,6 +27,7 @@ pub enum TypeKind {
     Type,
     Interface,
     Input,
+    Enum,
 }
 
 /// A GraphQL type reference: a named type (scalar/object/interface/union/enum/input, by name),
@@ -120,6 +121,26 @@ pub struct TypeDefinition {
     /// parent interfaces) implements -- §4's `implements A & B` SDL clause. In MRO order, which
     /// is deterministic (Python's C3 linearization) and already deduplicates diamond inheritance.
     pub interfaces: Vec<String>,
+    /// This enum's own members, in declaration order -- always empty for a non-`Enum` `kind`. An
+    /// enum shares `TypeDefinition` with object/interface/input types (rather than getting its own
+    /// IR struct) because every consumer already keyed off `TypeKind`, and a separate struct would
+    /// mean a parallel registry in `CompiledSchema` plus a second lookup at every "is this name a
+    /// known type" check in validation and SDL rendering.
+    pub enum_values: Vec<EnumValueDefinition>,
+}
+
+/// One member of a GraphQL enum (§ enums). `name` is the Python member's own identifier
+/// (`Color.RED` -> `"RED"`); `graphql_name` overrides what a query actually writes, set via
+/// `bramble.enum_value(name=...)`. The Python member's *value* deliberately isn't carried here:
+/// it never appears in SDL or on the wire (a GraphQL enum is transmitted purely by member name),
+/// and execution resolves it from the live Python class instead.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnumValueDefinition {
+    pub name: String,
+    pub graphql_name: Option<String>,
+    pub description: Option<String>,
+    pub deprecation_reason: Option<String>,
+    pub applied_directives: Vec<AppliedDirective>,
 }
 
 #[derive(Debug, Clone, Serialize)]

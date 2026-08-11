@@ -172,6 +172,35 @@ def _map_arguments(
     return kwargs
 
 
+def _enum_graphql_name(enum_class: type, member: Any) -> str:
+    """The GraphQL name a resolved enum member is sent as -- its `bramble.enum_value(name=...)`
+    override if it declared one, else the Python member's own identifier.
+    """
+    for value_info in enum_class.__bramble_type_info__.enum_values:
+        if value_info.name == member.name:
+            return value_info.graphql_name or value_info.name
+    # Not a member of this enum at all -- a resolver returned something else entirely. Reported as
+    # a field error rather than silently emitting a name no client could match.
+    raise GraphQLError(
+        f"'{member!r}' is not a member of enum '{enum_class.__bramble_type_info__.name}'",
+        code=ErrorCode.FIELD_RESOLUTION_FAILED,
+    )
+
+
+def _enum_member_from_graphql_name(enum_class: type, name: Any) -> Any:
+    """The Python enum member an incoming GraphQL enum value names -- the inverse of
+    `_enum_graphql_name`, applied to arguments/variables before a resolver ever sees them, so a
+    resolver receives `Color.RED` rather than the bare string `"RED"`.
+    """
+    for value_info in enum_class.__bramble_type_info__.enum_values:
+        if (value_info.graphql_name or value_info.name) == name:
+            return enum_class[value_info.name]
+    raise GraphQLError(
+        f"'{name}' is not a valid value for enum '{enum_class.__bramble_type_info__.name}'",
+        code=ErrorCode.ARGUMENT_TYPE_MISMATCH,
+    )
+
+
 def _coerce_value(type_info: "GraphQLTypeInfo", value: Any, schema: "Schema") -> Any:
     """Coerces a resolved argument value to what a resolver should actually receive, recursing
     through the value's own declared type structure: `NonNull`/`List` wrapping (each list item
@@ -200,7 +229,15 @@ def _coerce_value(type_info: "GraphQLTypeInfo", value: Any, schema: "Schema") ->
     if scalar_definition is not None and scalar_definition.parse_value is not None:
         return scalar_definition.parse_value(value)
 
-    input_type = schema.types_by_name.get(type_name)
+    named_type = schema.types_by_name.get(type_name)
+    if named_type is not None and named_type.__bramble_type_info__.kind == "enum":
+        # An enum literal reaches here as the plain name string `lower_query` produced -- turn it
+        # into the real Python member. Recursion through `NON_NULL`/`LIST`/input-object fields
+        # above means this covers a list of enums and an enum nested in an input object too, the
+        # same way custom scalar `parse_value` coercion already does.
+        return _enum_member_from_graphql_name(named_type, value)
+
+    input_type = named_type
     if input_type is not None and input_type.__bramble_type_info__.kind == "input" and isinstance(value, dict):
         fields_by_key = {
             _effective_name(field_info.name, field_info.graphql_name, auto_camel_case=schema.config.auto_camel_case): (
@@ -465,6 +502,13 @@ async def _complete_value(
 
     type_name = type_info.name
     assert type_name is not None  # NAMED is the only remaining kind, and it always carries a name.
+
+    # An enum is a leaf, not a composite: it has members rather than fields, so it never enters
+    # selection-set execution below -- the resolved Python member is serialized straight to the
+    # GraphQL name a client matches on.
+    named_type = state.schema.types_by_name.get(type_name)
+    if named_type is not None and named_type.__bramble_type_info__.kind == "enum":
+        return _enum_graphql_name(named_type, raw_value)
 
     if type_name in state.schema.types_by_name or type_name in state.schema.union_members_by_name:
         info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
@@ -883,6 +927,13 @@ async def _complete_value_incremental(
 
     type_name = type_info.name
     assert type_name is not None  # NAMED is the only remaining kind, and it always carries a name.
+
+    # An enum is a leaf, not a composite: it has members rather than fields, so it never enters
+    # selection-set execution below -- the resolved Python member is serialized straight to the
+    # GraphQL name a client matches on.
+    named_type = state.schema.types_by_name.get(type_name)
+    if named_type is not None and named_type.__bramble_type_info__.kind == "enum":
+        return _enum_graphql_name(named_type, raw_value)
 
     if type_name in state.schema.types_by_name or type_name in state.schema.union_members_by_name:
         info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)

@@ -36,9 +36,11 @@ mod validation;
 #[pymodule]
 fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(type_info::process_type, module)?)?;
+    module.add_function(wrap_pyfunction!(type_info::process_enum, module)?)?;
     module.add_class::<type_info::PyTypeInfo>()?;
     module.add_class::<type_info::PyFieldInfo>()?;
     module.add_class::<type_info::PyArgumentInfo>()?;
+    module.add_class::<type_info::PyEnumValueInfo>()?;
     module.add_class::<type_info::PyGraphQLType>()?;
     module.add(
         "SchemaError",

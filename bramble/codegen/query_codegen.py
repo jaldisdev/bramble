@@ -204,6 +204,14 @@ def _codegen_named_or_list(
         _register_input_object(type_name, schema, object_registry)
         return NamedType(type_name)
 
+    if schema_type is not None and schema_type.__bramble_type_info__.kind == "enum":
+        # An enum is a leaf, like a scalar -- it has members, not fields, so it must not be walked
+        # into as an object (which would emit an empty type). Typed as `String` because that is
+        # exactly what the JSON response carries: a GraphQL enum travels as its member name. See
+        # this module's own docstring for the refinement of generating a real enum/literal-union
+        # type instead.
+        return NamedType("String")
+
     if selections is not None and (type_name in schema.types_by_name or type_name in schema.union_members_by_name):
         nested = _build_object_type(
             type_name,
@@ -232,6 +240,10 @@ def _codegen_variable_core(type_str: str, schema: "Schema", object_registry: dic
     schema_type = schema.types_by_name.get(type_str)
     if schema_type is not None and schema_type.__bramble_type_info__.kind == "input":
         _register_input_object(type_str, schema, object_registry)
+        return NamedType(type_str)
+    if schema_type is not None and schema_type.__bramble_type_info__.kind == "enum":
+        # Same reasoning as the result-type side: an enum variable is sent as its member name.
+        return NamedType("String")
     return NamedType(type_str)
 
 

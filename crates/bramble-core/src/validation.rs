@@ -217,8 +217,43 @@ fn check_value_matches_type(value: &Value, expected: &GraphQLType, schema: &Comp
                 _ if schema.scalar_names.contains(name) => Ok(()),
                 _ => match schema.types.get(name) {
                     Some(type_def) if type_def.kind == TypeKind::Input => match value {
-                        Value::Object(_) => Ok(()),
+                        // Each provided field is checked against *that field's* own declared type,
+                        // which is what makes a wrong-typed scalar or an invalid enum value caught
+                        // one level down rather than only at the top level. A field name with no
+                        // matching definition is skipped rather than rejected here -- the spec's
+                        // Input Object Field Names / Required Fields rules are separate checks
+                        // bramble doesn't implement yet, and inventing a partial version of them
+                        // here would report the wrong error for a genuinely unknown field.
+                        Value::Object(entries) => entries.iter().try_for_each(|(field_name, field_value)| {
+                            match find_field(type_def, field_name.as_str(), schema.auto_camel_case) {
+                                Some(field_def) => check_value_matches_type(field_value, &field_def.graphql_type, schema)
+                                    .map_err(|error| format!("field '{field_name}': {error}")),
+                                None => Ok(()),
+                            }
+                        }),
                         _ => Err(format!("expected an input object for '{name}', got {}", describe_value_kind(value))),
+                    },
+                    Some(type_def) if type_def.kind == TypeKind::Enum => match value {
+                        // A GraphQL enum literal is an unquoted name (`RED`), which the parser
+                        // gives us as `Value::Enum` -- deliberately *not* accepting `Value::String`
+                        // here, since `"RED"` is a String literal and the spec keeps the two
+                        // distinct (§ Values of Correct Type).
+                        Value::Enum(member) => {
+                            let member = member.as_str();
+                            if type_def
+                                .enum_values
+                                .iter()
+                                .any(|value| value.graphql_name.as_deref().unwrap_or(&value.name) == member)
+                            {
+                                Ok(())
+                            } else {
+                                Err(format!("'{member}' is not a valid value for enum '{name}'"))
+                            }
+                        }
+                        _ => Err(format!(
+                            "expected a value of enum '{name}', got {}",
+                            describe_value_kind(value)
+                        )),
                     },
                     _ => Ok(()),
                 },

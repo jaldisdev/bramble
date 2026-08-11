@@ -121,6 +121,8 @@ Use it via `-p mymodule:MyPlugin`, or directly:
   per concrete type. This works correctly as long as a query against an
   interface/union field only selects fields common to every possible
   concrete type (no `... on X`).
-- **No GraphQL enum support** -- bramble's schema layer has no enum
-  concept of its own yet, so an enum type can't appear in a generated
-  shape either.
+- **Enums are generated as `str`/`string`, not as a named type** -- an
+  [enum](../types/enums.md) travels as its member name, so this is accurate
+  for the value actually on the wire, but a generated shape doesn't
+  constrain it to the enum's own members. Generating a real Python `enum`
+  (or a TypeScript string-literal union) is a refinement not yet made.

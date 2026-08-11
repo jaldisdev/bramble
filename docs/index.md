@@ -48,8 +48,9 @@ itself, install one of the extras documented in
 - **[General](general/schema-basics.md)** -- the basics: building a schema,
   and writing queries, mutations, and subscriptions.
 - **[Types](types/object-types.md)** -- the full type-declaration API: object
-  types, resolvers, input types, interfaces, unions, scalars, directives,
-  [dependency injection](types/dependency-injection.md), and more.
+  types, resolvers, input types, interfaces, unions, [enums](types/enums.md),
+  scalars, directives, [dependency injection](types/dependency-injection.md),
+  and more.
 - **[Guides](guides/file-upload.md)** -- task-oriented guides: file uploads,
   persisted queries, query batching, testing, and the `bramble` CLI.
 - **[Federation](federation/introduction.md)** -- building an Apollo

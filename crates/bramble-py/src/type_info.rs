@@ -17,7 +17,9 @@
 // limitations under the License.
 //
 
-use bramble_core::schema::{AppliedDirective, ArgumentDefinition, FieldDefinition, GraphQLType, TypeDefinition, TypeKind};
+use bramble_core::schema::{
+    AppliedDirective, ArgumentDefinition, EnumValueDefinition, FieldDefinition, GraphQLType, TypeDefinition, TypeKind,
+};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -126,6 +128,14 @@ pub(crate) fn convert_field(py: Python<'_>, field: FieldDefinition) -> PyResult<
     })
 }
 
+#[pyclass(name = "EnumValueInfo", frozen, get_all, skip_from_py_object)]
+pub struct PyEnumValueInfo {
+    pub name: String,
+    pub graphql_name: Option<String>,
+    pub description: Option<String>,
+    pub deprecation_reason: Option<String>,
+}
+
 #[pyclass(name = "TypeInfo", frozen)]
 pub struct PyTypeInfo {
     #[pyo3(get)]
@@ -138,6 +148,11 @@ pub struct PyTypeInfo {
     pub one_of: bool,
     #[pyo3(get)]
     pub fields: Vec<Py<PyFieldInfo>>,
+    /// This enum's members, empty for every other `kind` -- execution reads it to map a resolved
+    /// Python enum member onto the GraphQL name a response should carry, and the reverse for an
+    /// incoming argument value.
+    #[pyo3(get)]
+    pub enum_values: Vec<Py<PyEnumValueInfo>>,
     /// Not Python-exposed -- the original Rust IR, kept so `Schema()` (Task 8b's graph walker)
     /// can hand already-computed `TypeInfo`s straight to `compile_schema` (Task 9) without a
     /// lossy round-trip back through the display-friendly fields above (re-parsing SDL type
@@ -385,6 +400,7 @@ pub fn process_type(
         fields,
         applied_directives,
         interfaces,
+        enum_values: Vec::new(),  // only ever populated by `process_enum`
     };
 
     let fields_info = definition
@@ -400,6 +416,105 @@ pub fn process_type(
         description: definition.description.clone(),
         one_of: definition.one_of,
         fields: fields_info,
+        enum_values: Vec::new(),
+        definition,
+    })
+}
+
+/// Builds an enum's `TypeDefinition` from a Python `enum.Enum` subclass, called by
+/// `bramble._enum.enum` once per decorated class -- the enum counterpart to `process_type`.
+///
+/// A member's GraphQL name is its Python *identifier* (`Color.RED` -> `RED`), not its value: a
+/// GraphQL enum travels by member name, and the value stays a private Python detail a resolver can
+/// use however it likes. `bramble.enum_value(...)` overrides that name (and adds description/
+/// deprecation/directives) by being assigned as the member's value, which is why each member is
+/// checked for one here before falling back to the plain identifier.
+#[pyfunction]
+#[pyo3(signature = (cls, *, name=None, description=None, directives))]
+pub fn process_enum(
+    py: Python<'_>,
+    cls: &Bound<'_, PyType>,
+    name: Option<String>,
+    description: Option<String>,
+    directives: &Bound<'_, PyAny>,
+) -> PyResult<PyTypeInfo> {
+    let enum_meta = py.import("enum")?.getattr("EnumMeta")?;
+    if !cls.is_instance(&enum_meta)? {
+        return Err(SchemaError::new_err(format!(
+            "'{}' is not an enum -- @bramble.enum can only decorate an enum.Enum subclass",
+            cls.getattr("__name__")?.extract::<String>()?
+        )));
+    }
+
+    let applied_directives = extract_applied_directives(directives)?;
+    let value_marker_class = py.import("bramble._enum")?.getattr("EnumValueDefinition")?;
+
+    let mut enum_values = Vec::new();
+    for member in cls.try_iter()? {
+        let member = member?;
+        let member_name: String = member.getattr("name")?.extract()?;
+        let member_value = member.getattr("value")?;
+
+        let (graphql_name, value_description, deprecation_reason, value_directives) =
+            if member_value.is_instance(&value_marker_class)? {
+                (
+                    member_value.getattr("graphql_name")?.extract::<Option<String>>()?,
+                    member_value.getattr("description")?.extract::<Option<String>>()?,
+                    member_value.getattr("deprecation_reason")?.extract::<Option<String>>()?,
+                    extract_applied_directives(&member_value.getattr("directives")?)?,
+                )
+            } else {
+                (None, None, None, Vec::new())
+            };
+
+        enum_values.push(EnumValueDefinition {
+            name: member_name,
+            graphql_name,
+            description: value_description,
+            deprecation_reason,
+            applied_directives: value_directives,
+        });
+    }
+
+    let resolved_name = match name {
+        Some(name) => name,
+        None => cls.getattr("__name__")?.extract()?,
+    };
+
+    let definition = TypeDefinition {
+        kind: TypeKind::Enum,
+        name: resolved_name,
+        description,
+        one_of: false,
+        fields: Vec::new(),
+        applied_directives,
+        interfaces: Vec::new(),
+        enum_values,
+    };
+
+    let enum_values_info = definition
+        .enum_values
+        .iter()
+        .map(|value| {
+            Py::new(
+                py,
+                PyEnumValueInfo {
+                    name: value.name.clone(),
+                    graphql_name: value.graphql_name.clone(),
+                    description: value.description.clone(),
+                    deprecation_reason: value.deprecation_reason.clone(),
+                },
+            )
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    Ok(PyTypeInfo {
+        kind: "enum".to_string(),
+        name: definition.name.clone(),
+        description: definition.description.clone(),
+        one_of: false,
+        fields: Vec::new(),
+        enum_values: enum_values_info,
         definition,
     })
 }

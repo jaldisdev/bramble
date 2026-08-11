@@ -19,9 +19,9 @@
 
 use crate::naming::to_camel_case;
 use crate::schema::{
-    AppliedDirective, ArgumentDefinition, CompiledSchema, DirectiveFieldDefinition, FieldDefinition,
-    OperationDirectiveDefinition, OperationDirectiveLocation, SchemaDirectiveDefinition, SchemaDirectiveLocation,
-    TypeDefinition, TypeKind, UnionDefinition,
+    AppliedDirective, ArgumentDefinition, CompiledSchema, DirectiveFieldDefinition, EnumValueDefinition,
+    FieldDefinition, OperationDirectiveDefinition, OperationDirectiveLocation, SchemaDirectiveDefinition,
+    SchemaDirectiveLocation, TypeDefinition, TypeKind, UnionDefinition,
 };
 
 /// The GraphQL-facing name for a field/argument/directive-field with no explicit `name=`
@@ -108,7 +108,24 @@ fn kind_keyword(kind: TypeKind) -> &'static str {
         TypeKind::Type => "type",
         TypeKind::Interface => "interface",
         TypeKind::Input => "input",
+        TypeKind::Enum => "enum",
     }
+}
+
+/// One enum member: its (possibly overridden) GraphQL name, plus `@deprecated`/applied directives.
+/// Deliberately *not* run through `effective_name`'s camelCase conversion the way a field or
+/// argument is -- GraphQL enum members are conventionally SCREAMING_SNAKE_CASE, which is already
+/// how they're spelled in Python, so camelCasing `RED`/`IN_PROGRESS` would corrupt every name.
+fn render_enum_value(value: &EnumValueDefinition) -> String {
+    let mut out = render_description(&value.description, "  ");
+    out.push_str("  ");
+    out.push_str(value.graphql_name.as_ref().unwrap_or(&value.name));
+    if let Some(reason) = &value.deprecation_reason {
+        out.push_str(&format!(" @deprecated(reason: {reason:?})"));
+    }
+    out.push_str(&render_applied_directives(&value.applied_directives));
+    out.push('\n');
+    out
 }
 
 fn render_type(type_def: &TypeDefinition, auto_camel_case: bool) -> String {
@@ -126,8 +143,14 @@ fn render_type(type_def: &TypeDefinition, auto_camel_case: bool) -> String {
         out.push_str(" @oneOf");
     }
     out.push_str(" {\n");
-    for field in &type_def.fields {
-        out.push_str(&render_field(field, auto_camel_case));
+    if type_def.kind == TypeKind::Enum {
+        for value in &type_def.enum_values {
+            out.push_str(&render_enum_value(value));
+        }
+    } else {
+        for field in &type_def.fields {
+            out.push_str(&render_field(field, auto_camel_case));
+        }
     }
     out.push('}');
     out
@@ -308,6 +331,7 @@ mod tests {
                 description: Some("The root query type".to_string()),
                 one_of: false,
                 interfaces: Vec::new(),
+                enum_values: Vec::new(),
                 fields: vec![FieldDefinition {
                     name: "greet".to_string(),
                     graphql_name: None,
@@ -355,6 +379,7 @@ mod tests {
                 description: None,
                 one_of: false,
                 interfaces: Vec::new(),
+                enum_values: Vec::new(),
                 fields: Vec::new(),
                 applied_directives: vec![AppliedDirective {
                     name: "keys".to_string(),
@@ -397,6 +422,7 @@ mod tests {
                 description: None,
                 one_of: false,
                 interfaces: Vec::new(),
+                enum_values: Vec::new(),
                 fields: vec![FieldDefinition {
                     name: "id".to_string(),
                     graphql_name: None,
@@ -419,6 +445,7 @@ mod tests {
                 description: None,
                 one_of: true,
                 interfaces: Vec::new(),
+                enum_values: Vec::new(),
                 fields: vec![
                     FieldDefinition {
                         name: "by_id".to_string(),
@@ -475,6 +502,7 @@ mod tests {
                 description: None,
                 one_of: false,
                 interfaces: Vec::new(),
+                enum_values: Vec::new(),
                 fields: vec![FieldDefinition {
                     name: "old_field".to_string(),
                     graphql_name: Some("oldField".to_string()),
@@ -589,6 +617,7 @@ mod tests {
             description: None,
             one_of: false,
             interfaces: Vec::new(),
+            enum_values: Vec::new(),
             fields: vec![FieldDefinition {
                 name: "post_by_slug".to_string(),
                 graphql_name: None,

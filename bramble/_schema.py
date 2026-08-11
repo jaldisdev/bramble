@@ -196,6 +196,18 @@ def _discover_type(cls: _type, *, graph: _SchemaGraph) -> None:
     info = cls.__bramble_type_info__
     graph.types_by_name[info.name] = cls
 
+    if info.kind == "enum":
+        # An enum is a leaf: it has members, not fields, so there's nothing further to walk to --
+        # and it isn't a dataclass either, so every step below (`dataclasses.fields`, the MRO
+        # interface scan, `get_type_hints` over field annotations) would be wrong or outright
+        # raise. Its own type-level directives still need registering, same as any other type's.
+        _register_schema_directive_definitions(getattr(cls, "__bramble_applied_directives__", ()), graph=graph)
+        for enum_value_info in info.enum_values:
+            _register_schema_directive_definitions(
+                getattr(cls, "__bramble_enum_value_directives__", {}).get(enum_value_info.name, ()), graph=graph
+            )
+        return
+
     _register_schema_directive_definitions(getattr(cls, "__bramble_applied_directives__", ()), graph=graph)
     for dataclass_field in dataclasses.fields(cls):
         _register_schema_directive_definitions(getattr(dataclass_field, "directives", ()), graph=graph)
