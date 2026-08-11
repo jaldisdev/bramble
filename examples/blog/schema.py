@@ -258,10 +258,14 @@ class Mutation:
 
 
 def build_schema() -> bramble.Schema:
+    # No `types=[...]`: `Author`/`Post`/`Comment` are all reachable from a field's own return type
+    # (`Query.posts`, `Comment.author`, `Mutation.addComment`) or the `SearchResult` union, and
+    # registering an implementor that way registers its interfaces (`Node`) along with it. Only an
+    # implementor reachable *solely* through the interface would need listing -- see
+    # `docs/types/interfaces.md`.
     return bramble.Schema(
         query=Query,
         mutation=Mutation,
-        types=[Author, Post, Comment],
         directives=[shout],
         config=SchemaConfig(
             scalar_map={

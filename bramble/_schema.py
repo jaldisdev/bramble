@@ -22,7 +22,7 @@ from __future__ import annotations
 import dataclasses
 import types as types_module
 import typing
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Callable, Sequence
 from typing import Any
 
 from bramble._bramble import (
@@ -39,6 +39,7 @@ from bramble._execution import execute_incremental as _execute_incremental
 from bramble._execution import subscribe_async as _subscribe_async
 from bramble._lazy import LazyType, namespace_for_callable, namespace_for_class
 from bramble._private import is_private
+from bramble._resolver import Streamable
 from bramble._scalar import ScalarDefinition
 from bramble._union import UnionDefinition
 from bramble.schema.config import SchemaConfig
@@ -46,6 +47,16 @@ from bramble.schema.config import SchemaConfig
 _type = type  # capture the builtin before it's shadowed by a `type` parameter's annotation
 
 _CONTAINER_ORIGINS = (list, tuple, set, frozenset)
+
+# The async wrappers a field's *declared* type is resolved through rather than to: Rust's
+# `resolve_graphql_type` unwraps `AsyncGenerator[T, ...]`/`AsyncIterator[T]`/`AsyncIterable[T]` to
+# `T` (a subscription root field yields one independent response per event) and `Streamable[T]` to
+# `[T]` (a `@stream` field's items are elements of one list) -- see
+# `crates/bramble-py/src/typing_utils.rs`'s `resolve_core`. Discovery has to look through exactly
+# the same set: a type named by a field but never walked to is left out of `types_by_name`
+# entirely, so the field renders fine in SDL while the schema has no such type to actually execute
+# a selection set against. Keep this tuple in lockstep with `resolve_core`'s own unwrapping.
+_ASYNC_ORIGINS = (AsyncGenerator, AsyncIterator, AsyncIterable, Streamable)
 
 
 class _SchemaGraph:
@@ -146,7 +157,12 @@ def _discover_annotation(annotation: Any, *, graph: _SchemaGraph) -> None:
             _discover_annotation(member, graph=graph)
         return
 
-    if origin in _CONTAINER_ORIGINS:
+    if origin in _CONTAINER_ORIGINS or origin in _ASYNC_ORIGINS:
+        # Recursing into every argument (rather than just `get_args(...)[0]`) is what makes
+        # `AsyncGenerator[list[T], None]`/`AsyncIterator[T | None]` fall through to the container
+        # and union branches above and resolve correctly. An `AsyncGenerator`'s own send-type
+        # argument (`None`, or `NoneType` under `typing.AsyncGenerator`) needs no special case --
+        # neither carries `__bramble_type_info__`, so walking it is already a no-op.
         for member in typing.get_args(annotation):
             _discover_annotation(member, graph=graph)
         return

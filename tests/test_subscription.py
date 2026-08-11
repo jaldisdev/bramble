@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
 
 import pytest
 
@@ -84,7 +84,10 @@ def test_subscription_field_can_have_nested_selections() -> None:
             yield _MessageEvent("hi")
             yield _MessageEvent("bye")
 
-    schema = bramble.Schema(query=Query, subscription=Subscription, types=[_Message])
+    # Deliberately no `types=[_Message]`: `_Message` is reachable only through this field's own
+    # `AsyncGenerator[...]` return annotation, so this exercises discovery walking *through* the
+    # async wrapper rather than papering over it (see this file's own discovery tests below).
+    schema = bramble.Schema(query=Query, subscription=Subscription)
 
     responses = asyncio.run(_collect(schema.subscribe_async("subscription { messages { text } }")))
 
@@ -196,3 +199,121 @@ def test_non_async_generator_subscription_resolver_raises_a_clear_error() -> Non
 
     with pytest.raises(bramble.GraphQLError, match="async generator"):
         asyncio.run(run())
+
+
+# --- Type discovery through async wrapper annotations ---------------------------------------------
+#
+# A field's declared type is resolved *through* an async wrapper rather than to it -- Rust's
+# `resolve_core` unwraps `AsyncGenerator[T, ...]`/`AsyncIterator[T]`/`AsyncIterable[T]` to `T` and
+# `Streamable[T]` to `[T]` (`crates/bramble-py/src/typing_utils.rs`). Discovery
+# (`bramble._schema._discover_annotation`) has to look through the identical set, or a type
+# reachable *only* through one of them is named by the field yet missing from the schema entirely:
+# the SDL renders `events: Payload!` with no `type Payload { ... }` anywhere, and executing a
+# selection against it hands back the raw Python object instead of a projected dict (which then
+# fails to JSON-serialize in any transport). Each test below therefore deliberately passes no
+# `types=[...]`, so discovery is the only thing that can find the payload type.
+
+
+@bramble.type
+class _Payload:
+    value: str
+
+
+@bramble.type
+class _DiscoveryQuery:
+    ok: bool = True
+
+
+def _payload_type_is_defined(schema: bramble.Schema) -> bool:
+    """Whether the SDL actually *defines* `_Payload`, not merely names it as some field's type --
+    the exact distinction this whole section is about.
+    """
+    return "type _Payload {" in schema.to_sdl()
+
+
+def test_async_generator_payload_type_is_discovered() -> None:
+    @bramble.type
+    class Subscription:
+        @bramble.field
+        async def events() -> AsyncGenerator[_Payload, None]:
+            yield _Payload(value="a")
+
+    schema = bramble.Schema(query=_DiscoveryQuery, subscription=Subscription)
+
+    assert "_Payload" in schema.types_by_name
+    assert _payload_type_is_defined(schema)
+
+    responses = asyncio.run(_collect(schema.subscribe_async("subscription { events { value } }")))
+    assert responses == [{"data": {"events": {"value": "a"}}}]
+
+
+def test_async_iterator_payload_type_is_discovered() -> None:
+    @bramble.type
+    class Subscription:
+        @bramble.field
+        async def events() -> AsyncIterator[_Payload]:
+            yield _Payload(value="a")
+
+    schema = bramble.Schema(query=_DiscoveryQuery, subscription=Subscription)
+
+    assert "_Payload" in schema.types_by_name
+    assert _payload_type_is_defined(schema)
+
+    responses = asyncio.run(_collect(schema.subscribe_async("subscription { events { value } }")))
+    assert responses == [{"data": {"events": {"value": "a"}}}]
+
+
+def test_async_iterable_payload_type_is_discovered() -> None:
+    @bramble.type
+    class Subscription:
+        @bramble.field
+        async def events() -> AsyncIterable[_Payload]:
+            yield _Payload(value="a")
+
+    schema = bramble.Schema(query=_DiscoveryQuery, subscription=Subscription)
+
+    assert "_Payload" in schema.types_by_name
+    assert _payload_type_is_defined(schema)
+
+    responses = asyncio.run(_collect(schema.subscribe_async("subscription { events { value } }")))
+    assert responses == [{"data": {"events": {"value": "a"}}}]
+
+
+def test_streamable_element_type_is_discovered() -> None:
+    """`Streamable[T]` is a *query* field's annotation (a `@stream`-capable list), not a
+    subscription's -- but it goes through the same unwrapping, so it needs the same discovery.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        async def items() -> bramble.Streamable[_Payload]:
+            yield _Payload(value="a")
+
+    schema = bramble.Schema(query=Query)
+
+    assert "_Payload" in schema.types_by_name
+    assert _payload_type_is_defined(schema)
+    assert "items: [_Payload!]!" in schema.to_sdl()
+
+
+def test_type_nested_inside_an_async_wrapper_is_discovered() -> None:
+    """Locks in that discovery *recurses* through the wrapper's arguments rather than taking a
+    single-level `get_args(...)[0]`: the payload type here is two layers down
+    (`AsyncGenerator[list[_Payload], None]`), reachable only by falling through to the container
+    branch after unwrapping the async one.
+    """
+
+    @bramble.type
+    class Subscription:
+        @bramble.field
+        async def events() -> AsyncGenerator[list[_Payload], None]:
+            yield [_Payload(value="a")]
+
+    schema = bramble.Schema(query=_DiscoveryQuery, subscription=Subscription)
+
+    assert "_Payload" in schema.types_by_name
+    assert "events: [_Payload!]!" in schema.to_sdl()
+
+    responses = asyncio.run(_collect(schema.subscribe_async("subscription { events { value } }")))
+    assert responses == [{"data": {"events": [{"value": "a"}]}}]
