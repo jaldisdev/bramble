@@ -57,7 +57,13 @@ def test_minimal_schema_succeeds() -> None:
     schema = bramble.Schema(query=Query)
 
     assert schema.query is Query
-    assert schema.types_by_name["Query"] is Query
+    # The class registered under the query type's *name* is the subclass carrying the injected
+    # `__schema`/`__type` introspection meta-fields (§4.5), not the bare user class -- it inherits
+    # from it, so every field, `isinstance` check and resolver still behaves identically.
+    # `Schema.query` itself deliberately stays the user's own class.
+    registered = schema.types_by_name["Query"]
+    assert issubclass(registered, Query)
+    assert registered.__bramble_type_info__.name == "Query"
 
 
 def test_schema_requires_bramble_decorated_query() -> None:

@@ -1377,7 +1377,9 @@ async def _execute_selection_set_incremental(
 
 
 _ROOT_TYPE_ATTRIBUTE_BY_OPERATION = {
-    "query": "query",
+    # `query_root`, not `query`: the former is the subclass carrying the injected `__schema`/
+    # `__type` introspection meta-fields, while `Schema.query` stays the caller's own class.
+    "query": "query_root",
     "mutation": "mutation",
     "subscription": "subscription",
 }

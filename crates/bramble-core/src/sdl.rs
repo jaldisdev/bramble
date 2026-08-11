@@ -90,6 +90,14 @@ fn render_arguments(arguments: &[ArgumentDefinition], auto_camel_case: bool) -> 
     format!("({})", rendered.join(", "))
 }
 
+/// Whether a type/field name is reserved for introspection (§ "Reserved Names": everything
+/// beginning with `__`). These are implicit in every schema, so SDL never declares them -- printing
+/// `__Schema`/`__type` would make the output non-portable, since another server reading it back
+/// would reject redefining reserved names.
+fn is_reserved_name(name: &str) -> bool {
+    name.starts_with("__")
+}
+
 fn render_field(field: &FieldDefinition, auto_camel_case: bool) -> String {
     let mut out = String::new();
     out.push_str(&render_description(&field.description, "  "));
@@ -149,6 +157,9 @@ fn render_type(type_def: &TypeDefinition, auto_camel_case: bool) -> String {
         }
     } else {
         for field in &type_def.fields {
+            if is_reserved_name(&effective_name(&field.name, &field.graphql_name, auto_camel_case)) {
+                continue;
+            }
             out.push_str(&render_field(field, auto_camel_case));
         }
     }
@@ -259,7 +270,7 @@ fn render_schema_block(schema: &CompiledSchema) -> String {
 pub fn render_sdl(schema: &CompiledSchema) -> String {
     let mut sections = vec![render_schema_block(schema)];
 
-    let mut type_names: Vec<&String> = schema.types.keys().collect();
+    let mut type_names: Vec<&String> = schema.types.keys().filter(|name| !is_reserved_name(name)).collect();
     type_names.sort();
     for name in type_names {
         sections.push(render_type(&schema.types[name], schema.auto_camel_case));

@@ -52,7 +52,8 @@ itself, install one of the extras documented in
   scalars, directives, [dependency injection](types/dependency-injection.md),
   and more.
 - **[Guides](guides/file-upload.md)** -- task-oriented guides: file uploads,
-  persisted queries, query batching, testing, and the `bramble` CLI.
+  [introspection](guides/introspection.md), persisted queries, query
+  batching, testing, and the `bramble` CLI.
 - **[Federation](federation/introduction.md)** -- building an Apollo
   Federation v2 subgraph.
 - **[Integrations](integrations/index.md)** -- serving a schema over HTTP

@@ -37,10 +37,13 @@ from bramble._execution import execute as _execute
 from bramble._execution import execute_async as _execute_async
 from bramble._execution import execute_incremental as _execute_incremental
 from bramble._execution import subscribe_async as _subscribe_async
+from bramble._introspection import INTROSPECTION_TYPES
 from bramble._lazy import LazyType, namespace_for_callable, namespace_for_class
 from bramble._private import is_private
 from bramble._resolver import Streamable
 from bramble._scalar import ScalarDefinition
+from bramble._type import field as _field
+from bramble._type import type as _type_decorator
 from bramble._union import UnionDefinition
 from bramble.schema.config import SchemaConfig
 
@@ -314,6 +317,34 @@ def _scalar_name(python_type: Any, scalar_definition: ScalarDefinition) -> str:
     return getattr(python_type, "__name__", str(python_type))
 
 
+def _build_introspective_query(query: _type) -> _type:
+    """Returns a subclass of `query` carrying the two introspection meta-fields (§4.5), so
+    `__schema`/`__type` are ordinary registered fields rather than executor special cases -- the
+    same synthesis `bramble.federation.Schema` does for `_service`/`_entities`.
+
+    Both need an explicit `name=`: `auto_camel_case` treats a leading underscore as a word
+    separator, which would otherwise mangle `__schema` into `Schema`. The subclass keeps the
+    original's GraphQL name, so nothing downstream sees a renamed query root.
+    """
+    from bramble._introspection import __Schema, __Type, resolve_schema_field, resolve_type_field
+
+    namespace: dict[str, Any] = {
+        "__annotations__": {"__schema": __Schema, "__type": typing.Optional[__Type]},
+        "__schema": _field(resolver=resolve_schema_field, name="__schema"),
+        "__type": _field(resolver=resolve_type_field, name="__type"),
+    }
+    introspective = _type(f"_Introspective{query.__name__}", (query,), namespace)
+    # `description=`/`directives=` are carried over explicitly: a re-decorated subclass starts from
+    # the decorator's own arguments, not the base's `__bramble_type_info__`, so omitting them
+    # silently drops the user's own query-type description and applied directives from SDL.
+    return _type_decorator(
+        introspective,
+        name=query.__bramble_type_info__.name,
+        description=query.__bramble_type_info__.description,
+        directives=getattr(query, "__bramble_applied_directives__", ()),
+    )
+
+
 class Schema:
     def __init__(
         self,
@@ -347,7 +378,20 @@ class Schema:
                     "@bramble.schema_directive instance"
                 )
 
+        # Every schema is introspectable (§4.5), so the meta-fields are injected unconditionally
+        # rather than opted into. `types=` gains the introspection types themselves: most are
+        # reachable by following the injected fields' own annotations, but listing them makes the
+        # set independent of how the graph walker happens to traverse.
+        #
+        # `self.query` deliberately stays the caller's *own* class -- that's the documented,
+        # tested contract (`schema.query is Query`), and it keeps the injection invisible to
+        # anything reflecting over the schema. Execution and the type-graph walk use
+        # `self.query_root` instead, which is the subclass actually carrying `__schema`/`__type`.
+        query_root = _build_introspective_query(query)
+        types = (*types, *INTROSPECTION_TYPES)
+
         self.query = query
+        self.query_root = query_root
         self.mutation = mutation
         self.subscription = subscription
         self.directives = tuple(directives)
@@ -357,7 +401,7 @@ class Schema:
         self.execution_context_class = execution_context_class
         self.schema_directives = tuple(schema_directives)
 
-        roots = [root for root in (query, mutation, subscription, *types) if root is not None]
+        roots = [root for root in (query_root, mutation, subscription, *types) if root is not None]
         localns = {root.__name__: root for root in roots}
         graph = _SchemaGraph(localns)
 

@@ -190,7 +190,15 @@ def _build_federated_query(query: _type, entity_types: Sequence[_type]) -> _type
 
     namespace["__annotations__"] = annotations
     federated_query = _type(f"_Federated{query.__name__}", (query,), namespace)
-    return _type_decorator(federated_query, name=query.__bramble_type_info__.name)
+    # `description=`/`directives=` carried over for the same reason `bramble._schema`'s own
+    # introspection subclass does: a re-decorated subclass takes its metadata from the decorator's
+    # arguments, so omitting these drops the user's query-type description/directives from SDL.
+    return _type_decorator(
+        federated_query,
+        name=query.__bramble_type_info__.name,
+        description=query.__bramble_type_info__.description,
+        directives=getattr(query, "__bramble_applied_directives__", ()),
+    )
 
 
 class Schema(_BaseSchema):
