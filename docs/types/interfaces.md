@@ -78,6 +78,36 @@ than one both raise `bramble.GraphQLError` with
 `code=ErrorCode.INTERFACE_TYPE_RESOLUTION_FAILED`, rather than silently
 guessing.
 
+## Registering implementors
+
+bramble finds a type automatically when it appears somewhere in the schema as
+a **field's return type**, a **resolver or directive argument**, or a **union
+member** -- and registering an implementor that way registers its interfaces
+along with it. So in the example above, `Author` and `Post` need no special
+treatment as long as something else in the schema mentions them (a
+`posts: [Post!]!` field, a `SearchResult` union, and so on).
+
+The one case that needs help is an implementor reachable *only* through the
+interface -- never named by any other field, argument, or union. bramble
+discovers types by walking annotations, and in that shape nothing anywhere
+names the concrete type, so there's nothing to walk to. List it in
+`Schema(types=[...])` explicitly:
+
+```python
+schema = bramble.Schema(query=Query, types=[Author, Post])
+```
+
+Without it the implementor is missing from the schema entirely: it never
+appears in `to_sdl()`, and a query using an inline fragment against it fails
+validation with `inline fragment targets unknown type 'Author'`.
+
+This most often comes up with a Relay-style `node(id: ID!): Node` field,
+where concrete types are only ever reached through inline fragments. A
+schema whose object types are also returned from ordinary fields generally
+needs no `types=[...]` at all -- see
+[`examples/blog`](../../examples/blog/schema.py), which has a `Node`
+interface with two implementors and doesn't use it.
+
 ## Interface inheritance
 
 An interface can itself inherit from another interface -- bramble collects
