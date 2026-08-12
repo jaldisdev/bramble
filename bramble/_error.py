@@ -66,6 +66,16 @@ class GraphQLError(_GraphQLError):
     Also raised directly by `validate_query`, `execute*`, and `resolve_persisted_query` for
     request-level failures (a malformed query, an unknown operation, an APQ miss), which are
     reported as the whole response rather than one field's error.
+
+    `code` is reported as `extensions.code`, which is where the wider ecosystem looks for a
+    machine-readable error code -- Apollo Server populates exactly that key, and `ErrorCode`'s
+    vocabulary matches it, so a client or tool reading it gets what it expects.
+
+    A `code` entry in `extensions` takes precedence over the `code` argument, which is how you
+    publish an application-specific code under the conventional key. Note that bramble's own
+    `ErrorCode` is then absent from the response entirely, so anything keying off the standard
+    values stops recognising that error; give the application code its own key instead if you want
+    both.
     """
 
     def __init__(
@@ -82,7 +92,8 @@ class GraphQLError(_GraphQLError):
         code: an `ErrorCode`, reported under `extensions.code`.
         locations: source positions in the query. Overwritten by the executor for a field error.
         path: the response path this error belongs to. Overwritten by the executor.
-        extensions: extra keys merged alongside `code` in the response's `extensions` object.
+        extensions: extra keys merged alongside `code` in the response's `extensions` object. A
+            `code` key here overrides the `code` argument -- see the class docstring.
         """
         super().__init__(message)
         self.message = message

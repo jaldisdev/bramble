@@ -73,6 +73,18 @@ schema.execute('{ node(id: "p1") { __typename id ... on Post { title } } }')
 # {'data': {'node': {'__typename': 'Post', 'id': 'p1', 'title': 'Hello GraphQL'}}}
 ```
 
+### Type resolution is synchronous
+
+`is_type_of` is called synchronously and cannot be `async` -- the same holds for
+a union's `resolve_type`. This is a deliberate constraint, not an oversight: it
+runs once per resolved abstract value, on the hot path, so permitting I/O there
+would let an N+1 query hide somewhere very few people think to look.
+
+When the concrete type depends on something not already on the value, fetch it
+in the resolver that produced the value rather than in the hook -- select the
+discriminating column alongside everything else, and let `is_type_of` read it.
+That keeps the decision a pure function of the value it is handed.
+
 ### Deciding once, on the interface
 
 `is_type_of` may answer in either of two ways. The per-implementor form above
@@ -108,7 +120,7 @@ Returning `None` means "no match", exactly as `False` does. The two forms may
 be mixed across an interface's implementors.
 
 A union has no shared base to hang such a hook on, so it takes the equivalent
-callback on the union itself -- see [Unions](unions.md) and its `resolve_type`.
+callback on the union itself -- see [Unions](union.md) and its `resolve_type`.
 
 Exactly one implementor must match a resolved value -- zero matches or more
 than one both raise `bramble.GraphQLError` with

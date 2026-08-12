@@ -473,6 +473,27 @@ def test_resolver_raised_graphql_error_keeps_its_own_code_and_extensions() -> No
     assert error["path"] == ["item"]
 
 
+def test_an_extensions_code_overrides_the_error_code() -> None:
+    """`extensions.code` is where the ecosystem looks for a machine-readable code (Apollo populates
+    exactly that key), so a caller may publish their own there. The cost is that bramble's own
+    `ErrorCode` is then absent, which is worth knowing before relying on it.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def item() -> str | None:
+            raise bramble.GraphQLError(
+                "not found",
+                code=bramble.ErrorCode.UNKNOWN_FIELD,
+                extensions={"code": "ITEM_MISSING", "itemId": "42"},
+            )
+
+    result = bramble.Schema(query=Query).execute("query { item }")
+
+    assert result["errors"][0]["extensions"] == {"code": "ITEM_MISSING", "itemId": "42"}
+
+
 # --- skip/include integration -------------------------------------------------------------------
 
 

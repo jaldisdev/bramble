@@ -71,3 +71,8 @@ or multiple matches both raise `bramble.GraphQLError` with
 Unlike an interface, a union's members share no common base class to hang a
 per-member `is_type_of` on -- `resolve_type` is bramble's own equivalent
 mechanism for a union specifically.
+
+`resolve_type` is called synchronously and cannot be `async`, matching an
+interface's `is_type_of` -- see
+[Resolving the concrete type](interfaces.md#type-resolution-is-synchronous) for
+why, and for what to do when the discriminator is not already on the value.
