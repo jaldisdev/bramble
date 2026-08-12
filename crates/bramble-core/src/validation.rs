@@ -53,6 +53,7 @@ fn validate_incremental_directive_arguments(
     known: &[(&str, GraphQLType)],
     directive_name: &str,
     schema: &CompiledSchema,
+    variables: &VariableTypes,
 ) -> GraphQLResult<()> {
     for (arg_name, arg_value) in arguments {
         let name = arg_name.node.as_str();
@@ -64,7 +65,7 @@ fn validate_incremental_directive_arguments(
             ));
         };
 
-        check_value_matches_type(&arg_value.node, expected_type, schema).map_err(|reason| {
+        check_value_matches_type(&arg_value.node, expected_type, schema, variables, true).map_err(|reason| {
             error_at(
                 format!("argument '{name}' on '@{directive_name}' {reason}"),
                 ErrorCode::ArgumentTypeMismatch,
@@ -101,6 +102,7 @@ fn validate_directives(
     directives: &[Positioned<Directive>],
     location: OperationDirectiveLocation,
     schema: &CompiledSchema,
+    variables: &VariableTypes,
 ) -> GraphQLResult<()> {
     for directive in directives {
         let name = directive.node.name.node.as_str();
@@ -122,7 +124,13 @@ fn validate_directives(
                     directive.pos,
                 ));
             }
-            validate_incremental_directive_arguments(&directive.node.arguments, &defer_argument_shape(), "defer", schema)?;
+            validate_incremental_directive_arguments(
+                &directive.node.arguments,
+                &defer_argument_shape(),
+                "defer",
+                schema,
+                variables,
+            )?;
             continue;
         }
 
@@ -137,7 +145,13 @@ fn validate_directives(
                     directive.pos,
                 ));
             }
-            validate_incremental_directive_arguments(&directive.node.arguments, &stream_argument_shape(), "stream", schema)?;
+            validate_incremental_directive_arguments(
+                &directive.node.arguments,
+                &stream_argument_shape(),
+                "stream",
+                schema,
+                variables,
+            )?;
             continue;
         }
 
@@ -166,6 +180,7 @@ fn validate_directives(
             name,
             directive.pos,
             schema,
+            variables,
         )?;
     }
     Ok(())
@@ -185,12 +200,75 @@ fn describe_value_kind(value: &Value) -> &'static str {
     }
 }
 
-/// Approximate but principled argument-value type-checking: walks the parsed literal alongside
-/// the declared `GraphQLType`, unwrapping `NonNull`/`List` as it goes. Variables are never
-/// checked here (their coerced type isn't known without full variable-definition coercion, which
-/// is out of this task's scope) -- only literal values in the query document itself.
-fn check_value_matches_type(value: &Value, expected: &GraphQLType, schema: &CompiledSchema) -> Result<(), String> {
-    if matches!(value, Value::Variable(_)) {
+/// A variable's declared type plus whether it has a default, keyed by name -- what the spec's
+/// "All Variable Usages Are Allowed" rule needs at each usage site.
+pub type VariableTypes = HashMap<String, (GraphQLType, bool)>;
+
+/// Converts the parser's own `Type` into the schema IR's `GraphQLType`, so a variable's declared
+/// type can be compared against the type expected where it is used.
+fn convert_parser_type(parser_type: &async_graphql_parser::types::Type) -> GraphQLType {
+    let base = match &parser_type.base {
+        async_graphql_parser::types::BaseType::Named(name) => GraphQLType::Named(name.as_str().to_string()),
+        async_graphql_parser::types::BaseType::List(inner) => GraphQLType::List(Box::new(convert_parser_type(inner))),
+    };
+    if parser_type.nullable {
+        base
+    } else {
+        GraphQLType::NonNull(Box::new(base))
+    }
+}
+
+/// The spec's `IsVariableUsageAllowed`: a variable's declared type must be usable where it appears.
+///
+/// The one non-obvious rule is the nullability relaxation: a nullable variable *is* allowed in a
+/// non-null position provided it declares a default, since the default guarantees a value will be
+/// present. Everything else is ordinary structural comparison -- list nesting must match, and named
+/// types must be identical (GraphQL has no subtyping for input positions).
+fn is_variable_usage_allowed(declared: &GraphQLType, has_default: bool, expected: &GraphQLType) -> bool {
+    match (declared, expected) {
+        (GraphQLType::NonNull(declared_inner), GraphQLType::NonNull(expected_inner)) => {
+            is_variable_usage_allowed(declared_inner, has_default, expected_inner)
+        }
+        // A non-null variable is always acceptable where a nullable value is wanted.
+        (GraphQLType::NonNull(declared_inner), expected) => is_variable_usage_allowed(declared_inner, has_default, expected),
+        (declared, GraphQLType::NonNull(expected_inner)) => {
+            has_default && is_variable_usage_allowed(declared, has_default, expected_inner)
+        }
+        (GraphQLType::List(declared_inner), GraphQLType::List(expected_inner)) => {
+            is_variable_usage_allowed(declared_inner, has_default, expected_inner)
+        }
+        (GraphQLType::Named(declared_name), GraphQLType::Named(expected_name)) => declared_name == expected_name,
+        _ => false,
+    }
+}
+
+/// Argument-value type-checking: walks the parsed literal alongside the declared `GraphQLType`,
+/// unwrapping `NonNull`/`List` as it goes. A `$variable` usage is checked against its *declared*
+/// type rather than a value (there is no value yet at validation time), per the spec's
+/// "All Variable Usages Are Allowed" rule -- which also catches a usage of a variable the operation
+/// never declared.
+fn check_value_matches_type(
+    value: &Value,
+    expected: &GraphQLType,
+    schema: &CompiledSchema,
+    variables: &VariableTypes,
+    location_has_default: bool,
+) -> Result<(), String> {
+    if let Value::Variable(name) = value {
+        let Some((declared, has_default)) = variables.get(name.as_str()) else {
+            return Err(format!("references undefined variable '${name}'"));
+        };
+        // Per the spec, a nullable variable is allowed in a non-null position when *either* the
+        // variable declares a default or the location itself does -- both guarantee a value is
+        // present. Omitting the location half rejects the perfectly ordinary
+        // `search(limit: Int! = 10)` called as `search(limit: $limit)` with `$limit: Int`.
+        if !is_variable_usage_allowed(declared, *has_default || location_has_default, expected) {
+            return Err(format!(
+                "expects '{}', but variable '${name}' is declared as '{}'",
+                expected.to_sdl_string(),
+                declared.to_sdl_string()
+            ));
+        }
         return Ok(());
     }
 
@@ -199,13 +277,13 @@ fn check_value_matches_type(value: &Value, expected: &GraphQLType, schema: &Comp
             if matches!(value, Value::Null) {
                 return Err("must not be null".to_string());
             }
-            check_value_matches_type(value, inner, schema)
+            check_value_matches_type(value, inner, schema, variables, location_has_default)
         }
         GraphQLType::List(inner) => match value {
             Value::Null => Ok(()),
             Value::List(items) => items
                 .iter()
-                .try_for_each(|item| check_value_matches_type(item, inner, schema)),
+                .try_for_each(|item| check_value_matches_type(item, inner, schema, variables, false)),
             _ => Err(format!("expected a list, got {}", describe_value_kind(value))),
         },
         GraphQLType::Named(name) => {
@@ -242,8 +320,14 @@ fn check_value_matches_type(value: &Value, expected: &GraphQLType, schema: &Comp
                         // here would report the wrong error for a genuinely unknown field.
                         Value::Object(entries) => entries.iter().try_for_each(|(field_name, field_value)| {
                             match find_field(type_def, field_name.as_str(), schema.auto_camel_case) {
-                                Some(field_def) => check_value_matches_type(field_value, &field_def.graphql_type, schema)
-                                    .map_err(|error| format!("field '{field_name}': {error}")),
+                                Some(field_def) => check_value_matches_type(
+                                    field_value,
+                                    &field_def.graphql_type,
+                                    schema,
+                                    variables,
+                                    field_def.default_value.is_some(),
+                                )
+                                .map_err(|error| format!("field '{field_name}': {error}")),
                                 None => Ok(()),
                             }
                         }),
@@ -324,6 +408,7 @@ fn check_arguments(
     owner_name: &str,
     pos: async_graphql_parser::Pos,
     schema: &CompiledSchema,
+    variables: &VariableTypes,
 ) -> GraphQLResult<()> {
     check_argument_uniqueness(provided, owner_name)?;
 
@@ -340,7 +425,14 @@ fn check_arguments(
                 )
             })?;
 
-        check_value_matches_type(&arg_value.node, &argument_def.graphql_type, schema).map_err(|reason| {
+        check_value_matches_type(
+            &arg_value.node,
+            &argument_def.graphql_type,
+            schema,
+            variables,
+            argument_def.has_default,
+        )
+        .map_err(|reason| {
             error_at(
                 format!("argument '{name}' on '{owner_name}' {reason}"),
                 ErrorCode::ArgumentTypeMismatch,
@@ -462,8 +554,9 @@ fn validate_field(
     schema: &CompiledSchema,
     fragments: &HashMap<Name, Positioned<FragmentDefinition>>,
     spread_chain: &mut Vec<String>,
+    variables: &VariableTypes,
 ) -> GraphQLResult<()> {
-    validate_directives(&field.node.directives, OperationDirectiveLocation::Field, schema)?;
+    validate_directives(&field.node.directives, OperationDirectiveLocation::Field, schema, variables)?;
 
     let field_name = field.node.name.node.as_str();
     if field_name == "__typename" {
@@ -478,7 +571,14 @@ fn validate_field(
         )
     })?;
 
-    check_arguments(&field.node.arguments, &field_def.arguments, field_name, field.pos, schema)?;
+    check_arguments(
+        &field.node.arguments,
+        &field_def.arguments,
+        field_name,
+        field.pos,
+        schema,
+        variables,
+    )?;
 
     if let Some(stream_directive) = field
         .node
@@ -522,7 +622,14 @@ fn validate_field(
     }
 
     if has_selections && let Some(nested_type) = schema.types.get(inner_name) {
-        validate_selection_set(&field.node.selection_set.node, nested_type, schema, fragments, spread_chain)?;
+        validate_selection_set(
+            &field.node.selection_set.node,
+            nested_type,
+            schema,
+            fragments,
+            spread_chain,
+            variables,
+        )?;
     }
 
     Ok(())
@@ -555,12 +662,18 @@ fn validate_selection_set(
     schema: &CompiledSchema,
     fragments: &HashMap<Name, Positioned<FragmentDefinition>>,
     spread_chain: &mut Vec<String>,
+    variables: &VariableTypes,
 ) -> GraphQLResult<()> {
     for selection in &selection_set.items {
         match &selection.node {
-            Selection::Field(field) => validate_field(field, parent_type, schema, fragments, spread_chain)?,
+            Selection::Field(field) => validate_field(field, parent_type, schema, fragments, spread_chain, variables)?,
             Selection::InlineFragment(inline) => {
-                validate_directives(&inline.node.directives, OperationDirectiveLocation::InlineFragment, schema)?;
+                validate_directives(
+                    &inline.node.directives,
+                    OperationDirectiveLocation::InlineFragment,
+                    schema,
+                    variables,
+                )?;
 
                 let target_type = match &inline.node.type_condition {
                     Some(condition) => {
@@ -577,10 +690,22 @@ fn validate_selection_set(
                     }
                     None => parent_type,
                 };
-                validate_selection_set(&inline.node.selection_set.node, target_type, schema, fragments, spread_chain)?;
+                validate_selection_set(
+                    &inline.node.selection_set.node,
+                    target_type,
+                    schema,
+                    fragments,
+                    spread_chain,
+                    variables,
+                )?;
             }
             Selection::FragmentSpread(spread) => {
-                validate_directives(&spread.node.directives, OperationDirectiveLocation::FragmentSpread, schema)?;
+                validate_directives(
+                    &spread.node.directives,
+                    OperationDirectiveLocation::FragmentSpread,
+                    schema,
+                    variables,
+                )?;
 
                 let fragment_name = &spread.node.fragment_name.node;
                 let fragment = fragments.get(fragment_name).ok_or_else(|| {
@@ -610,6 +735,7 @@ fn validate_selection_set(
                     schema,
                     fragments,
                     spread_chain,
+                    variables,
                 );
                 spread_chain.pop();
                 result?;
@@ -749,13 +875,10 @@ fn check_subscription_single_root_field(
 /// selects exactly one root field. Pure schema-shape checking -- no Python domain objects involved,
 /// matching `is_type_of`/`resolve_type` being execution-time-only (Tasks 5/6).
 ///
-/// Two documented holes remain, both structural rather than oversights:
-/// - **Variable usage types are never checked.** `check_value_matches_type` returns `Ok(())` for any
-///   `Value::Variable`, since a variable's coerced type isn't known without full variable-definition
-///   coercion. An argument given a wrong-typed variable is caught at execution, not here.
-/// - **Duplicate operation and fragment *names* are undetectable.** `async-graphql-parser` stores
-///   both in a `HashMap` keyed by name, so a redefinition is silently collapsed before this
-///   function ever sees the document.
+/// Variable *usages* are checked against their declared types here. Duplicate operation and
+/// fragment *names* need no check: `async-graphql-parser` rejects them while building the document,
+/// so a redefinition never reaches this function (verified -- it surfaces as a parse error, not a
+/// silent last-one-wins collapse, despite operations and fragments being stored in `HashMap`s).
 pub fn validate_query(
     document: &ExecutableDocument,
     schema: &CompiledSchema,
@@ -773,12 +896,28 @@ pub fn validate_query(
 
     check_variable_uniqueness(operation)?;
     check_subscription_single_root_field(operation, &document.fragments)?;
+
+    let variables: VariableTypes = operation
+        .variable_definitions
+        .iter()
+        .map(|definition| {
+            (
+                definition.node.name.node.as_str().to_string(),
+                (
+                    convert_parser_type(&definition.node.var_type.node),
+                    definition.node.default_value.is_some(),
+                ),
+            )
+        })
+        .collect();
+
     validate_selection_set(
         &operation.selection_set.node,
         root_type,
         schema,
         &document.fragments,
         &mut Vec::new(),
+        &variables,
     )
 }
 
@@ -1035,6 +1174,60 @@ mod tests {
             message.contains("'$id' is declared more than once"),
             "unexpected message: {message}"
         );
+    }
+
+    // --- Variable usage types ---------------------------------------------------------------
+
+    #[test]
+    fn a_variable_of_the_wrong_type_is_rejected() {
+        let message = error_message("query Q($id: Int!) { user(id: $id) { name } }");
+        assert!(message.contains("is declared as 'Int!'"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn a_variable_the_operation_never_declared_is_rejected() {
+        let message = error_message("query Q { user(id: $missing) { name } }");
+        assert!(
+            message.contains("undefined variable '$missing'"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn a_correctly_typed_variable_is_accepted() {
+        validate("query Q($id: ID!) { user(id: $id) { name } }").expect("a matching variable is valid");
+    }
+
+    #[test]
+    fn a_non_null_variable_is_allowed_where_a_nullable_value_is_wanted() {
+        // `search(limit: Int!)` has a default, so it accepts an omitted or non-null value.
+        validate("query Q($limit: Int!) { search(limit: $limit) { name } }").expect("non-null into non-null is valid");
+    }
+
+    #[test]
+    fn a_nullable_variable_is_allowed_in_a_non_null_position_that_has_a_default() {
+        // The spec's `hasLocationDefaultValue` half of `IsVariableUsageAllowed`. Omitting it
+        // rejects the perfectly ordinary `search(limit: Int! = 10)` called with `$limit: Int`.
+        validate("query Q($limit: Int) { search(limit: $limit) { name } }")
+            .expect("a location default permits a nullable variable");
+    }
+
+    #[test]
+    fn a_nullable_variable_is_rejected_in_a_non_null_position_with_no_default() {
+        // `user(id: ID!)` declares no default, so nothing guarantees a value would be present.
+        let message = error_message("query Q($id: ID) { user(id: $id) { name } }");
+        assert!(message.contains("is declared as 'ID'"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn a_variable_with_its_own_default_may_be_used_in_a_non_null_position() {
+        validate("query Q($id: ID = \"1\") { user(id: $id) { name } }").expect("a variable default guarantees a value");
+    }
+
+    #[test]
+    fn a_list_variable_must_match_the_expected_nesting() {
+        let message = error_message("query Q($limit: [Int!]!) { search(limit: $limit) { name } }");
+        assert!(message.contains("is declared as '[Int!]!'"), "unexpected message: {message}");
     }
 
     #[test]

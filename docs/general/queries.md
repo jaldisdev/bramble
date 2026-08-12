@@ -153,17 +153,15 @@ The rules enforced:
   it's rejected rather than silently ignored.
 - **Fragment spreads form no cycles.** `fragment A on T { ...A }` and mutually
   recursive pairs are rejected outright.
-- **Variables are declared uniquely**, and directives are used only at
-  locations their declaration allows.
+- **Variables are declared uniquely, and each usage type-checks.** A variable
+  used where its declared type doesn't fit is rejected, as is a usage of a
+  variable the operation never declared. A nullable variable is accepted in a
+  non-null position when either the variable or the argument declares a
+  default, since both guarantee a value will be present.
+- **Directives are used only at locations their declaration allows.**
 - **A subscription selects exactly one root field**, whenever that's decidable
   without knowing variable values.
 
-Two rules are deliberately not enforced, and are worth knowing about:
-
-- **Variable *usage* types aren't checked.** An argument given a variable of
-  the wrong type passes validation and fails at execution instead, because a
-  variable's coerced type isn't known without full variable-definition
-  coercion.
-- **Duplicate operation and fragment names aren't detected.** The parser keys
-  both by name internally, so a redefinition is collapsed before validation
-  ever sees the document.
+Duplicate operation and fragment names are rejected too, though as a *parse*
+error rather than a validation one -- the parser refuses to build a document
+that redefines a name.

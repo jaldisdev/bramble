@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 
@@ -381,3 +382,47 @@ def test_repeated_variable_declaration_is_rejected() -> None:
     schema = _schema()
     with pytest.raises(bramble.GraphQLError, match=r"'\$n' is declared more than once"):
         schema.validate_query("query Q($n: String!, $n: String!) { greet(name: $n) }")
+
+
+# --- Variable usage types ----------------------------------------------------------------------
+
+
+def test_variable_of_the_wrong_type_is_rejected() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError, match="is declared as 'Int!'"):
+        schema.validate_query("query Q($n: Int!) { greet(name: $n) }")
+
+
+def test_undeclared_variable_usage_is_rejected() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError, match=re.escape("undefined variable '$missing'")):
+        schema.validate_query("query Q { greet(name: $missing) }")
+
+
+def test_correctly_typed_variable_is_accepted() -> None:
+    _schema().validate_query("query Q($n: String!) { greet(name: $n) }")
+
+
+def test_nullable_variable_is_allowed_where_the_argument_has_a_default() -> None:
+    # `greet(shout: bool = False)` has a default, so a nullable variable is permitted there.
+    _schema().validate_query('query Q($s: Boolean) { greet(name: "Ada", shout: $s) }')
+
+
+def test_duplicate_operation_names_are_rejected_by_the_parser() -> None:
+    """Recorded during the audit as unfixable because the parser stores operations in a `HashMap`.
+    That inference was wrong: it rejects the redefinition while building the document, so this
+    surfaces as a parse error rather than a silent last-one-wins.
+    """
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError) as excinfo:
+        schema.validate_query("query A { tags } query A { tags }", operation_name="A")
+
+    assert excinfo.value.code is bramble.ErrorCode.GRAPHQL_PARSE_FAILED
+
+
+def test_duplicate_fragment_names_are_rejected_by_the_parser() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError) as excinfo:
+        schema.validate_query("query { ...F } fragment F on Query { tags } fragment F on Query { tags }")
+
+    assert excinfo.value.code is bramble.ErrorCode.GRAPHQL_PARSE_FAILED
