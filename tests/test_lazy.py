@@ -27,6 +27,7 @@ from lazy_fixtures.posts import Post
 import bramble
 from bramble._lazy import LazyReference, LazyType
 from bramble.directive import DirectiveLocation, DirectiveValue
+from tests.lazy_fixtures.comments import Comment
 
 
 def test_lazy_returns_a_lazy_reference() -> None:
@@ -114,3 +115,21 @@ def test_directive_argument_typed_via_lazy_reference() -> None:
 
     result = schema.execute('{ greeting @echo(tag: {name: "tagged"}) }')
     assert result == {"data": {"greeting": "hi-tagged"}}
+
+
+def test_a_lazy_reference_may_be_optional() -> None:
+    """`SomeLazyType | None` is an ordinary thing to write, and it used to raise `TypeError:
+    unsupported operand type(s) for |` -- `|` only works between real types, and a lazy reference
+    is deliberately not one yet. Every other lazy test used the non-optional form, so nothing
+    caught it.
+    """
+    sdl = bramble.Schema(query=_OptionalLazyQuery).to_sdl()
+    assert "author: Author" in sdl
+    assert "type Author" in sdl
+
+
+@bramble.type
+class _OptionalLazyQuery:
+    @bramble.field
+    def comment() -> Comment:
+        raise NotImplementedError

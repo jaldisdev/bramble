@@ -40,6 +40,20 @@ class LazyType:
     module: str
     package: str | None = None
 
+    def __or__(self, other: Any) -> Any:
+        """Supports `SomeLazyType | None` (PEP 604).
+
+        A `LazyType` stands in for a class that has not been imported yet, and Python's `|` only
+        works between real types -- so an ordinary optional annotation raised `TypeError:
+        unsupported operand type(s) for |`. Delegating to `typing.Union` produces exactly the form
+        `Optional[...]` already yields, which the annotation walker and the schema builder both
+        understand, so nothing downstream needs to know the difference.
+        """
+        return typing.Union[self, other]
+
+    def __ror__(self, other: Any) -> Any:
+        return typing.Union[other, self]
+
     def resolve_type(self) -> type:
         module = importlib.import_module(self.module, self.package)
 
