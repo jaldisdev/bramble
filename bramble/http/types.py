@@ -38,3 +38,27 @@ class GraphQLRequestData:
     variables: dict[str, Any] | None
     operation_name: str | None
     extensions: dict[str, Any] | None = None
+
+
+@dataclasses.dataclass
+class TemporalResponse:
+    """A stand-in for the response, available *during* execution -- put into the resolver context by
+    an adapter that supports it, so a resolver or extension can set the HTTP status code or add a
+    header from inside the request:
+
+        @bramble.field
+        def me(info: bramble.Info) -> User | None:
+            if info.context["response"] is not None and not authenticated:
+                info.context["response"].status_code = 401
+                return None
+
+    It exists because the real response object doesn't yet: a GraphQL response body is only built
+    once execution has finished, but the decision to answer `401` rather than `200` is made while a
+    field is resolving. Whatever is set here is copied onto the real response afterwards.
+
+    Framework-agnostic on purpose (a plain `status_code`/`headers` pair rather than any one
+    framework's response class), so the same resolver code works across adapters.
+    """
+
+    status_code: int = 200
+    headers: dict[str, str] = dataclasses.field(default_factory=dict)

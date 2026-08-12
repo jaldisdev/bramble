@@ -80,10 +80,16 @@ class BaseView(Generic[Request]):
     """
 
     multipart_uploads_enabled: bool = False
+    # Whether a browser `GET` with no `query` is answered with the GraphiQL page. On by default
+    # (it's what makes a fresh endpoint explorable), but every adapter takes `graphql_ide=False` --
+    # a production endpoint that shouldn't advertise an interactive console needs to be able to
+    # turn it off without also giving up plain `GET` queries.
+    graphql_ide: bool = True
 
     def should_render_graphql_ide(self, request: BaseRequestProtocol) -> bool:
         return (
-            request.method == "GET"
+            self.graphql_ide
+            and request.method == "GET"
             and request.query_params.get("query") is None
             and any(accepted in request.headers.get("accept", "") for accepted in ("text/html", "*/*"))
         )

@@ -112,9 +112,12 @@ class GraphQLView(AsyncBaseHTTPView[Any, Response, Any, Any]):
     WebSocket support here.
     """
 
-    def __init__(self, schema: "Schema", *, multipart_uploads_enabled: bool = True) -> None:
+    def __init__(
+        self, schema: "Schema", *, multipart_uploads_enabled: bool = True, graphql_ide: bool = True
+    ) -> None:
         self.schema = schema
         self.multipart_uploads_enabled = multipart_uploads_enabled
+        self.graphql_ide = graphql_ide
 
     async def get_body(self, request: "WerkzeugRequest") -> bytes:
         return request.get_data()
@@ -156,9 +159,11 @@ class GraphQLView(AsyncBaseHTTPView[Any, Response, Any, Any]):
             )
 
 
-def graphql_view(schema: "Schema", *, path: str = "/graphql", multipart_uploads_enabled: bool = True) -> Blueprint:
+def graphql_view(
+    schema: "Schema", *, path: str = "/graphql", multipart_uploads_enabled: bool = True, graphql_ide: bool = True
+) -> Blueprint:
     """A Flask `Blueprint` serving `schema` at `path`, ready for `app.register_blueprint(...)`."""
-    view = GraphQLView(schema, multipart_uploads_enabled=multipart_uploads_enabled)
+    view = GraphQLView(schema, multipart_uploads_enabled=multipart_uploads_enabled, graphql_ide=graphql_ide)
     blueprint = Blueprint("bramble_graphql", __name__)
 
     @blueprint.route(path, methods=["GET", "POST"])

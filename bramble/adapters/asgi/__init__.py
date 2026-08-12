@@ -199,9 +199,12 @@ class GraphQL(
     equivalent to `bramble.adapters.starlette.GraphQL`, but without a Starlette dependency.
     """
 
-    def __init__(self, schema: "Schema", *, multipart_uploads_enabled: bool = True) -> None:
+    def __init__(
+        self, schema: "Schema", *, multipart_uploads_enabled: bool = True, graphql_ide: bool = True
+    ) -> None:
         self.schema = schema
         self.multipart_uploads_enabled = multipart_uploads_enabled
+        self.graphql_ide = graphql_ide
 
     async def get_body(self, request: _RawHTTPRequest) -> bytes:
         return await request.body()

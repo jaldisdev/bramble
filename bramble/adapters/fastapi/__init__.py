@@ -37,11 +37,13 @@ if TYPE_CHECKING:
     from bramble._schema import Schema
 
 
-def GraphQLRouter(schema: "Schema", *, path: str = "/", multipart_uploads_enabled: bool = True) -> APIRouter:
+def GraphQLRouter(
+    schema: "Schema", *, path: str = "/", multipart_uploads_enabled: bool = True, graphql_ide: bool = True
+) -> APIRouter:
     """An `APIRouter` serving `schema` over HTTP (GET/POST) and WebSocket
     (`graphql-transport-ws`) at `path`, ready to `app.include_router(...)` into a FastAPI app.
     """
-    view = GraphQL(schema, multipart_uploads_enabled=multipart_uploads_enabled)
+    view = GraphQL(schema, multipart_uploads_enabled=multipart_uploads_enabled, graphql_ide=graphql_ide)
     router = APIRouter()
     router.routes.append(Route(path, view, methods=["GET", "POST"]))
     router.routes.append(WebSocketRoute(path, view))

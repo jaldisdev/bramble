@@ -66,9 +66,12 @@ class GraphQL(AsyncBaseHTTPView[Request, Response, WebSocket, WebSocket]):
     dev server for exactly that.
     """
 
-    def __init__(self, schema: "Schema", *, multipart_uploads_enabled: bool = True) -> None:
+    def __init__(
+        self, schema: "Schema", *, multipart_uploads_enabled: bool = True, graphql_ide: bool = True
+    ) -> None:
         self.schema = schema
         self.multipart_uploads_enabled = multipart_uploads_enabled
+        self.graphql_ide = graphql_ide
 
     async def get_body(self, request: Request) -> bytes:
         return await request.body()
