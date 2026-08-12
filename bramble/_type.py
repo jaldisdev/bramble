@@ -31,6 +31,58 @@ from bramble.schema_directive import Location
 
 _type = type  # capture the builtin before `type` (below) shadows this module's name for it
 
+@dataclasses.dataclass(frozen=True)
+class _PendingType:
+    """A type whose annotations could not be resolved when it was decorated -- see `_process_type`."""
+
+    cls: _type
+    kind: str
+    name: str | None
+    description: str | None
+    directives: tuple[object, ...]
+    one_of: bool
+
+
+#: Populated by `_process_type`, drained by `bramble.Schema`. Module-level because the deferral has
+#: to survive from decoration (import time) to schema construction, which are arbitrarily far apart.
+_PENDING_TYPES: list[_PendingType] = []
+
+
+def resolve_pending_types() -> None:
+    """Re-processes every type deferred at decoration time. Called by `Schema()`.
+
+    Iterates to a fixed point: resolving one type can make another's annotations resolvable, and the
+    order they were deferred in says nothing about their dependencies. Whatever is still failing
+    when no further progress is made raises with its original error.
+    """
+    while _PENDING_TYPES:
+        progressed = False
+        for pending in list(_PENDING_TYPES):
+            try:
+                pending.cls.__bramble_type_info__ = process_type(
+                    pending.cls,
+                    kind=pending.kind,
+                    name=pending.name,
+                    description=pending.description,
+                    directives=pending.directives,
+                    one_of=pending.one_of,
+                )
+            except SchemaError:
+                continue
+            _PENDING_TYPES.remove(pending)
+            progressed = True
+        if not progressed:
+            pending = _PENDING_TYPES.pop(0)
+            process_type(
+                pending.cls,
+                kind=pending.kind,
+                name=pending.name,
+                description=pending.description,
+                directives=pending.directives,
+                one_of=pending.one_of,
+            )
+
+
 _LOCATION_BY_KIND: dict[str, Location] = {
     "type": Location.OBJECT,
     "interface": Location.INTERFACE,
@@ -295,14 +347,31 @@ def _process_type(
         _validate_directive_locations(directives, _LOCATION_BY_KIND[kind], cls.__name__)
         _validate_field_directive_locations(cls)
 
-        cls.__bramble_type_info__ = process_type(
-            cls,
-            kind=kind,
-            name=name,
-            description=description,
-            directives=tuple(directives),
-            one_of=one_of,
-        )
+        # A resolver's return annotation is resolved here, when the class is decorated -- so a
+        # reference to a type that is not importable *yet* fails, even though it will be perfectly
+        # resolvable by the time a `Schema()` is built. That makes a schema's importability depend
+        # on module import order, which is invisible from the code and surfaces as a `NameError`
+        # in one entry point while another works.
+        #
+        # Rather than fail here, remember the class and try again from `Schema()`, once every module
+        # involved has finished importing. `Schema.__init__` drains `_PENDING_TYPES` before walking
+        # the graph and re-raises there if the name is still unresolvable -- so a genuine typo is
+        # still an error, just reported at the point where the answer is actually knowable.
+        try:
+            cls.__bramble_type_info__ = process_type(
+                cls,
+                kind=kind,
+                name=name,
+                description=description,
+                directives=tuple(directives),
+                one_of=one_of,
+            )
+        except SchemaError as error:
+            if "could not resolve" not in str(error):
+                raise
+            _PENDING_TYPES.append(
+                _PendingType(cls, kind, name, description, tuple(directives), one_of)
+            )
         # `process_type` (Rust) already extracted these directives' *values* into
         # `TypeDefinition.applied_directives` for SDL rendering -- kept here too, on the Python
         # side, so `Schema()`'s graph walker (§7b) can discover each *class* of schema directive

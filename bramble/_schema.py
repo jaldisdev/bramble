@@ -47,6 +47,7 @@ from bramble._private import is_private
 from bramble._resolver import Streamable
 from bramble._scalar import ScalarDefinition
 from bramble._type import field as _field
+from bramble._type import resolve_pending_types
 from bramble._type import type as _type_decorator
 from bramble._union import UnionDefinition
 from bramble.schema.config import SchemaConfig
@@ -391,6 +392,11 @@ class Schema:
 
         Raises `bramble.SchemaError` for any schema-shape problem found during the build.
         """
+        # Types whose annotations could not be resolved at decoration time (a resolver returning
+        # a type from a module that had not finished importing) were deferred -- every module is
+        # imported by now, so finish them before anything reads `__bramble_type_info__`.
+        resolve_pending_types()
+
         if getattr(query, "__bramble_type_info__", None) is None:
             raise SchemaError("Schema(query=...) must be a @bramble.type-decorated class")
 

@@ -27,6 +27,7 @@ from typing import ClassVar
 import pytest
 
 import bramble
+from bramble import SchemaError
 
 
 def test_nested_types() -> None:
@@ -740,3 +741,63 @@ def test_field_graphql_type_overrides_the_annotation() -> None:
         code: str = bramble.field(default="x", graphql_type=bramble.ID)
 
     assert "code: ID!" in bramble.Schema(query=Query).to_sdl()
+
+
+# --- Annotations that are not resolvable yet ------------------------------------------------------
+
+
+@bramble.type
+class _ForwardReferencingQuery:
+    @bramble.field
+    def later() -> "_DefinedAfterwards":
+        raise NotImplementedError
+
+
+@bramble.type
+class _DefinedAfterwards:
+    value: str
+
+
+def test_a_resolver_may_return_a_type_defined_later_in_the_module() -> None:
+    """A resolver's return annotation used to be resolved when its class was decorated, so naming a
+    type defined further down the module failed -- and which entry point imported what first decided
+    whether a schema was importable at all. Such a type is deferred and finished by `Schema()`,
+    where every module involved has certainly been imported.
+    """
+    sdl = bramble.Schema(query=_ForwardReferencingQuery).to_sdl()
+
+    assert "later: _DefinedAfterwards!" in sdl
+    assert "type _DefinedAfterwards" in sdl
+
+
+def test_an_unresolvable_annotation_is_still_an_error_just_later() -> None:
+    """Deferring must not swallow a genuine typo: it is reported when the schema is built, which is
+    the first point at which "this name does not exist anywhere" is actually knowable.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def broken() -> "NoSuchTypeAnywhere":  # noqa: F821
+            raise NotImplementedError
+
+    with pytest.raises(SchemaError, match="could not resolve"):
+        bramble.Schema(query=Query)
+
+
+def test_a_failed_type_does_not_linger_for_the_next_schema() -> None:
+    """The deferral list is module-level, so a type that never resolves has to be discarded when it
+    is reported -- otherwise it would poison an unrelated `Schema()` built afterwards.
+    """
+
+    @bramble.type
+    class Broken:
+        @bramble.field
+        def nope() -> "AlsoMissing":  # noqa: F821
+            raise NotImplementedError
+
+    with pytest.raises(SchemaError):
+        bramble.Schema(query=Broken)
+
+    # An unrelated, perfectly valid schema still builds.
+    assert "later:" in bramble.Schema(query=_ForwardReferencingQuery).to_sdl()
