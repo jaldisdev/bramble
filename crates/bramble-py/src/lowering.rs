@@ -28,6 +28,85 @@ use serde_json::Value as JsonValue;
 
 use crate::error::raise;
 
+/// Renders a Python default value as the GraphQL literal that should appear after `= ` in SDL and
+/// as introspection's `__InputValue.defaultValue`. Returns `None` for anything with no faithful
+/// literal spelling (an arbitrary object, an input-class instance, ...) -- printing a wrong literal
+/// would be worse than printing none, and the argument stays optional either way via `has_default`.
+///
+/// The enum branch has to come first: `class Color(str, Enum)` is a genuine `str` subclass, so
+/// `extract::<String>()` would happily render `Color.RED` as the string literal `"red"` rather than
+/// the enum literal `RED`. Same ordering reason as `PyBool`-before-`i64` below, one type further up.
+pub(crate) fn python_default_to_graphql_literal(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if let Some(literal) = enum_member_literal(value)? {
+        return Ok(Some(literal));
+    }
+    if value.is_none() {
+        return Ok(Some("null".to_string()));
+    }
+    if let Ok(boolean) = value.cast::<PyBool>() {
+        return Ok(Some(if boolean.is_true() { "true".to_string() } else { "false".to_string() }));
+    }
+    if let Ok(integer) = value.extract::<i64>() {
+        return Ok(Some(integer.to_string()));
+    }
+    if let Ok(float) = value.extract::<f64>() {
+        return Ok(Some(JsonValue::from(float).to_string()));
+    }
+    if let Ok(string) = value.extract::<String>() {
+        // GraphQL's string-literal escaping is a subset of JSON's, so serializing through
+        // `serde_json` gives correct quoting/escaping for free.
+        return Ok(Some(JsonValue::String(string).to_string()));
+    }
+    if let Ok(list) = value.cast::<PyList>() {
+        let mut items = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            // One unrenderable element makes the whole list unrenderable -- a partial list literal
+            // would be actively wrong, not merely incomplete.
+            match python_default_to_graphql_literal(&item)? {
+                Some(rendered) => items.push(rendered),
+                None => return Ok(None),
+            }
+        }
+        return Ok(Some(format!("[{}]", items.join(", "))));
+    }
+    if let Ok(dict) = value.cast::<PyDict>() {
+        let mut entries = Vec::with_capacity(dict.len());
+        for (key, item_value) in dict.iter() {
+            let Ok(key) = key.extract::<String>() else {
+                return Ok(None);
+            };
+            match python_default_to_graphql_literal(&item_value)? {
+                // A GraphQL object literal's field names are unquoted, unlike JSON's.
+                Some(rendered) => entries.push(format!("{key}: {rendered}")),
+                None => return Ok(None),
+            }
+        }
+        return Ok(Some(format!("{{{}}}", entries.join(", "))));
+    }
+    Ok(None)
+}
+
+/// `Some(name)` if `value` is a member of a `@bramble.enum`-decorated enum, rendered under whatever
+/// GraphQL name that member actually travels as (`bramble.enum_value(name=...)` override, else the
+/// Python identifier) -- matching how execution serializes a resolved enum member.
+fn enum_member_literal(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    let Ok(info) = value.get_type().getattr("__bramble_type_info__") else {
+        return Ok(None);
+    };
+    if info.getattr("kind")?.extract::<String>()? != "enum" {
+        return Ok(None);
+    }
+    let member_name: String = value.getattr("name")?.extract()?;
+    for enum_value in info.getattr("enum_values")?.try_iter()? {
+        let enum_value = enum_value?;
+        if enum_value.getattr("name")?.extract::<String>()? == member_name {
+            let graphql_name: Option<String> = enum_value.getattr("graphql_name")?.extract()?;
+            return Ok(Some(graphql_name.unwrap_or(member_name)));
+        }
+    }
+    Ok(Some(member_name))
+}
+
 /// Converts a Python value into `serde_json::Value`, covering the subset actually needed for
 /// GraphQL variable values (booleans, numbers, strings, null, lists, string-keyed objects).
 /// `PyBool` must be checked before numeric extraction: Python's `bool` is a subclass of `int`, so

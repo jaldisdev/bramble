@@ -43,18 +43,39 @@ it back would reject a schema that tried to redefine reserved names.
 
 Introspection reads from the same compiled schema SDL rendering does, so the two never disagree.
 
-## Known gaps
+## Argument default values
 
-Two pieces of introspection report less than the spec allows, both because bramble's own schema
-layer doesn't carry the information:
+`__InputValue.defaultValue` reports the argument's default as a GraphQL literal string, exactly as
+the spec defines it -- the same literal SDL renders after `= `, so the two can't drift apart:
+
+```python
+@bramble.field
+def search(limit: int = 10, term: str = "all", cursor: str | None = None) -> str: ...
+```
+
+```graphql
+{ __type(name: "Query") { fields { args { name defaultValue } } } }
+```
+
+```json
+[{"name": "limit",  "defaultValue": "10"},
+ {"name": "term",   "defaultValue": "\"all\""},
+ {"name": "cursor", "defaultValue": "null"}]
+```
+
+An argument with no default reports `null`, as does one whose default has no faithful GraphQL
+spelling (an arbitrary Python object) -- reporting nothing beats reporting something wrong. The
+argument stays optional at execution either way.
+
+## Known gaps
 
 - **`__Field.isDeprecated` is always `false`.** bramble has no field-level deprecation API --
   `bramble.field(...)` takes no `deprecation_reason`. Arguments and
   [enum values](../types/enums.md) *do* support deprecation, and introspection reports theirs
   accurately.
-- **`__InputValue.defaultValue` is always `null`.** The schema IR records only *whether* an
-  argument has a default, not the value, so there is nothing faithful to report (the same gap SDL
-  rendering has for argument defaults).
+- **An input object field's own default is not reported.** Unlike a resolver argument, an
+  `@bramble.input` field's default isn't carried in the schema IR, so `__InputValue.defaultValue`
+  is `null` for input fields even when the Python attribute has a default.
 
 Schema directives are reported with their name, locations, and repeatability, but without
 argument types -- a schema directive's fields aren't carried with type information in the IR.

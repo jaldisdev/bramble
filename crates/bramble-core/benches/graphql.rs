@@ -57,6 +57,7 @@ fn argument(name: &str, graphql_type: GraphQLType) -> ArgumentDefinition {
         graphql_name: None,
         graphql_type,
         has_default: false,
+        default_value: None,
         description: None,
         deprecation_reason: None,
         applied_directives: Vec::new(),

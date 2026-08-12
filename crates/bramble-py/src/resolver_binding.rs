@@ -21,6 +21,7 @@ use bramble_core::schema::ArgumentDefinition;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple, PyType};
 
+use crate::lowering::python_default_to_graphql_literal;
 use crate::type_info::{SchemaError, extract_applied_directives, validate_directive_locations};
 use crate::typing_utils::{find_marker, resolve_graphql_type, seed_lazy_namespace_for_callable, unwrap_annotated};
 
@@ -36,6 +37,7 @@ pub(crate) fn classify_argument<'py>(
     parameter_name: String,
     annotation: Bound<'py, PyAny>,
     has_default: bool,
+    default_value: Option<String>,
 ) -> PyResult<ArgumentDefinition> {
     let (underlying, metadata) = unwrap_annotated(typing, annotation)?;
     let argument_class = py.import("bramble._resolver")?.getattr("Argument")?;
@@ -69,6 +71,7 @@ pub(crate) fn classify_argument<'py>(
         graphql_name,
         graphql_type,
         has_default,
+        default_value,
         description,
         deprecation_reason,
         applied_directives,
@@ -231,7 +234,8 @@ pub(crate) fn classify_parameters<'py>(
 
         let default = parameter.getattr("default")?;
         let has_default = !default.is(&empty);
-        arguments.push(classify_argument(py, &typing, parameter_name, annotation, has_default)?);
+        let default_value = if has_default { python_default_to_graphql_literal(&default)? } else { None };
+        arguments.push(classify_argument(py, &typing, parameter_name, annotation, has_default, default_value)?);
     }
 
     Ok(ClassifiedParameters {

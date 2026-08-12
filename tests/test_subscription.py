@@ -177,8 +177,55 @@ def test_subscription_with_more_than_one_root_field_is_rejected() -> None:
     async def run() -> list[dict]:
         return await _collect(schema.subscribe_async("subscription { a: count b: count }"))
 
+    # Caught by Rust validation now, before execution ever starts, so it reports a source location
+    # like every other validation error rather than surfacing only once the executor got there.
+    with pytest.raises(bramble.GraphQLError, match="exactly one root field"):
+        asyncio.run(run())
+
+
+def test_subscription_root_field_count_behind_skip_include_is_caught_at_execution() -> None:
+    """The static Rust check deliberately abstains when a root selection carries `@skip`/`@include`:
+    the real count depends on variable values it doesn't have. `subscribe_async`'s own check is the
+    post-pruning backstop that still has to catch it.
+    """
+
+    @bramble.type
+    class Query:
+        ok: bool = True
+
+    @bramble.type
+    class Subscription:
+        @bramble.field
+        async def count() -> AsyncGenerator[int, None]:
+            yield 1
+
+    schema = bramble.Schema(query=Query, subscription=Subscription)
+
+    async def run() -> list[dict]:
+        # `@skip(if: false)` keeps both fields, so two root fields survive lowering.
+        return await _collect(schema.subscribe_async("subscription { a: count b: count @skip(if: false) }"))
+
     with pytest.raises(bramble.GraphQLError, match="exactly one root-level field"):
         asyncio.run(run())
+
+
+def test_subscription_root_field_pruned_by_skip_down_to_one_still_runs() -> None:
+    @bramble.type
+    class Query:
+        ok: bool = True
+
+    @bramble.type
+    class Subscription:
+        @bramble.field
+        async def count() -> AsyncGenerator[int, None]:
+            yield 1
+
+    schema = bramble.Schema(query=Query, subscription=Subscription)
+
+    async def run() -> list[dict]:
+        return await _collect(schema.subscribe_async("subscription { a: count b: count @skip(if: true) }"))
+
+    assert asyncio.run(run()) == [{"data": {"a": 1}}]
 
 
 def test_non_async_generator_subscription_resolver_raises_a_clear_error() -> None:

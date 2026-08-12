@@ -75,6 +75,12 @@ fn render_applied_directives(directives: &[AppliedDirective]) -> String {
 fn render_argument(argument: &ArgumentDefinition, auto_camel_case: bool) -> String {
     let name = effective_name(&argument.name, &argument.graphql_name, auto_camel_case);
     let mut out = format!("{name}: {}", argument.graphql_type.to_sdl_string());
+    // `= <default>` goes between the type and any directives, per the spec's `InputValueDefinition`
+    // grammar. Without it a defaulted non-null argument reads as *required* to every schema
+    // consumer, even though bramble's own validation treats it as optional.
+    if let Some(default) = &argument.default_value {
+        out.push_str(&format!(" = {default}"));
+    }
     if let Some(reason) = &argument.deprecation_reason {
         out.push_str(&format!(" @deprecated(reason: {reason:?})"));
     }
@@ -262,11 +268,12 @@ fn render_schema_block(schema: &CompiledSchema) -> String {
 /// stable across runs, and snapshot testing needs reproducible output. A field's own declaration
 /// order within its type *is* preserved (`Vec`, populated straight off `dataclasses.fields()`).
 ///
-/// Known, deliberately flagged gaps (not silently wrong): argument default *values* never render
-/// (`ArgumentDefinition` only tracks `has_default: bool`, not the value itself, so `= <default>`
-/// syntax can't be produced); `@skip`/`@include` never appear (they're always built into every
-/// GraphQL service, never registered as a custom operation directive to begin with); enum types
-/// aren't a concept bramble's schema IR has yet, so no `enum` declarations are ever rendered.
+/// Known, deliberately flagged gaps (not silently wrong): an argument default with no faithful
+/// GraphQL literal spelling (an arbitrary Python object) renders no `= <default>` at all, since a
+/// wrong literal would be worse than an absent one; `@skip`/`@include` never appear (they're always
+/// built into every GraphQL service, never registered as a custom operation directive to begin
+/// with); an *input object field's* own default never renders, because `FieldDefinition` -- unlike
+/// `ArgumentDefinition` -- carries no default at all.
 pub fn render_sdl(schema: &CompiledSchema) -> String {
     let mut sections = vec![render_schema_block(schema)];
 
@@ -356,6 +363,7 @@ mod tests {
                         graphql_name: None,
                         graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
                         has_default: false,
+                        default_value: None,
                         description: None,
                         deprecation_reason: None,
                         applied_directives: Vec::new(),
@@ -527,6 +535,7 @@ mod tests {
                         graphql_name: None,
                         graphql_type: GraphQLType::Named("Int".to_string()),
                         has_default: true,
+                        default_value: Some("3".to_string()),
                         description: None,
                         deprecation_reason: Some("no longer used".to_string()),
                         applied_directives: Vec::new(),
@@ -538,7 +547,64 @@ mod tests {
         );
 
         let sdl = render_sdl(&schema);
-        assert!(sdl.contains("oldField(count: Int @deprecated(reason: \"no longer used\")): String!"));
+        // `= 3` sits between the type and the directive, per the `InputValueDefinition` grammar.
+        assert!(sdl.contains("oldField(count: Int = 3 @deprecated(reason: \"no longer used\")): String!"), "{sdl}");
+    }
+
+    #[test]
+    fn renders_an_argument_default_so_a_defaulted_argument_does_not_read_as_required() {
+        let mut schema = empty_schema();
+        schema.types.insert(
+            "Query".to_string(),
+            TypeDefinition {
+                kind: TypeKind::Type,
+                name: "Query".to_string(),
+                description: None,
+                one_of: false,
+                interfaces: Vec::new(),
+                enum_values: Vec::new(),
+                applied_directives: Vec::new(),
+                fields: vec![FieldDefinition {
+                    name: "search".to_string(),
+                    graphql_name: None,
+                    graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
+                    description: None,
+                    has_resolver: true,
+                    parent_parameter: None,
+                    info_parameter: None,
+                    applied_directives: Vec::new(),
+                    arguments: vec![
+                        // Non-null *with* a default: optional to the server, and must read that way
+                        // to every schema consumer too -- `Int!` alone means required.
+                        ArgumentDefinition {
+                            name: "limit".to_string(),
+                            graphql_name: None,
+                            graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("Int".to_string()))),
+                            has_default: true,
+                            default_value: Some("10".to_string()),
+                            description: None,
+                            deprecation_reason: None,
+                            applied_directives: Vec::new(),
+                        },
+                        // A default that had no faithful literal spelling: nothing is rendered
+                        // rather than something wrong.
+                        ArgumentDefinition {
+                            name: "cursor".to_string(),
+                            graphql_name: None,
+                            graphql_type: GraphQLType::Named("String".to_string()),
+                            has_default: true,
+                            default_value: None,
+                            description: None,
+                            deprecation_reason: None,
+                            applied_directives: Vec::new(),
+                        },
+                    ],
+                }],
+            },
+        );
+
+        let sdl = render_sdl(&schema);
+        assert!(sdl.contains("search(limit: Int! = 10, cursor: String): String!"), "{sdl}");
     }
 
     #[test]
@@ -642,6 +708,7 @@ mod tests {
                     graphql_name: None,
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("ID".to_string()))),
                     has_default: false,
+                    default_value: None,
                     description: None,
                     deprecation_reason: None,
                     applied_directives: Vec::new(),

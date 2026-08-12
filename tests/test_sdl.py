@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import enum
 from typing import Annotated, NewType, Union
 
 import pytest
@@ -327,3 +328,92 @@ def test_to_sdl_renders_root_type_with_custom_name_in_schema_block() -> None:
 
     assert "schema {\n  query: RootQuery\n}" in sdl
     assert "type RootQuery {" in sdl
+
+
+# --- Argument defaults ----------------------------------------------------------------------------
+
+
+def test_to_sdl_renders_argument_defaults_so_they_do_not_read_as_required() -> None:
+    """A non-null argument with a Python default is optional to the server, and the SDL has to say
+    so: `Int!` on its own means *required* to every spec-compliant consumer, which used to make the
+    published schema disagree with what the server actually accepts.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def search(limit: int = 10, term: str = "all", exact: bool = False, ratio: float = 0.5) -> str:
+            return term
+
+    sdl = bramble.Schema(query=Query).to_sdl()
+
+    assert 'search(limit: Int! = 10, term: String! = "all", exact: Boolean! = false, ratio: Float! = 0.5)' in sdl
+
+
+@bramble.enum
+class _DefaultColor(enum.Enum):
+    """A `str`-valued enum on purpose: it is a genuine `str` subclass, so it is exactly the case
+    that would render as the string literal `"red"` if the enum branch weren't checked first.
+    """
+
+    RED = "red"
+    GREEN = "green"
+
+
+@bramble.enum
+class _RenamedColor(enum.Enum):
+    RED = bramble.enum_value("red", name="CRIMSON")
+
+
+def test_to_sdl_renders_an_enum_argument_default_as_an_enum_literal_not_a_string() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def pick(color: _DefaultColor = _DefaultColor.RED) -> _DefaultColor:
+            return color
+
+    sdl = bramble.Schema(query=Query).to_sdl()
+
+    assert "pick(color: _DefaultColor! = RED): _DefaultColor!" in sdl
+
+
+def test_to_sdl_renders_a_renamed_enum_members_default_under_its_graphql_name() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def pick(color: _RenamedColor = _RenamedColor.RED) -> _RenamedColor:
+            return color
+
+    assert "pick(color: _RenamedColor! = CRIMSON)" in bramble.Schema(query=Query).to_sdl()
+
+
+def test_to_sdl_omits_a_default_with_no_faithful_graphql_literal() -> None:
+    """An unrepresentable default renders nothing rather than something wrong -- the argument stays
+    optional at execution either way.
+    """
+
+    class Sentinel:
+        pass
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def search(cursor: str | None = Sentinel()) -> str:  # type: ignore[assignment]
+            return "ok"
+
+    sdl = bramble.Schema(query=Query).to_sdl()
+
+    assert "search(cursor: String): String!" in sdl
+    assert "Sentinel" not in sdl
+
+
+def test_argument_default_lists_and_nulls_render_as_graphql_literals() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def search(tags: list[str] = ["a", "b"], cursor: str | None = None) -> str:  # noqa: B006
+            return "ok"
+
+    sdl = bramble.Schema(query=Query).to_sdl()
+
+    assert 'search(tags: [String!]! = ["a", "b"], cursor: String = null)' in sdl

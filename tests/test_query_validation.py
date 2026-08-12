@@ -336,3 +336,48 @@ def test_repeated_non_cyclic_fragment_spreads_are_still_accepted() -> None:
     schema.validate_query(
         "query { first: author { ...frag } second: author { ...frag } } fragment frag on Author { name }"
     )
+
+
+# --- Leaf / composite selection sets ----------------------------------------------------------
+
+
+def test_selection_set_on_a_scalar_field_is_rejected() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError, match="leaf type 'String'"):
+        schema.validate_query("query { author { name { length } } }")
+
+
+def test_composite_field_without_a_selection_set_is_rejected() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError, match="composite type 'Author'"):
+        schema.validate_query("query { author }")
+
+
+# --- Fragment spread possibility --------------------------------------------------------------
+
+
+def test_fragment_on_an_unrelated_type_is_rejected() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError, match="can never apply to"):
+        schema.validate_query("query { author { ...q } } fragment q on Query { tags }")
+
+
+def test_inline_fragment_on_an_unrelated_type_is_rejected() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError, match="can never apply to"):
+        schema.validate_query("query { author { ... on Query { tags } } }")
+
+
+# --- Uniqueness -------------------------------------------------------------------------------
+
+
+def test_repeated_argument_on_a_field_is_rejected() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError, match="provided more than once"):
+        schema.validate_query('query { greet(name: "Ada", name: "Grace") }')
+
+
+def test_repeated_variable_declaration_is_rejected() -> None:
+    schema = _schema()
+    with pytest.raises(bramble.GraphQLError, match=r"'\$n' is declared more than once"):
+        schema.validate_query("query Q($n: String!, $n: String!) { greet(name: $n) }")

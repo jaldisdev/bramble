@@ -76,6 +76,10 @@ pub struct PyArgumentInfo {
     pub type_info: Py<PyGraphQLType>,
     pub is_nullable: bool,
     pub has_default: bool,
+    /// The default rendered as a GraphQL literal, or `None` when the argument has no default (or
+    /// has one with no faithful literal spelling) -- introspection reports this verbatim as
+    /// `__InputValue.defaultValue`, which the spec defines as a string holding the literal.
+    pub default_value: Option<String>,
     pub description: Option<String>,
     pub deprecation_reason: Option<String>,
 }
@@ -88,6 +92,7 @@ pub(crate) fn convert_argument(py: Python<'_>, argument: ArgumentDefinition) -> 
         graphql_type: argument.graphql_type.to_sdl_string(),
         type_info: Py::new(py, convert_graphql_type(py, &argument.graphql_type)?)?,
         has_default: argument.has_default,
+        default_value: argument.default_value,
         description: argument.description,
         deprecation_reason: argument.deprecation_reason,
     })

@@ -924,3 +924,38 @@ def test_resolver_can_return_a_duck_typed_object_not_an_instance_of_the_declared
     result = schema.execute("{ person { name } }")
 
     assert result == {"data": {"person": {"name": "Ada"}}}
+
+
+def test_info_python_name_is_the_python_identifier_not_the_graphql_name() -> None:
+    """`field_name` is what the query wrote (camelCase by default); `python_name` is the identifier
+    it maps back to. Both used to return the query name, so `python_name` reported `userName`.
+    """
+    observed: dict[str, str] = {}
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def user_name(info: bramble.Info) -> str:
+            observed["field_name"] = info.field_name
+            observed["python_name"] = info.python_name
+            return "ok"
+
+    bramble.Schema(query=Query).execute("{ userName }")
+
+    assert observed == {"field_name": "userName", "python_name": "user_name"}
+
+
+def test_info_python_name_respects_an_explicit_field_name_override() -> None:
+    observed: dict[str, str] = {}
+
+    @bramble.type
+    class Query:
+        @bramble.field(name="renamed")
+        def original_name(info: bramble.Info) -> str:
+            observed["field_name"] = info.field_name
+            observed["python_name"] = info.python_name
+            return "ok"
+
+    bramble.Schema(query=Query).execute("{ renamed }")
+
+    assert observed == {"field_name": "renamed", "python_name": "original_name"}

@@ -76,6 +76,18 @@ pub struct ArgumentDefinition {
     pub graphql_name: Option<String>,
     pub graphql_type: GraphQLType,
     pub has_default: bool,
+    /// The default rendered as a GraphQL literal (`10`, `"abc"`, `RED`, `[1, 2]`), ready to print
+    /// after `= ` in SDL and to report as introspection's `__InputValue.defaultValue` (which the
+    /// spec defines as a *string* holding the literal, not a typed value). Stored pre-rendered
+    /// rather than as a structured value because the Python default is only ever available on the
+    /// far side of the PyO3 boundary, and because both consumers want the identical spelling --
+    /// deriving it twice would be two chances to disagree.
+    ///
+    /// `None` while `has_default` is `true` means the default exists but isn't expressible as a
+    /// GraphQL literal (an arbitrary object, say). Nothing is rendered in that case: a wrong
+    /// literal would be worse than an absent one, and `has_default` still keeps the argument
+    /// optional for validation.
+    pub default_value: Option<String>,
     pub description: Option<String>,
     pub deprecation_reason: Option<String>,
     pub applied_directives: Vec<AppliedDirective>,

@@ -43,7 +43,26 @@ type Query {
 ```
 
 A parameter with a default value becomes an optional argument; one without
-becomes required. Use `typing.Annotated` with `bramble.argument(...)` to
+becomes required. The default is published in the schema, so clients and
+codegen tools see it too:
+
+```python
+@bramble.field
+def search(limit: int = 10) -> str: ...
+```
+
+```graphql
+type Query {
+  search(limit: Int! = 10): String!
+}
+```
+
+Note that the argument keeps its non-null type: `Int! = 10` means "an
+integer is required *if* you pass one, but you may omit it". A default whose
+value has no GraphQL literal spelling (an arbitrary Python object) is left
+out of the SDL rather than guessed at; the argument is still optional.
+
+Use `typing.Annotated` with `bramble.argument(...)` to
 override an argument's own GraphQL name, attach a deprecation reason, or
 apply directives, independently of the Python parameter name:
 
@@ -111,3 +130,40 @@ class Query:
 
 See [Exceptions](../types/exceptions.md) for the full `GraphQLError`/
 `ErrorCode` reference.
+
+## Validation
+
+Every query is validated against the compiled schema before a single resolver
+runs -- `execute`, `execute_async`, `execute_incremental`, and
+`subscribe_async` all do it, and `Schema.validate_query(query)` runs the same
+pass on its own. Validation happens in Rust, and raises `bramble.GraphQLError`
+with the offending source location on the first violation found.
+
+The rules enforced:
+
+- **Fields exist** on the type they're selected from, and arguments are
+  declared, unique, and type-check against their literal values.
+- **Required arguments are present** -- an argument is required only if it is
+  non-null *and* has no default.
+- **Leaf fields are selected bare; composite fields need a selection set.**
+  `{ user }` where `user` is an object type is an error, as is
+  `{ name { length } }` where `name` is a `String`.
+- **Fragments target real types they could actually apply to.** Spreading a
+  fragment on `Post` inside a `User` selection can never match anything, so
+  it's rejected rather than silently ignored.
+- **Fragment spreads form no cycles.** `fragment A on T { ...A }` and mutually
+  recursive pairs are rejected outright.
+- **Variables are declared uniquely**, and directives are used only at
+  locations their declaration allows.
+- **A subscription selects exactly one root field**, whenever that's decidable
+  without knowing variable values.
+
+Two rules are deliberately not enforced, and are worth knowing about:
+
+- **Variable *usage* types aren't checked.** An argument given a variable of
+  the wrong type passes validation and fails at execution instead, because a
+  variable's coerced type isn't known without full variable-definition
+  coercion.
+- **Duplicate operation and fragment names aren't detected.** The parser keys
+  both by name internally, so a redefinition is collapsed before validation
+  ever sees the document.

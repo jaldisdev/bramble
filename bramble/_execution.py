@@ -113,13 +113,20 @@ class _ExecutionState:
 def _build_info(
     *,
     field_name: str,
+    python_name: str,
     path: Path,
     selections: Sequence["LoweredField"],
     state: _ExecutionState,
 ) -> Info:
+    """`field_name` is the name as written in the query (camelCase by default); `python_name` is
+    the resolver/attribute identifier it maps back to (`postId` -> `post_id`). They are genuinely
+    different values whenever `auto_camel_case` or an explicit `name=` override is in play, so a
+    caller must supply both -- passing the query name for each is what made `info.python_name`
+    report camelCase.
+    """
     info = Info()
     info.field_name = field_name
-    info.python_name = field_name
+    info.python_name = python_name
     info.context = state.context
     info.root_value = state.root_value
     info.variable_values = state.variable_values
@@ -430,6 +437,7 @@ async def _complete_value(
     type_info: "GraphQLTypeInfo",
     raw_value: Any,
     lowered_field: "LoweredField",
+    python_name: str,
     selections: Sequence["LoweredField"],
     path: Path,
     state: _ExecutionState,
@@ -453,6 +461,7 @@ async def _complete_value(
         return await _complete_value(
             type_info=type_info.of_type,
             raw_value=raw_value,
+            python_name=python_name,
             lowered_field=lowered_field,
             selections=selections,
             path=path,
@@ -468,6 +477,7 @@ async def _complete_value(
             return await _complete_value(
                 type_info=type_info.of_type,
                 raw_value=item,
+                python_name=python_name,
                 lowered_field=lowered_field,
                 selections=selections,
                 path=Path(key=index, prev=path),
@@ -511,7 +521,13 @@ async def _complete_value(
         return _enum_graphql_name(named_type, raw_value)
 
     if type_name in state.schema.types_by_name or type_name in state.schema.union_members_by_name:
-        info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
+        info = _build_info(
+            field_name=lowered_field.field_name,
+            python_name=python_name,
+            path=path,
+            selections=selections,
+            state=state,
+        )
         concrete_type = _resolve_concrete_type(type_name, raw_value, state.schema, info)
         return await _execute_selection_set(
             selections=selections,
@@ -563,6 +579,7 @@ async def _finish_field(
         return await _complete_value(
             type_info=field_info.type_info,
             raw_value=raw_value,
+            python_name=field_info.name,
             lowered_field=lowered_field,
             selections=selections,
             path=path,
@@ -585,7 +602,13 @@ async def _execute_field(
     state: _ExecutionState,
 ) -> Any:
     is_non_null = field_info.type_info.kind == "NON_NULL"
-    info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
+    info = _build_info(
+        field_name=lowered_field.field_name,
+        python_name=field_info.name,
+        path=path,
+        selections=selections,
+        state=state,
+    )
 
     try:
         raw_value = await _resolve_field_value(
@@ -793,7 +816,13 @@ async def _execute_field_incremental(
     selection set can keep discovering further `@defer`/`@stream` markers arbitrarily deep.
     """
     is_non_null = field_info.type_info.kind == "NON_NULL"
-    info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
+    info = _build_info(
+        field_name=lowered_field.field_name,
+        python_name=field_info.name,
+        path=path,
+        selections=selections,
+        state=state,
+    )
 
     try:
         raw_value = await _resolve_field_value(
@@ -848,6 +877,7 @@ async def _finish_field_incremental(
         return await _complete_value_incremental(
             type_info=field_info.type_info,
             raw_value=raw_value,
+            python_name=field_info.name,
             lowered_field=lowered_field,
             selections=selections,
             path=path,
@@ -865,6 +895,7 @@ async def _complete_value_incremental(
     type_info: "GraphQLTypeInfo",
     raw_value: Any,
     lowered_field: "LoweredField",
+    python_name: str,
     selections: Sequence["LoweredField"],
     path: Path,
     state: _ExecutionState,
@@ -882,6 +913,7 @@ async def _complete_value_incremental(
         return await _complete_value_incremental(
             type_info=type_info.of_type,
             raw_value=raw_value,
+            python_name=python_name,
             lowered_field=lowered_field,
             selections=selections,
             path=path,
@@ -898,6 +930,7 @@ async def _complete_value_incremental(
             return await _complete_value_incremental(
                 type_info=type_info.of_type,
                 raw_value=item,
+                python_name=python_name,
                 lowered_field=lowered_field,
                 selections=selections,
                 path=Path(key=index, prev=path),
@@ -936,7 +969,13 @@ async def _complete_value_incremental(
         return _enum_graphql_name(named_type, raw_value)
 
     if type_name in state.schema.types_by_name or type_name in state.schema.union_members_by_name:
-        info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
+        info = _build_info(
+            field_name=lowered_field.field_name,
+            python_name=python_name,
+            path=path,
+            selections=selections,
+            state=state,
+        )
         concrete_type = _resolve_concrete_type(type_name, raw_value, state.schema, info)
         return await _execute_selection_set_incremental(
             selections=selections,
@@ -983,7 +1022,13 @@ async def _start_streamed_field(
     # was never coming.
     incremental.tracker.outstanding += 1
 
-    info = _build_info(field_name=lowered_field.field_name, path=path, selections=selections, state=state)
+    info = _build_info(
+        field_name=lowered_field.field_name,
+        python_name=field_info.name,
+        path=path,
+        selections=selections,
+        state=state,
+    )
     resolver = getattr(concrete_type, field_info.name)
     kwargs = await _bind_resolver_kwargs(
         field_info, lowered_field, parent_value, info, state.schema, resolver, concrete_type, state.dependency_scope
@@ -1024,6 +1069,7 @@ async def _start_streamed_field(
             value = await _complete_value_incremental(
                 type_info=item_type_info,
                 raw_value=item,
+                python_name=field_info.name,
                 lowered_field=lowered_field,
                 selections=selections,
                 path=Path(key=index, prev=path),
@@ -1045,6 +1091,7 @@ async def _start_streamed_field(
                 path=path,
                 item_type_info=item_type_info,
                 lowered_field=lowered_field,
+                python_name=field_info.name,
                 selections=selections,
                 generator=result,
                 next_index=index,
@@ -1061,6 +1108,7 @@ async def _run_streamed_job(
     path: Path,
     item_type_info: "GraphQLTypeInfo",
     lowered_field: "LoweredField",
+    python_name: str,
     selections: Sequence["LoweredField"],
     generator: AsyncGenerator[Any, None],
     next_index: int,
@@ -1130,6 +1178,7 @@ async def _run_streamed_job(
                 value = await _complete_value_incremental(
                     type_info=item_type_info,
                     raw_value=current,
+                    python_name=python_name,
                     lowered_field=lowered_field,
                     selections=selections,
                     path=Path(key=index, prev=path),
@@ -1678,7 +1727,13 @@ async def subscribe_async(
             errors=[],
             dependency_scope=scope,
         )
-        info = _build_info(field_name=primary.field_name, path=field_path, selections=merged_selections, state=setup_state)
+        info = _build_info(
+            field_name=primary.field_name,
+            python_name=field_info.name,
+            path=field_path,
+            selections=merged_selections,
+            state=setup_state,
+        )
 
         resolver = getattr(root_type, field_info.name)
         kwargs = await _bind_resolver_kwargs(field_info, primary, root_value, info, schema, resolver, root_type, scope)

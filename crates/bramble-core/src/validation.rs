@@ -21,7 +21,8 @@ use std::collections::HashMap;
 
 use async_graphql_parser::Positioned;
 use async_graphql_parser::types::{
-    Directive, ExecutableDocument, Field, FragmentDefinition, OperationType, Selection, SelectionSet,
+    Directive, ExecutableDocument, Field, FragmentDefinition, OperationDefinition, OperationType, Selection,
+    SelectionSet,
 };
 use async_graphql_value::{Name, Value};
 
@@ -272,6 +273,29 @@ fn argument_key(argument: &ArgumentDefinition, auto_camel_case: bool) -> String 
     if auto_camel_case { to_camel_case(&argument.name) } else { argument.name.clone() }
 }
 
+/// The spec's "Argument Uniqueness" rule: one field or directive may not be given the same
+/// argument name twice. The parser keeps arguments in a `Vec`, so unlike duplicate operation or
+/// fragment *names* (which it collapses into a `HashMap` before validation ever sees them) this
+/// one is still detectable here.
+fn check_argument_uniqueness(
+    provided: &[(Positioned<Name>, Positioned<Value>)],
+    owner_name: &str,
+) -> GraphQLResult<()> {
+    let mut seen: Vec<&str> = Vec::with_capacity(provided.len());
+    for (arg_name, _) in provided {
+        let name = arg_name.node.as_str();
+        if seen.contains(&name) {
+            return Err(error_at(
+                format!("argument '{name}' is provided more than once on '{owner_name}'"),
+                ErrorCode::UnknownArgument,
+                arg_name.pos,
+            ));
+        }
+        seen.push(name);
+    }
+    Ok(())
+}
+
 /// Validates a selection/directive's provided arguments against its declared ones: every
 /// provided argument must be declared and type-check against its literal value, and every
 /// argument the schema marks required (non-null, no default) must be present.
@@ -282,6 +306,8 @@ fn check_arguments(
     pos: async_graphql_parser::Pos,
     schema: &CompiledSchema,
 ) -> GraphQLResult<()> {
+    check_argument_uniqueness(provided, owner_name)?;
+
     for (arg_name, arg_value) in provided {
         let name = arg_name.node.as_str();
         let argument_def = declared
@@ -326,6 +352,76 @@ fn is_list_type(graphql_type: &GraphQLType) -> bool {
         GraphQLType::List(_) => true,
         GraphQLType::NonNull(inner) => is_list_type(inner),
         GraphQLType::Named(_) => false,
+    }
+}
+
+/// The concrete object types a named type could actually resolve to at runtime -- an object is
+/// just itself, an interface is every type implementing it, a union is its declared members.
+/// Used for the spec's fragment-spread-possibility rule; an unregistered name yields an empty set,
+/// which callers treat as "unknown, don't reject".
+fn possible_types(name: &str, schema: &CompiledSchema) -> Vec<String> {
+    if let Some(union_def) = schema.unions.get(name) {
+        return union_def.member_names.clone();
+    }
+    match schema.types.get(name) {
+        Some(type_def) if type_def.kind == TypeKind::Interface => schema
+            .types
+            .values()
+            .filter(|candidate| candidate.interfaces.iter().any(|implemented| implemented == name))
+            .map(|candidate| candidate.name.clone())
+            .collect(),
+        Some(type_def) => vec![type_def.name.clone()],
+        None => Vec::new(),
+    }
+}
+
+/// The spec's "Fragment Spread Is Possible" rule: a fragment can only be spread somewhere its type
+/// condition could actually apply, i.e. the concrete types it covers and the ones the parent type
+/// covers overlap. Spreading `... on Dog` inside a `Cat` selection can never match anything, so the
+/// selections inside are dead code and the spec makes it an error rather than a silent no-op.
+///
+/// Deliberately lenient when either side has no known possible types (an unregistered name, or an
+/// interface nothing implements yet): reporting "impossible" for a type the schema simply doesn't
+/// describe would turn a registration gap into a confusing query error.
+fn check_fragment_is_possible(
+    condition_name: &str,
+    parent_type: &TypeDefinition,
+    pos: async_graphql_parser::Pos,
+    schema: &CompiledSchema,
+) -> GraphQLResult<()> {
+    let condition_types = possible_types(condition_name, schema);
+    let parent_types = possible_types(&parent_type.name, schema);
+    if condition_types.is_empty() || parent_types.is_empty() {
+        return Ok(());
+    }
+
+    if condition_types.iter().any(|candidate| parent_types.contains(candidate)) {
+        return Ok(());
+    }
+
+    Err(error_at(
+        format!(
+            "fragment on '{condition_name}' can never apply to '{}' -- they share no possible types",
+            parent_type.name
+        ),
+        ErrorCode::InvalidFragmentTarget,
+        pos,
+    ))
+}
+
+/// Whether a named type is a leaf (scalar or enum) rather than a composite (object/interface/
+/// union). Drives the spec's "Leaf Field Selections" rule below. `None` means the name isn't
+/// something the schema describes at all, which callers treat as "unknown, don't reject".
+fn is_leaf_type(name: &str, schema: &CompiledSchema) -> Option<bool> {
+    if matches!(name, "String" | "Int" | "Float" | "Boolean" | "ID") || schema.scalar_names.contains(name) {
+        return Some(true);
+    }
+    if schema.unions.contains_key(name) {
+        return Some(false);
+    }
+    match schema.types.get(name) {
+        Some(type_def) => Some(type_def.kind == TypeKind::Enum),
+        None => None,
     }
 }
 
@@ -377,8 +473,32 @@ fn validate_field(
         ));
     }
 
-    if !field.node.selection_set.node.items.is_empty()
-        && let Some(nested_type) = schema.types.get(field_def.graphql_type.inner_name())
+    // The spec's "Leaf Field Selections" rule, both halves. This used to be a bare
+    // `if let Some(nested_type) = schema.types.get(...)`, which silently accepted *both* mistakes:
+    // a sub-selection on a scalar (the lookup misses, so the whole check was skipped) and a missing
+    // sub-selection on an object (nothing checked emptiness at all).
+    let inner_name = field_def.graphql_type.inner_name();
+    let has_selections = !field.node.selection_set.node.items.is_empty();
+    match is_leaf_type(inner_name, schema) {
+        Some(true) if has_selections => {
+            return Err(error_at(
+                format!("field '{field_name}' is of leaf type '{inner_name}' and cannot have a selection set"),
+                ErrorCode::UnknownField,
+                field.node.selection_set.pos,
+            ));
+        }
+        Some(false) if !has_selections => {
+            return Err(error_at(
+                format!("field '{field_name}' is of composite type '{inner_name}' and must have a selection set"),
+                ErrorCode::UnknownField,
+                field.pos,
+            ));
+        }
+        _ => {}
+    }
+
+    if has_selections
+        && let Some(nested_type) = schema.types.get(inner_name)
     {
         validate_selection_set(&field.node.selection_set.node, nested_type, schema, fragments, spread_chain)?;
     }
@@ -427,13 +547,15 @@ fn validate_selection_set(
                 let target_type = match &inline.node.type_condition {
                     Some(condition) => {
                         let name = condition.node.on.node.as_str();
-                        schema.types.get(name).ok_or_else(|| {
+                        let target = schema.types.get(name).ok_or_else(|| {
                             error_at(
                                 format!("inline fragment targets unknown type '{name}'"),
                                 ErrorCode::InvalidFragmentTarget,
                                 condition.pos,
                             )
-                        })?
+                        })?;
+                        check_fragment_is_possible(name, parent_type, condition.pos, schema)?;
+                        target
                     }
                     None => parent_type,
                 };
@@ -461,6 +583,7 @@ fn validate_selection_set(
                         fragment.node.type_condition.pos,
                     )
                 })?;
+                check_fragment_is_possible(target_name, parent_type, spread.pos, schema)?;
 
                 spread_chain.push(fragment_name.to_string());
                 let result =
@@ -491,11 +614,123 @@ fn root_type_name(operation_type: OperationType, schema: &CompiledSchema) -> Gra
     }
 }
 
+/// The spec's "Variable Uniqueness" rule: one operation may not declare `$x` twice. Detectable
+/// because the parser keeps variable definitions in a `Vec` (see `check_argument_uniqueness` for
+/// why the analogous operation/fragment-name rules are not).
+fn check_variable_uniqueness(operation: &OperationDefinition) -> GraphQLResult<()> {
+    let mut seen: Vec<&str> = Vec::with_capacity(operation.variable_definitions.len());
+    for definition in &operation.variable_definitions {
+        let name = definition.node.name.node.as_str();
+        if seen.contains(&name) {
+            return Err(error_at(
+                format!("variable '${name}' is declared more than once"),
+                ErrorCode::GraphqlValidationFailed,
+                definition.pos,
+            ));
+        }
+        seen.push(name);
+    }
+    Ok(())
+}
+
+/// Counts the distinct response keys a selection set contributes, following fragment spreads and
+/// inline fragments the way `CollectFields` does. Returns `None` when any selection carries
+/// `@skip`/`@include`: those depend on variable values validation doesn't have, so the true count
+/// isn't knowable here and the caller must not draw conclusions from a guess.
+fn root_response_key_count(
+    selection_set: &SelectionSet,
+    fragments: &HashMap<Name, Positioned<FragmentDefinition>>,
+    keys: &mut Vec<String>,
+    spread_chain: &mut Vec<String>,
+) -> Option<()> {
+    for selection in &selection_set.items {
+        let directives = match &selection.node {
+            Selection::Field(field) => &field.node.directives,
+            Selection::InlineFragment(inline) => &inline.node.directives,
+            Selection::FragmentSpread(spread) => &spread.node.directives,
+        };
+        if directives
+            .iter()
+            .any(|directive| matches!(directive.node.name.node.as_str(), "skip" | "include"))
+        {
+            return None;
+        }
+
+        match &selection.node {
+            Selection::Field(field) => {
+                let key = field.node.response_key().node.as_str().to_string();
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+            Selection::InlineFragment(inline) => {
+                root_response_key_count(&inline.node.selection_set.node, fragments, keys, spread_chain)?;
+            }
+            Selection::FragmentSpread(spread) => {
+                let name = spread.node.fragment_name.node.as_str();
+                // The cycle guard in `validate_selection_set` has not necessarily run yet when this
+                // is called, so this walk needs its own -- otherwise the subscription rule would be
+                // a second way to reach the unbounded recursion fixed for validation proper.
+                if spread_chain.iter().any(|seen| seen == name) {
+                    return None;
+                }
+                let fragment = fragments.get(&Name::new(name))?;
+                spread_chain.push(name.to_string());
+                let result =
+                    root_response_key_count(&fragment.node.selection_set.node, fragments, keys, spread_chain);
+                spread_chain.pop();
+                result?;
+            }
+        }
+    }
+    Some(())
+}
+
+/// The spec's "Single Root Field" rule for subscriptions. Enforced here, at validation time, so it
+/// surfaces as a proper located validation error rather than only once execution reaches it.
+///
+/// Only decided when the count is knowable statically: a root selection carrying `@skip`/`@include`
+/// could prune down to exactly one field at execution time depending on variables, and rejecting
+/// that here would be wrong. `bramble._execution.subscribe_async` keeps its own equivalent check as
+/// the post-pruning backstop for exactly that case.
+fn check_subscription_single_root_field(
+    operation: &OperationDefinition,
+    fragments: &HashMap<Name, Positioned<FragmentDefinition>>,
+) -> GraphQLResult<()> {
+    if operation.ty != OperationType::Subscription {
+        return Ok(());
+    }
+
+    let mut keys = Vec::new();
+    if root_response_key_count(&operation.selection_set.node, fragments, &mut keys, &mut Vec::new()).is_none() {
+        return Ok(());
+    }
+
+    if keys.len() != 1 {
+        return Err(error_at(
+            format!("a subscription operation must have exactly one root field, but this one selects {}", keys.len()),
+            ErrorCode::GraphqlValidationFailed,
+            operation.selection_set.pos,
+        ));
+    }
+    Ok(())
+}
+
 /// Validates a parsed query document's chosen operation against a `CompiledSchema` (§7a): every
-/// requested field exists on its parent type, arguments are declared and type-check, directives
-/// are used at legal locations, and fragment spreads/inline fragments target real types. Pure
-/// schema-shape checking -- no Python domain objects involved, matching `is_type_of`/
-/// `resolve_type` being execution-time-only (Tasks 5/6).
+/// requested field exists on its parent type and is selected correctly for its kind (leaf fields
+/// bare, composite fields with a selection set), arguments are declared, unique, and type-check,
+/// directives are used at legal locations, fragment spreads/inline fragments target real types they
+/// could actually apply to and form no cycles, variables are uniquely declared, and a subscription
+/// selects exactly one root field. Pure schema-shape checking -- no Python domain objects involved,
+/// matching `is_type_of`/`resolve_type` being execution-time-only (Tasks 5/6).
+///
+/// Two documented holes remain, both structural rather than oversights:
+/// - **Variable usage types are never checked.** `check_value_matches_type` returns `Ok(())` for any
+///   `Value::Variable`, since a variable's coerced type isn't known without full variable-definition
+///   coercion. An argument given a wrong-typed variable is caught at execution, not here.
+/// - **Duplicate operation and fragment *names* are undetectable.** `async-graphql-parser` stores
+///   both in a `HashMap` keyed by name, so a redefinition is silently collapsed before this
+///   function ever sees the document.
 pub fn validate_query(document: &ExecutableDocument, schema: &CompiledSchema, operation_name: Option<&str>) -> GraphQLResult<()> {
     let operation = select_operation(document, operation_name)?;
     let root_name = root_type_name(operation.ty, schema)?;
@@ -507,6 +742,8 @@ pub fn validate_query(document: &ExecutableDocument, schema: &CompiledSchema, op
         ))
     })?;
 
+    check_variable_uniqueness(operation)?;
+    check_subscription_single_root_field(operation, &document.fragments)?;
     validate_selection_set(&operation.selection_set.node, root_type, schema, &document.fragments, &mut Vec::new())
 }
 
@@ -536,6 +773,7 @@ mod tests {
             graphql_name: None,
             graphql_type,
             has_default,
+            default_value: has_default.then(|| "10".to_string()),
             description: None,
             deprecation_reason: None,
             applied_directives: Vec::new(),
@@ -678,5 +916,131 @@ mod tests {
     fn an_undefined_fragment_is_still_reported_as_undefined_not_as_a_cycle() {
         let message = error_message("query { user(id: \"1\") { ...Missing } }");
         assert!(message.contains("undefined fragment 'Missing'"), "unexpected message: {message}");
+    }
+
+    // --- Leaf / composite selection sets ------------------------------------------------------
+
+    #[test]
+    fn a_selection_set_on_a_scalar_field_is_rejected() {
+        // Used to pass: the old code looked the field's type up in `schema.types`, missed (a scalar
+        // has no entry), and skipped the check entirely instead of reporting it.
+        let message = error_message("query { motto { length } }");
+        assert!(message.contains("leaf type 'String'"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn a_composite_field_without_a_selection_set_is_rejected() {
+        let message = error_message("query { user(id: \"1\") }");
+        assert!(message.contains("composite type 'User'"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn a_composite_list_field_without_a_selection_set_is_rejected() {
+        let message = error_message("query { search }");
+        assert!(message.contains("composite type 'User'"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn a_correctly_selected_leaf_and_composite_pair_still_validates() {
+        validate("query { motto user(id: \"1\") { name bio } }").expect("correct leaf/composite selections are valid");
+    }
+
+    #[test]
+    fn typename_needs_no_selection_set_even_though_it_is_not_a_declared_field() {
+        validate("query { __typename user(id: \"1\") { __typename name } }").expect("__typename is always valid");
+    }
+
+    // --- Fragment spread possibility ----------------------------------------------------------
+
+    #[test]
+    fn a_fragment_on_an_unrelated_type_is_rejected() {
+        let message = error_message("query { user(id: \"1\") { ...P } } fragment P on Post { id }");
+        assert!(message.contains("can never apply to 'User'"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn an_inline_fragment_on_an_unrelated_type_is_rejected() {
+        let message = error_message("query { user(id: \"1\") { ... on Post { id } } }");
+        assert!(message.contains("can never apply to 'User'"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn a_fragment_on_the_same_type_is_possible() {
+        validate("query { user(id: \"1\") { ...U } } fragment U on User { name }")
+            .expect("a fragment on its own parent type is always possible");
+    }
+
+    // --- Uniqueness -----------------------------------------------------------------------------
+
+    #[test]
+    fn a_repeated_argument_on_one_field_is_rejected() {
+        let message = error_message("query { user(id: \"1\", id: \"2\") { name } }");
+        assert!(message.contains("provided more than once"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn a_repeated_variable_declaration_is_rejected() {
+        let message = error_message("query Q($id: ID!, $id: ID!) { user(id: $id) { name } }");
+        assert!(message.contains("'$id' is declared more than once"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn distinct_arguments_and_variables_still_validate() {
+        validate("query Q($id: ID!, $limit: Int) { user(id: $id) { name } search(limit: $limit) { name } }")
+            .expect("distinct names are valid");
+    }
+
+    // --- Subscription single root field ---------------------------------------------------------
+
+    fn subscription_schema() -> CompiledSchema {
+        let mut schema = test_schema();
+        schema.subscription_type_name = Some("Subscription".to_string());
+        schema.types.insert(
+            "Subscription".to_string(),
+            object(
+                "Subscription",
+                vec![field("ticks", named("User"), Vec::new()), field("pings", named("User"), Vec::new())],
+            ),
+        );
+        schema
+    }
+
+    fn validate_subscription(query: &str) -> GraphQLResult<()> {
+        let document = parse_document(query).expect("query parses");
+        validate_query(&document, &subscription_schema(), None)
+    }
+
+    #[test]
+    fn a_subscription_with_two_root_fields_is_rejected_at_validation_time() {
+        let error = validate_subscription("subscription { ticks { name } pings { name } }")
+            .expect_err("two root fields must be rejected");
+        assert!(error.message.contains("exactly one root field"), "unexpected message: {}", error.message);
+    }
+
+    #[test]
+    fn a_subscription_whose_single_root_field_arrives_via_a_fragment_is_accepted() {
+        validate_subscription("subscription { ...S } fragment S on Subscription { ticks { name } }")
+            .expect("one root field through a fragment is valid");
+    }
+
+    #[test]
+    fn a_subscription_with_two_root_fields_via_a_fragment_is_rejected() {
+        let error =
+            validate_subscription("subscription { ticks { name } ...S } fragment S on Subscription { pings { name } }")
+                .expect_err("two root fields must be rejected however they are spelled");
+        assert!(error.message.contains("exactly one root field"), "unexpected message: {}", error.message);
+    }
+
+    #[test]
+    fn a_subscription_root_field_behind_skip_include_is_left_to_execution() {
+        // The count depends on variables validation doesn't have, so this must *not* be rejected
+        // here -- `subscribe_async`'s own post-pruning check is what decides it.
+        validate_subscription("subscription { ticks { name } pings @skip(if: true) { name } }")
+            .expect("a conditional root field is not statically decidable");
+    }
+
+    #[test]
+    fn a_subscription_with_one_root_field_is_accepted() {
+        validate_subscription("subscription { ticks { name } }").expect("one root field is valid");
     }
 }

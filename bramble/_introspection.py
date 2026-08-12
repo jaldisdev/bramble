@@ -137,6 +137,10 @@ class _InputValueRef:
     description: str | None
     type_ref: _TypeRef
     deprecation_reason: str | None = None
+    # The default as a GraphQL literal string (`"10"`, `'"abc"'`, `"RED"`), which is exactly what
+    # `__InputValue.defaultValue` is defined to return -- rendered once in Rust so SDL and
+    # introspection can't drift apart. `None` means no default.
+    default_value: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -181,11 +185,12 @@ class __InputValue:
 
     @bramble_field
     def default_value(parent: Parent[_InputValueRef]) -> str | None:
-        """Always `null`: bramble's schema IR records only *whether* an argument has a default, not
-        the value, so there is nothing faithful to render here (the same gap SDL rendering
-        documents for argument defaults).
+        """The default as a GraphQL literal string, per the spec's definition of
+        `__InputValue.defaultValue` -- `null` when there is no default, or when the default has no
+        faithful literal spelling (an arbitrary Python object), in which case rendering nothing is
+        better than rendering something wrong.
         """
-        return None
+        return parent.default_value
 
     @bramble_field
     def is_deprecated(parent: Parent[_InputValueRef]) -> bool:
@@ -213,6 +218,7 @@ class __Field:
                 description=argument.description,
                 type_ref=_ref_from_type_info(argument.type_info, info.schema),
                 deprecation_reason=argument.deprecation_reason,
+                default_value=argument.default_value,
             )
             for argument in parent.arguments
             if include_deprecated or argument.deprecation_reason is None
@@ -396,6 +402,7 @@ def _all_directive_refs(schema: Any) -> list[_DirectiveRef]:
                         description=argument.description,
                         type_ref=_ref_from_type_info(argument.type_info, schema),
                         deprecation_reason=argument.deprecation_reason,
+                        default_value=argument.default_value,
                     )
                     for argument in directive_info.arguments
                 ],

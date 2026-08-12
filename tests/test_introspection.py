@@ -290,3 +290,43 @@ def test_federation_schema_is_also_introspectable() -> None:
     assert result == {"data": {"__schema": {"queryType": {"name": "FederatedQuery"}}}}
     # ...and federation's own synthetic fields still work alongside introspection.
     assert "_service" in schema.execute("{ _service { sdl } }")["data"]
+
+
+# --- Argument default values ------------------------------------------------------------------------
+
+
+def test_introspection_reports_argument_default_values_as_graphql_literals() -> None:
+    """`__InputValue.defaultValue` is spec'd as a *string* holding the GraphQL literal. It used to
+    be hardcoded `None`, so every defaulted argument introspected as a required one -- codegen and
+    client-side validation would reject queries the server actually accepts.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def search(limit: int = 10, term: str = "all", cursor: str | None = None) -> str:
+            return term
+
+    schema = bramble.Schema(query=Query)
+    result = schema.execute(
+        '{ __type(name: "Query") { fields { name args { name defaultValue } } } }'
+    )
+
+    fields = {field["name"]: field for field in result["data"]["__type"]["fields"]}
+    args = {arg["name"]: arg["defaultValue"] for arg in fields["search"]["args"]}
+
+    assert args == {"limit": "10", "term": '"all"', "cursor": "null"}
+
+
+def test_introspection_reports_no_default_value_for_a_required_argument() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def greet(name: str) -> str:
+            return name
+
+    schema = bramble.Schema(query=Query)
+    result = schema.execute('{ __type(name: "Query") { fields { name args { name defaultValue } } } }')
+
+    fields = {field["name"]: field for field in result["data"]["__type"]["fields"]}
+    assert fields["greet"]["args"] == [{"name": "name", "defaultValue": None}]
