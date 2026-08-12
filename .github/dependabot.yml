@@ -9,11 +9,13 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
-    # The web-framework entries in `[project.optional-dependencies]` are *floors* -- the oldest
-    # release whose API the corresponding adapter uses -- not pins. Raising them to whatever is
-    # newest would drop downstream users for no gain, so version-updates are ignored here.
+    # The entries in `[project.optional-dependencies]` are *floors* -- the oldest release whose
+    # API the corresponding adapter or command actually uses -- not pins. Raising them to whatever
+    # is newest would drop downstream users for no gain, so version-updates are ignored here.
     # `ignore` only suppresses version-updates: security advisories still open PRs, which is the
-    # only reason we'd want to move one of these floors.
+    # only reason we'd want to move one of these floors. Deliberately absent: `python-multipart`
+    # (bramble calls `parse_form` on untrusted request bodies, so its bumps want a real look) and
+    # the `dev`-only entries, which no downstream install has to satisfy.
     ignore:
       - dependency-name: flask
         update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
@@ -26,6 +28,8 @@ updates:
       - dependency-name: channels
         update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
       - dependency-name: asgiref
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: click
         update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
 
   - package-ecosystem: github-actions
