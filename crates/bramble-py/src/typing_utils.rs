@@ -435,35 +435,13 @@ pub(crate) fn named_type_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyo3::types::PyAnyMethods;
-
-    /// Puts the repo root on `sys.path` so the embedded interpreter can `import bramble`.
-    ///
-    /// The test binary starts its own interpreter (via pyo3's `auto-initialize`), which knows
-    /// nothing about the project's virtualenv. The repo root is enough: `bramble/__init__.py` and
-    /// the compiled `bramble/_bramble.abi3.so` both live there after `maturin develop`.
-    ///
-    /// Note that the `_bramble` imported this way is the *separately built* extension module, not
-    /// this test binary's own copy of the same code. That's fine for what these tests use it for --
-    /// constructing sample decorated types to read annotations off -- but it does mean the Rust
-    /// functions under test are called directly, never through that module. Like `pytest`, these
-    /// tests require `maturin develop` to have been run first.
-    fn ensure_bramble_importable(py: Python<'_>) {
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let repo_root = repo_root.to_str().expect("repo path is valid UTF-8");
-        let sys = py.import("sys").expect("sys is importable");
-        let path = sys.getattr("path").expect("sys.path exists");
-        if !path.contains(repo_root).unwrap_or(false) {
-            path.call_method1("insert", (0, repo_root)).expect("sys.path is mutable");
-        }
-    }
 
     /// Evaluates `expression` in a namespace with `typing`, `bramble`, and a couple of decorated
     /// sample types available, then resolves the result as a field annotation. Going through real
     /// Python objects rather than hand-built mocks is the point: this crate's whole job is reading
     /// live annotations, so a mock would test the mock.
     fn resolve(py: Python<'_>, expression: &str) -> PyResult<GraphQLType> {
-        ensure_bramble_importable(py);
+        crate::test_support::ensure_bramble_importable(py);
         let globals = PyDict::new(py);
         let setup = "
 import typing, bramble
@@ -678,7 +656,7 @@ fake_typing = FakeTyping()
         use crate::lowering::python_default_to_graphql_literal;
 
         Python::attach(|py| {
-            ensure_bramble_importable(py);
+            crate::test_support::ensure_bramble_importable(py);
             let globals = PyDict::new(py);
             let setup = "
 import enum, bramble

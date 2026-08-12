@@ -572,7 +572,6 @@ pub fn process_enum(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyo3::types::PyAnyMethods;
 
     /// Builds a class from `setup` and runs **this crate's** `process_type` over it, returning the
     /// resulting `TypeDefinition`.
@@ -585,13 +584,7 @@ mod tests {
     /// crate rather than the installed copy of it.
     fn definition(py: Python<'_>, setup: &str, class_name: &str, kind: &str) -> PyResult<TypeDefinition> {
         let globals = PyDict::new(py);
-        let sys = py.import("sys")?;
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let repo_root = repo_root.to_str().unwrap();
-        let path = sys.getattr("path")?;
-        if !path.contains(repo_root).unwrap_or(false) {
-            path.call_method1("insert", (0, repo_root))?;
-        }
+        crate::test_support::ensure_bramble_importable(py);
         py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&globals), None)?;
 
         let cls = globals.get_item(class_name)?.unwrap();

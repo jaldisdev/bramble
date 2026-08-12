@@ -190,3 +190,108 @@ pub fn parse_query_document(py: Python<'_>, query: &str) -> PyResult<PyQueryDocu
 
     Ok(PyQueryDocument { operations, fragments })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_operations_variables_and_selections() {
+        Python::attach(|py| {
+            let document = parse_query_document(
+                py,
+                "query GetUser($id: ID!, $n: Int = 3) { user(id: $id) { name posts { id } } }",
+            )
+            .unwrap();
+
+            assert_eq!(document.operations.len(), 1);
+            let operation = document.operations[0].bind(py).borrow();
+            assert_eq!(operation.operation_type, "query");
+            assert_eq!(operation.name.as_deref(), Some("GetUser"));
+
+            let variables: Vec<(String, String, bool)> = operation
+                .variables
+                .iter()
+                .map(|variable| {
+                    let variable = variable.bind(py).borrow();
+                    (variable.name.clone(), variable.type_str.clone(), variable.has_default)
+                })
+                .collect();
+            assert_eq!(
+                variables,
+                vec![
+                    ("id".to_string(), "ID!".to_string(), false),
+                    ("n".to_string(), "Int".to_string(), true),
+                ]
+            );
+
+            let user = operation.selections[0].bind(py).borrow();
+            assert_eq!(user.kind, "field");
+            assert_eq!(user.field_name.as_deref(), Some("user"));
+            assert_eq!(user.selections.len(), 2, "nested selections are walked");
+        });
+    }
+
+    #[test]
+    fn an_alias_is_preserved_separately_from_the_field_name() {
+        Python::attach(|py| {
+            let document = parse_query_document(py, "{ renamed: user { name } }").unwrap();
+            let operation = document.operations[0].bind(py).borrow();
+            let field = operation.selections[0].bind(py).borrow();
+
+            assert_eq!(field.field_name.as_deref(), Some("user"));
+            assert_eq!(field.alias.as_deref(), Some("renamed"));
+        });
+    }
+
+    #[test]
+    fn fragment_spreads_stay_unflattened_for_codegen() {
+        // Unlike execution's lowering, codegen wants each named fragment as its own reusable unit.
+        Python::attach(|py| {
+            let document = parse_query_document(py, "{ user { ...Details } } fragment Details on User { name }").unwrap();
+            let operation = document.operations[0].bind(py).borrow();
+            let user = operation.selections[0].bind(py).borrow();
+            let spread = user.selections[0].bind(py).borrow();
+
+            assert_eq!(spread.kind, "fragment_spread");
+            assert_eq!(spread.fragment_name.as_deref(), Some("Details"));
+            assert!(spread.selections.is_empty(), "a spread is not expanded in place");
+
+            assert_eq!(document.fragments.len(), 1);
+            let fragment = document.fragments[0].bind(py).borrow();
+            assert_eq!(fragment.name, "Details");
+            assert_eq!(fragment.type_condition, "User");
+        });
+    }
+
+    #[test]
+    fn an_inline_fragment_records_its_type_condition() {
+        Python::attach(|py| {
+            let document = parse_query_document(py, "{ node { ... on Dog { name } } }").unwrap();
+            let operation = document.operations[0].bind(py).borrow();
+            let node = operation.selections[0].bind(py).borrow();
+            let inline = node.selections[0].bind(py).borrow();
+
+            assert_eq!(inline.kind, "inline_fragment");
+            assert_eq!(inline.type_condition.as_deref(), Some("Dog"));
+        });
+    }
+
+    #[test]
+    fn directive_names_are_recorded_on_a_selection() {
+        Python::attach(|py| {
+            let document = parse_query_document(py, "{ user @include(if: true) { name } }").unwrap();
+            let operation = document.operations[0].bind(py).borrow();
+            let field = operation.selections[0].bind(py).borrow();
+
+            assert_eq!(field.directive_names, vec!["include".to_string()]);
+        });
+    }
+
+    #[test]
+    fn a_malformed_document_surfaces_as_an_error_not_a_panic() {
+        Python::attach(|py| {
+            assert!(parse_query_document(py, "{ user(").is_err());
+        });
+    }
+}

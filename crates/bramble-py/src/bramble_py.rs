@@ -33,6 +33,51 @@ mod typing_utils;
 mod union_info;
 mod validation;
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Once;
+
+    use pyo3::prelude::*;
+
+    static INIT: Once = Once::new();
+
+    /// Puts the repo root on `sys.path` and imports `bramble`, exactly once per test binary.
+    ///
+    /// The `Once` is load-bearing: cargo runs tests in parallel threads, and while Python's import
+    /// lock keeps a concurrent `import bramble` from corrupting anything, a second thread can
+    /// observe the half-initialised module and fail with "module 'bramble' has no attribute
+    /// 'type'". Importing once up front removes the window.
+    ///
+    /// **These tests must run single-threaded** (`--test-threads=1`, set in CI). They share one
+    /// embedded interpreter, and concurrent `import bramble` across cargo's test threads makes
+    /// Python's own import machinery raise `_DeadlockError` on a partially-held module lock. The
+    /// `Once` below removes the repeated work but cannot remove that hazard, since the very first
+    /// import is what races.
+    ///
+    /// Note the `bramble._bramble` this loads is the *separately built* extension, not this test
+    /// binary's own copy of the same code -- so a Rust pyclass produced through the Python
+    /// decorators cannot be extracted here. Read those via `getattr`, or call this crate's
+    /// functions directly. Requires `maturin develop` to have been run, like `pytest` does.
+    pub(crate) fn ensure_bramble_importable(py: Python<'_>) {
+        // `detach` releases the GIL for the duration of the wait. Blocking on the `Once` *while
+        // holding* it deadlocks: the thread doing the import needs the GIL back to finish, and
+        // cannot get it from a thread parked inside `call_once`.
+        py.detach(|| {
+            INIT.call_once(|| {
+                Python::attach(|py| {
+                    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+                    let repo_root = repo_root.to_str().expect("repo path is valid UTF-8");
+                    let sys = py.import("sys").expect("sys is importable");
+                    let path = sys.getattr("path").expect("sys.path exists");
+                    path.call_method1("insert", (0, repo_root)).expect("sys.path is mutable");
+                    py.import("bramble")
+                        .expect("bramble is importable -- run `maturin develop` first");
+                });
+            });
+        });
+    }
+}
+
 #[pymodule]
 fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(type_info::process_type, module)?)?;

@@ -34,7 +34,9 @@ jobs:
       # root, so the compiled extension has to exist before `cargo test` runs. `-e` places
       # `bramble/_bramble.abi3.so` in the source tree, which is where those tests look for it.
       - run: pip install -e "."
-      - run: cargo test --workspace
+      # Single-threaded: `bramble-py`'s tests share one embedded Python interpreter, and concurrent
+      # imports across cargo's test threads trip Python's own import-deadlock detection.
+      - run: cargo test --workspace -- --test-threads=1
 
   cargo-bench:
     runs-on: ubuntu-latest
