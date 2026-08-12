@@ -178,24 +178,23 @@ never owned it to begin with (whatever created it upstream remains responsible f
   (an unresolvable annotation, an unsupported parameter kind) only surfaces the first time a query
   actually exercises it.
 
-## Providers must be module-level functions
+## How a provider is identified
 
-bramble identifies a provider by the identity of the callable object itself,
-both for the per-request cache and for `resolved_dependencies=` seeding. That
-is correct and cheap for the ordinary case -- a module-level `async def` that
-outlives every request -- but it means a provider **created fresh per request**
-(a closure, a `functools.partial`, a bound method of a short-lived object) is
-not a supported shape:
+bramble identifies a provider by the callable object itself -- that is the key
+for both the per-request cache and `resolved_dependencies=` seeding. Two
+`Depends(...)` sites referring to the same function share one cached value;
+two different functions never collide, even if one is garbage-collected and
+another later occupies its address.
 
-```python
-# Don't: a new callable object each time, so nothing can cache or seed it.
-def make_view(request):
-    async def provider() -> Client: ...
-    return Annotated[Client, bramble.Depends(provider)]
-```
+Module-level functions are the ordinary case and need no thought. A provider
+built per request (a closure, a `functools.partial`, a bound method) also
+works, with one consequence worth knowing: it is a *new object* each request,
+so it is a distinct provider each time. Caching within a request still
+applies; there is nothing to share across requests, and
+`resolved_dependencies={the_old_object: ...}` will not match it.
 
-Define providers at module level and pass per-request information through
-`Info` (`info.context`) instead:
+If you need per-request information, prefer reading it from `Info` in a
+module-level provider over building a provider per request:
 
 ```python
 async def get_client(info: bramble.Info) -> AsyncIterator[Client]:

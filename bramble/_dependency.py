@@ -25,6 +25,7 @@ import typing
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Annotated, Any
+from weakref import WeakKeyDictionary
 
 from bramble._bramble import SchemaError
 from bramble._resolver import Depends, Info
@@ -50,7 +51,12 @@ class _ParameterClassification:
     dependencies: dict[str, Depends]
 
 
-_CLASSIFICATION_CACHE: dict[Callable[..., Any], _ParameterClassification] = {}
+# Weak-keyed on purpose: a provider or resolver defined inside a function (a closure, a
+# `functools.partial`) would otherwise be kept alive for the life of the process by this cache
+# alone. Weak keys let such a callable be collected normally, at the cost of re-classifying if an
+# equivalent one is created again -- which is the right trade, since the strong-reference version
+# leaked one entry per distinct callable ever seen.
+_CLASSIFICATION_CACHE: "WeakKeyDictionary[Callable[..., Any], _ParameterClassification]" = WeakKeyDictionary()
 
 
 def _unwrap_annotated(annotation: Any) -> tuple[Any, tuple[Any, ...]]:
@@ -122,20 +128,26 @@ class DependencyScope:
     (`execute_async`/`execute`/`execute_incremental`), or to one active subscription's own lifetime
     (`subscribe_async`; created once before its event loop starts, reused for every event, never
     per-connection or per-emitted-event). `cache` stores each provider's own in-flight/completed
-    `asyncio.Task`, keyed by provider identity -- storing the *Task*, not just its eventual result,
-    is what gives single-flight for free: two sibling resolvers needing the same dependency at
-    roughly the same time both `await` the identical Task object, so the provider still only runs
+    `asyncio.Task`, keyed by the provider object itself -- storing the *Task*, not just its eventual
+    result, is what gives single-flight for free: two sibling resolvers needing the same dependency
+    at roughly the same time both `await` the identical Task object, so the provider still only runs
     once, however many concurrent callers there are. `seeded` holds a `resolved_dependencies=` value
     (see `Schema.execute_async`) -- never invoked, never torn down, since bramble never owned it.
+
+    Both maps key on the provider *object*, not `id(provider)`. An integer key is only unique while
+    the object it came from is alive: a provider created per request (a closure, a `partial`, a
+    bound method) can be collected and have its address reused by an unrelated object, silently
+    aliasing two different providers to one cache entry. Keying on the object itself makes that
+    impossible, and costs nothing -- a scope lives for one request, so holding its own providers
+    alive for that long is exactly the intended lifetime.
     """
 
-    cache: dict[int, "asyncio.Task[Any]"] = field(default_factory=dict)
-    seeded: dict[int, Any] = field(default_factory=dict)
+    cache: dict[Callable[..., Any], "asyncio.Task[Any]"] = field(default_factory=dict)
+    seeded: dict[Callable[..., Any], Any] = field(default_factory=dict)
     generators: list[AsyncIterator[Any]] = field(default_factory=list)
 
     def seed(self, resolved_dependencies: dict[Callable[..., Any], Any] | None) -> None:
-        for provider, value in (resolved_dependencies or {}).items():
-            self.seeded[id(provider)] = value
+        self.seeded.update(resolved_dependencies or {})
 
     async def aclose(self) -> None:
         """Tears down every generator-based provider's own `finally` block (`agen.aclose()` throws
@@ -190,10 +202,9 @@ async def _provider_kwargs(provider: Callable[..., Any], *, info: Info, scope: D
 
 async def _resolve_dependency(marker: Depends, *, info: Info, scope: DependencyScope) -> Any:
     provider = marker.provider
-    key = id(provider)
 
-    if marker.use_cache and key in scope.seeded:
-        return scope.seeded[key]
+    if marker.use_cache and provider in scope.seeded:
+        return scope.seeded[provider]
 
     async def _run() -> Any:
         kwargs = await _provider_kwargs(provider, info=info, scope=scope)
@@ -205,10 +216,10 @@ async def _resolve_dependency(marker: Depends, *, info: Info, scope: DependencyS
     if not marker.use_cache:
         return await _run()
 
-    task = scope.cache.get(key)
+    task = scope.cache.get(provider)
     if task is None:
         task = asyncio.ensure_future(_run())
-        scope.cache[key] = task
+        scope.cache[provider] = task
     return await task
 
 

@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import Annotated
 
 import bramble
@@ -562,3 +562,75 @@ def test_subscription_teardown_runs_exactly_once_on_error() -> None:
 
     asyncio.run(scenario())
     assert _error_teardown_events == ["open", "close"]
+
+
+def test_distinct_per_request_providers_are_not_aliased_by_the_cache() -> None:
+    """The cache used to key on `id(provider)`. An integer key is only unique while the object it
+    came from is alive, so a provider built per request (a closure, a `partial`) could be collected
+    and have its address reused, aliasing two unrelated providers onto one cache entry. Keying on
+    the object itself makes that structurally impossible.
+
+    Driven through `DependencyScope` directly rather than a schema: the providers have to be
+    function-local to be the shape under test, and a local name can't be resolved out of an
+    `Annotated[...]` annotation.
+    """
+    from bramble._dependency import DependencyScope, _resolve_dependency
+
+    calls: list[str] = []
+
+    def make_provider(tag: str) -> Callable[[], str]:
+        def provider() -> str:
+            calls.append(tag)
+            return tag
+
+        return provider
+
+    first, second = make_provider("first"), make_provider("second")
+    scope = DependencyScope()
+
+    async def run() -> tuple[str, str]:
+        a = await _resolve_dependency(bramble.Depends(first), info=None, scope=scope)
+        b = await _resolve_dependency(bramble.Depends(second), info=None, scope=scope)
+        # The same provider a second time must hit the cache rather than run again.
+        again = await _resolve_dependency(bramble.Depends(first), info=None, scope=scope)
+        assert again == a
+        return a, b
+
+    assert asyncio.run(run()) == ("first", "second")
+    assert sorted(calls) == ["first", "second"], "each distinct provider must run exactly once"
+
+
+def test_seeding_matches_the_provider_object_not_its_address() -> None:
+    from bramble._dependency import DependencyScope, _resolve_dependency
+
+    def provider() -> str:
+        raise AssertionError("a seeded provider must never be invoked")
+
+    scope = DependencyScope()
+    scope.seed({provider: "seeded"})
+
+    async def run() -> str:
+        return await _resolve_dependency(bramble.Depends(provider), info=None, scope=scope)
+
+    assert asyncio.run(run()) == "seeded"
+
+
+def test_classification_cache_does_not_pin_locally_defined_callables() -> None:
+    # The mirror-image leak: a strong-keyed cache held every closure ever classified for the life
+    # of the process.
+    import gc
+    import weakref
+
+    from bramble._dependency import _CLASSIFICATION_CACHE, _classify_parameters
+
+    def transient() -> str:
+        return "x"
+
+    _classify_parameters(transient, None)
+    assert transient in _CLASSIFICATION_CACHE
+
+    reference = weakref.ref(transient)
+    del transient
+    gc.collect()
+
+    assert reference() is None, "the cache must not keep a locally-defined callable alive"
