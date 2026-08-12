@@ -156,3 +156,25 @@ class _RenamedLazyQuery:
     @bramble.field
     def thing() -> Annotated["Thing", bramble.lazy("tests.lazy_fixtures.renamed")]:
         raise NotImplementedError
+
+
+def test_a_lazy_annotated_resolver_executes() -> None:
+    """The schema building is not enough: a resolver's parameters are classified again at *request*
+    time (to find `Depends` markers, which the Rust IR does not carry), and that classifier has to
+    seed the same lazy placeholders. Without them a resolver annotated
+    `-> Annotated["Other", bramble.lazy(...)]` raised `NameError` as a *field* error on exactly the
+    fields that use `bramble.lazy`, while the schema itself built perfectly.
+    """
+    schema = bramble.Schema(query=_LazyExecutionQuery)
+
+    result = schema.execute("{ comment { body } }")
+
+    assert result.get("errors") is None
+    assert result["data"] == {"comment": {"body": "hello"}}
+
+
+@bramble.type
+class _LazyExecutionQuery:
+    @bramble.field
+    def comment() -> Comment:
+        return Comment(body="hello", author=None)

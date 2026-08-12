@@ -28,6 +28,7 @@ from typing import Annotated, Any
 from weakref import WeakKeyDictionary
 
 from bramble._bramble import SchemaError
+from bramble._lazy import namespace_for_callable, namespace_for_class
 from bramble._resolver import Depends, Info
 
 # --- Classification (§3c) -------------------------------------------------------------------------
@@ -82,6 +83,13 @@ def _classify_parameters(func: Callable[..., Any], cls: type | None) -> _Paramet
     localns: dict[str, Any] = {}
     if cls is not None:
         localns[cls.__name__] = cls
+        localns.update(namespace_for_class(cls))
+    # The lazy placeholders matter as much here as they do on the Rust side: this runs per request,
+    # and a resolver annotated `-> Annotated["Other", bramble.lazy(...)]` has a forward reference
+    # that nothing else in scope can resolve. Without seeding them the lookup raises `NameError`,
+    # which surfaced as a *field* error on exactly the fields that use `bramble.lazy` -- while the
+    # schema itself built perfectly, because Rust's own classifier does seed them.
+    localns.update(namespace_for_callable(func))
 
     try:
         hints = typing.get_type_hints(func, localns=localns, include_extras=True)
