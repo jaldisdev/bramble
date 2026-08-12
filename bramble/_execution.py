@@ -362,6 +362,34 @@ def _field_chain(
     return chain
 
 
+def _default_resolver_chain(
+    concrete_type: type, field_info: "FieldInfo", extensions: Sequence[Any]
+) -> Callable[..., Any]:
+    """The extension chain for a field with no resolver of its own, wrapping the default resolver.
+
+    A field declaring `bramble.field(extensions=[...])` but no resolver used to have its extensions
+    registered and then silently skipped, because reading the attribute off the parent returned
+    early and never built a chain. Permissions were already checked on that same path, so the
+    asymmetry was an oversight rather than a decision.
+
+    `info.schema` supplies `default_resolver` rather than a captured `schema`, so a class shared
+    between two schemas with different configurations cannot end up cached against the wrong one.
+    """
+    cache = concrete_type.__dict__.get("__bramble_field_chains__")
+    if cache is None:
+        cache = {}
+        concrete_type.__bramble_field_chains__ = cache
+    chain = cache.get(field_info.name)
+    if chain is None:
+
+        def read_attribute(source: Any, info: Info, **kwargs: Any) -> Any:
+            return info.schema.config.default_resolver(source, field_info.name)
+
+        chain = build_field_resolver(read_attribute, extensions)
+        cache[field_info.name] = chain
+    return chain
+
+
 def _wrap_with_schema_extension(extension: Any, next_: Callable[..., Any]) -> Callable[..., Any]:
     async def wrapped(
         source: Any, info: Info, _extension: Any = extension, _next: Callable[..., Any] = next_, **kwargs: Any
@@ -386,7 +414,20 @@ async def _resolve_field_value(
 ) -> Any:
     if not field_info.has_resolver:
         await _check_field_permissions(field_info, concrete_type, parent_value, info, {})
-        return schema.config.default_resolver(parent_value, field_info.name)
+        extensions = getattr(concrete_type, "__bramble_field_extensions__", {}).get(field_info.name, ())
+        if not extensions and not state_resolve_extensions:
+            # The common path for a plain data field: read the attribute, no wrapping at all.
+            return schema.config.default_resolver(parent_value, field_info.name)
+
+        # A data field can still carry `extensions=[...]`, and a `SchemaExtension.resolve` is
+        # documented as wrapping *every* field resolution -- neither can be honoured by returning
+        # the attribute directly, so this field goes through the same chain a resolver-backed one
+        # does, with the default resolver as its innermost call. There are no arguments to bind or
+        # map: a field without a resolver has none.
+        chain = _default_resolver_chain(concrete_type, field_info, extensions)
+        for extension in reversed(state_resolve_extensions):
+            chain = _wrap_with_schema_extension(extension, chain)
+        return await chain(parent_value, info)
 
     resolver = getattr(concrete_type, field_info.name)
     kwargs = await _bind_resolver_kwargs(field_info, lowered_field, parent_value, info, schema, resolver, concrete_type, scope)

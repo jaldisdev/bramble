@@ -27,6 +27,7 @@ from typing import Annotated, Any
 import pytest
 
 import bramble
+from bramble.schema.config import SchemaConfig
 
 # Shared trace list. Each test clears it first; extensions append to it so ordering assertions can
 # check the exact sequence rather than merely that a hook fired.
@@ -510,6 +511,91 @@ def test_apply_runs_once_at_schema_build_time() -> None:
     schema.execute("{ greeting }", root_value=Query())
 
     assert _AppliedRecorder.seen == ["greeting"], "apply() is build-time, not per-request"
+
+
+# --- Fields with no resolver of their own -------------------------------------------------------------
+
+# A data field's extensions used to be registered, `apply()`-ed, and then never run: reading the
+# attribute off the parent returned before any chain was built. Permissions were already honoured on
+# that same path (see `docs/guides/permissions.md`), so the two disagreed about whether a field
+# without a resolver participates in the pipeline. It does.
+
+
+class _Shout(bramble.FieldExtension):
+    async def resolve_async(self, next_, source, info, **kwargs):
+        return (await next_(source, info, **kwargs)).upper()
+
+
+@bramble.type
+class _DataFieldQuery:
+    decorated: str = bramble.field(default="quiet", extensions=[_Shout])
+    plain: str = bramble.field(default="quiet")
+
+
+# Deliberately not the query root: `Schema()` re-decorates a *subclass* of the root to inject the
+# introspection meta-fields, so the root's own chains cache on that subclass rather than on the
+# class written here. A nested type is the only place the cache is observable.
+@bramble.type
+class _DataFieldChild:
+    value: str = bramble.field(default="x", extensions=[_Shout])
+
+
+@bramble.type
+class _NestedQuery:
+    @bramble.field
+    def child() -> _DataFieldChild:
+        return _DataFieldChild()
+
+
+def test_field_extensions_run_on_a_field_without_a_resolver() -> None:
+    result = bramble.Schema(query=_DataFieldQuery).execute(
+        "{ decorated plain }", root_value=_DataFieldQuery()
+    )
+    assert result["data"] == {"decorated": "QUIET", "plain": "quiet"}
+
+
+def test_schema_extension_resolve_sees_fields_without_a_resolver() -> None:
+    """`SchemaExtension.resolve` is documented as wrapping *every* field resolution, which has to
+    include the ones backed by an attribute read rather than a resolver.
+    """
+    seen: list[str] = []
+
+    class Watcher(bramble.SchemaExtension):
+        async def resolve(self, next_, source, info, **kwargs):
+            seen.append(info.python_name)
+            return await next_(source, info, **kwargs)
+
+    schema = bramble.Schema(query=_DataFieldQuery, extensions=[Watcher])
+    schema.execute("{ decorated plain }", root_value=_DataFieldQuery())
+
+    assert seen == ["decorated", "plain"]
+
+
+def test_a_data_field_chain_is_built_once_and_cached() -> None:
+    schema = bramble.Schema(query=_NestedQuery)
+    schema.execute("{ child { value } }")
+    first = _DataFieldChild.__dict__["__bramble_field_chains__"]["value"]
+    schema.execute("{ child { value } }")
+    assert _DataFieldChild.__dict__["__bramble_field_chains__"]["value"] is first
+
+
+def test_a_data_field_chain_respects_each_schemas_own_default_resolver() -> None:
+    """The chain is cached on the class, so it must read `default_resolver` from the executing
+    schema rather than closing over whichever one built it first.
+    """
+
+    @bramble.type
+    class Query:
+        value: str = bramble.field(default="x", extensions=[_Shout])
+
+    attribute_schema = bramble.Schema(query=Query)
+    dict_schema = bramble.Schema(
+        query=Query,
+        config=SchemaConfig(default_resolver=lambda parent, name: parent["value"]),
+    )
+
+    assert attribute_schema.execute("{ value }", root_value=Query())["data"] == {"value": "X"}
+    assert dict_schema.execute("{ value }", root_value={"value": "y"})["data"] == {"value": "Y"}
 
 
 # --- Interaction with the rest of the field pipeline ---------------------------------------------------
