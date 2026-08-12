@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import warnings
 from collections.abc import AsyncGenerator
 from typing import Annotated, Any
 
@@ -735,7 +736,8 @@ def test_an_extension_instance_is_reused_while_a_class_is_per_request() -> None:
 
     TRACE.clear()
     shared = Counter()
-    schema = bramble.Schema(query=_Query, extensions=[shared])
+    with pytest.warns(DeprecationWarning, match="shared by every request"):
+        schema = bramble.Schema(query=_Query, extensions=[shared])
     schema.execute("{ greeting }")
     schema.execute("{ greeting }")
     assert TRACE == ["count=1", "count=2"], "an instance carries state across requests"
@@ -780,3 +782,94 @@ def test_a_field_argument_may_be_named_like_the_hooks_own_parameters() -> None:
 
     assert result.get("errors") is None
     assert result["data"] == {"log": "SOURCE=API INFO=X"}
+
+
+# --- a factory callable, for an extension that needs constructor arguments ------------------------
+#
+# The old choice was between a class you cannot configure and an instance that is unsafe: bramble
+# assigns `execution_context` onto a registered instance per request, so any hook reading
+# `self.execution_context` -- the documented way to reach the result and errors -- observes another
+# request's context as soon as two overlap. A factory is called per request, so the object a hook
+# reads belongs to that request.
+
+
+def test_a_factory_callable_is_accepted_and_configured() -> None:
+    class Labelled(bramble.SchemaExtension):
+        def __init__(self, label: str, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.label = label
+
+        def get_results(self) -> dict[str, Any]:
+            return {"label": self.label}
+
+    schema = bramble.Schema(query=_Query, extensions=[lambda: Labelled("configured")])
+    result = schema.execute("{ greeting }")
+
+    assert result["extensions"]["label"] == "configured"
+
+
+def test_a_factory_produces_a_fresh_instance_per_request() -> None:
+    class Counter(bramble.SchemaExtension):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.count = 0
+
+        def on_operation(self):
+            self.count += 1
+            yield
+            TRACE.append(f"count={self.count}")
+
+    TRACE.clear()
+    schema = bramble.Schema(query=_Query, extensions=[lambda: Counter()])
+    schema.execute("{ greeting }")
+    schema.execute("{ greeting }")
+
+    assert TRACE == ["count=1", "count=1"], "a factory must not carry state across requests"
+
+
+def test_a_factory_gets_its_own_execution_context() -> None:
+    """The race the deprecation exists for: with a shared instance every request overwrites the
+    same attribute, so a hook can read a context belonging to a request it is not part of.
+    """
+    # The objects themselves, not their `id()`s -- an id is only unique while its object is alive,
+    # and the first context is collectable by the time the second request runs.
+    seen: list[Any] = []
+
+    class Recorder(bramble.SchemaExtension):
+        def on_operation(self):
+            seen.append(self.execution_context)
+            yield
+
+    schema = bramble.Schema(query=_Query, extensions=[lambda: Recorder()])
+    schema.execute("{ greeting }")
+    schema.execute("{ greeting }")
+
+    assert seen[0] is not seen[1], "each request must see its own execution context"
+
+
+def test_a_factory_returning_a_non_extension_still_fails() -> None:
+    """Deferred to request time -- a factory's result cannot be inspected at build time without
+    constructing an extension there.
+    """
+    schema = bramble.Schema(query=_Query, extensions=[lambda: object()])
+
+    with pytest.raises(AttributeError):
+        schema.execute("{ greeting }")
+
+
+def test_passing_a_class_is_not_deprecated() -> None:
+    class Noop(bramble.SchemaExtension):
+        pass
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        bramble.Schema(query=_Query, extensions=[Noop])
+
+
+def test_passing_a_factory_is_not_deprecated() -> None:
+    class Noop(bramble.SchemaExtension):
+        pass
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        bramble.Schema(query=_Query, extensions=[lambda: Noop()])

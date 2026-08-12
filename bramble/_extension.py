@@ -238,8 +238,18 @@ class ExtensionRunner:
         self.execution_context = execution_context
         self.extensions: list[SchemaExtension] = []
         for extension in extensions:
-            # A class is instantiated per request; an instance is used as given.
-            instance = extension(execution_context=execution_context) if isinstance(extension, type) else extension
+            if isinstance(extension, type):
+                # A class is instantiated per request.
+                instance = extension(execution_context=execution_context)
+            elif callable(extension):
+                # A zero-argument factory, for an extension that needs constructor arguments: it
+                # too yields a fresh instance per request, so `execution_context` below is set on
+                # an object this request owns.
+                instance = extension()
+            else:
+                # A shared instance, deprecated at registration: `execution_context` is assigned
+                # onto an object every concurrent request also holds.
+                instance = extension
             instance.execution_context = execution_context
             self.extensions.append(instance)
 

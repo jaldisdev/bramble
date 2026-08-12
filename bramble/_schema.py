@@ -22,6 +22,7 @@ from __future__ import annotations
 import dataclasses
 import types as types_module
 import typing
+import warnings
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Callable, Sequence
 from typing import Any
 
@@ -401,11 +402,28 @@ class Schema:
             raise SchemaError("Schema(query=...) must be a @bramble.type-decorated class")
 
         for extension in extensions:
+            # A zero-argument factory is the configured-extension route: it is called per request,
+            # so an extension needing constructor arguments no longer has to be registered as a
+            # shared instance. Recognised by being callable but not a class -- a class is already
+            # handled below, and calling one here to inspect its result would construct an
+            # extension at schema-build time.
+            if callable(extension) and not isinstance(extension, _type):
+                continue
             candidate = extension if isinstance(extension, _type) else _type(extension)
             if not issubclass(candidate, SchemaExtension):
                 raise SchemaError(
                     f"'{candidate.__name__}' passed to Schema(extensions=...) is not a "
                     "bramble.SchemaExtension subclass"
+                )
+            if not isinstance(extension, _type):
+                warnings.warn(
+                    f"Passing a {candidate.__name__} *instance* to Schema(extensions=...) is "
+                    "deprecated: the instance is shared by every request, and bramble assigns "
+                    "`execution_context` onto it per request, so any hook reading "
+                    "`self.execution_context` races once two requests overlap. Pass the class "
+                    "itself, or a zero-argument callable returning a fresh instance.",
+                    DeprecationWarning,
+                    stacklevel=3,
                 )
 
         for directive_function in directives:

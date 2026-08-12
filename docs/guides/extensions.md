@@ -37,10 +37,23 @@ class Timing(bramble.SchemaExtension):
 schema = bramble.Schema(query=Query, extensions=[Timing])
 ```
 
-An extension is registered as a **class or an instance**. A class is
-instantiated once per request, which is what makes per-request state (a start
-time, a counter) safe; an instance is reused as-is, and is your responsibility
-to keep concurrency-safe.
+An extension is registered as a **class** or as a **zero-argument callable**
+returning one. Either way bramble builds a fresh instance per request, which is
+what makes per-request state (a start time, a counter) safe. The callable form
+is how an extension that needs configuration is registered:
+
+```python
+schema = bramble.Schema(
+    query=Query,
+    extensions=[MyTracing, lambda: RequiresRole("admin")],
+)
+```
+
+Passing an **instance** still works but is deprecated. The instance is shared by
+every request, and bramble assigns `execution_context` onto it per request -- so
+any hook reading `self.execution_context`, which is the documented way to reach
+the result and errors, observes another request's context as soon as two
+overlap. Registering a callable is the direct replacement.
 
 ### Hooks
 
