@@ -362,7 +362,11 @@ class __Type:
     def of_type(parent: Parent[_TypeRef]) -> "__Type | None":
         return parent.of_type
 
-    @bramble_field
+    # Named explicitly because the specification's own spelling is irregular: `specifiedByURL`, not
+    # the `specifiedByUrl` that camel-casing this identifier produces. Every standard introspection
+    # query (graphql-core's, Apollo's, GraphiQL's) asks for the former, and was answered with
+    # "field 'specifiedByURL' does not exist on type '__Type'".
+    @bramble_field(name="specifiedByURL")
     def specified_by_url(parent: Parent[_TypeRef], info: Info) -> str | None:
         if parent.name is None:
             return None
