@@ -53,6 +53,15 @@ class Field(dataclasses.Field):
             raise SchemaError("a field cannot specify both 'default' and 'default_factory'")
         if resolver is not None and (default is not dataclasses.MISSING or default_factory is not dataclasses.MISSING):
             raise SchemaError("a field with a resolver cannot also declare a default value")
+        # Field extensions have no hook point in the execution pipeline yet. The parameter exists so
+        # the eventual API is already shaped, but accepting values for it silently would be worse
+        # than rejecting them: a user porting a tracing/auth/caching extension would get a schema
+        # that builds, runs, and quietly does none of what the extension was for.
+        if extensions:
+            raise SchemaError(
+                "bramble.field(extensions=...) is not implemented yet -- field extensions have no "
+                "execution hook point, so any value here would be silently ignored"
+            )
 
         # A resolver-backed field is computed at execution time, not user-supplied, so it's
         # excluded from the generated __init__/__repr__/__eq__. This is also why Field needs to

@@ -368,3 +368,25 @@ def test_repr_of_a_type_instance_shows_field_values() -> None:
     assert "Point" in representation
     assert "x=1" in representation
     assert "y=2" in representation
+
+
+def test_field_extensions_are_rejected_rather_than_silently_ignored() -> None:
+    """`extensions=` has no execution hook point yet. Accepting a value and dropping it produced a
+    schema that built and ran while doing none of what the extension was for -- the worst outcome.
+    """
+
+    class _Extension:
+        pass
+
+    with pytest.raises(bramble.SchemaError, match="not implemented yet"):
+        bramble.field(extensions=[_Extension()])
+
+
+def test_field_without_extensions_is_unaffected() -> None:
+    @bramble.type
+    class Query:
+        greeting: str = bramble.field(default="hi", extensions=[])
+
+    assert bramble.Schema(query=Query).execute("{ greeting }", root_value=Query()) == {
+        "data": {"greeting": "hi"}
+    }

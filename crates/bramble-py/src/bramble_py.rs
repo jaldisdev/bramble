@@ -67,6 +67,9 @@ fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<compiled_schema::PyCompiledSchema>()?;
     module.add_function(wrap_pyfunction!(validation::validate_query, module)?)?;
     module.add_function(wrap_pyfunction!(persisted_query::resolve_persisted_query, module)?)?;
+    module.add_function(wrap_pyfunction!(lowering::lower_persisted_document, module)?)?;
+    module.add_class::<persisted_query::PyPersistedDocument>()?;
+    module.add_class::<persisted_query::PyPersistedQueryResult>()?;
     module.add_function(wrap_pyfunction!(sdl::render_sdl, module)?)?;
     module.add_function(wrap_pyfunction!(query_document::parse_query_document, module)?)?;
     module.add_class::<query_document::PyQueryDocument>()?;

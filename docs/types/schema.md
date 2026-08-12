@@ -54,7 +54,8 @@ the decorators' own isolated per-class registrations.
 ### `execute` / `execute_async`
 
 ```python
-schema.execute(query: str, *, variable_values=None, context=None, root_value=None, operation_name=None) -> dict
+schema.execute(query: str | None, *, variable_values=None, context=None, root_value=None, operation_name=None,
+               resolved_dependencies=None, document=None) -> dict
 ```
 
 Runs `query` and returns a spec-shaped `{"data": ..., "errors": [...]}`
@@ -62,10 +63,16 @@ response. `execute` is a synchronous convenience wrapper -- it can't be
 called from inside an already-running event loop; use `execute_async` there
 instead. See [Queries](../general/queries.md).
 
+`document=` takes a prepared [persisted-query](../guides/persisted-queries.md)
+document, skipping parsing and validation for a query that was already
+registered; `query` may then be `None`. The same parameter is accepted by
+`execute_incremental` and `subscribe_async`.
+
 ### `execute_incremental`
 
 ```python
-schema.execute_incremental(query: str, *, variable_values=None, context=None, root_value=None, operation_name=None) -> AsyncGenerator[dict, None]
+schema.execute_incremental(query: str | None, *, variable_values=None, context=None, root_value=None,
+                           operation_name=None, resolved_dependencies=None, document=None) -> AsyncGenerator[dict, None]
 ```
 
 Runs a query/mutation operation using `@defer`/`@stream`, yielding the
@@ -75,7 +82,8 @@ See [`@defer` and `@stream`](defer-and-stream.md).
 ### `subscribe_async`
 
 ```python
-schema.subscribe_async(query: str, *, variable_values=None, context=None, root_value=None, operation_name=None) -> AsyncGenerator[dict, None]
+schema.subscribe_async(query: str | None, *, variable_values=None, context=None, root_value=None,
+                       operation_name=None, resolved_dependencies=None, document=None) -> AsyncGenerator[dict, None]
 ```
 
 Runs a subscription operation, yielding one response per source event.
@@ -99,7 +107,18 @@ schema.resolve_persisted_query(sha256_hash: str, *, query: str | None = None, op
 ```
 
 Implements the Automatic Persisted Queries protocol against this schema's
-own cache. See [Persisted queries](../guides/persisted-queries.md).
+own cache, returning whether the hash was already cached.
+
+### `prepare_persisted_query`
+
+```python
+schema.prepare_persisted_query(sha256_hash: str, *, query: str | None = None, operation_name: str | None = None)
+```
+
+The same protocol, but returns an object with `.cache_hit` and `.document` --
+pass `.document` to an execute method to run it without re-parsing or
+re-validating. This is what makes a cache hit actually cheaper. See
+[Persisted queries](../guides/persisted-queries.md).
 
 ### `to_sdl`
 

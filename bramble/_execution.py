@@ -28,7 +28,7 @@ from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from bramble._bramble import lower_query, validate_query
+from bramble._bramble import lower_persisted_document, lower_query, validate_query
 from bramble._dependency import DependencyScope, resolve_dependencies
 from bramble._error import ErrorCode, GraphQLError
 from bramble._error import error_to_dict as _error_to_dict
@@ -38,7 +38,7 @@ from bramble._union import resolve_union_type
 from bramble.directive import apply_directive
 
 if TYPE_CHECKING:
-    from bramble._bramble import ArgumentInfo, FieldInfo, GraphQLTypeInfo, LoweredField
+    from bramble._bramble import ArgumentInfo, FieldInfo, GraphQLTypeInfo, LoweredField, PersistedDocument
     from bramble._schema import Schema
 
 
@@ -1434,6 +1434,45 @@ _ROOT_TYPE_ATTRIBUTE_BY_OPERATION = {
 }
 
 
+def _prepare_operation(
+    schema: "Schema",
+    query: str | None,
+    *,
+    variable_values: dict[str, Any],
+    operation_name: str | None,
+    document: "PersistedDocument | None",
+) -> tuple[str, list["LoweredField"], str | None]:
+    """Turns a request into `(operation_type, lowered_fields, query_source)`, taking the cheap path
+    when the caller already holds a validated document.
+
+    Without `document` this is the normal route: validate the query text against the compiled
+    schema, then parse and lower it. With one (an APQ cache hit, via
+    `Schema.prepare_persisted_query`) both the parse and the validation were already done when the
+    query was first registered, so only lowering runs -- lowering genuinely has to be redone per
+    request, since `@skip`/`@include` evaluation and argument substitution both depend on *this*
+    request's variable values.
+
+    The returned query source is whatever text is actually known: `None` for a hash-only replay,
+    where the client never sent the query and reconstructing it from the AST would mean handing
+    resolvers a string the client never wrote.
+    """
+    if document is not None:
+        operation_type, fields = lower_persisted_document(
+            document, variable_values=variable_values, operation_name=operation_name
+        )
+        return operation_type, fields, document.query_text or None
+
+    if query is None:
+        raise GraphQLError(
+            "no query text and no persisted document supplied",
+            code=ErrorCode.GRAPHQL_VALIDATION_FAILED,
+        )
+
+    validate_query(query, schema._compiled, operation_name)
+    operation_type, fields = lower_query(query, variable_values=variable_values, operation_name=operation_name)
+    return operation_type, fields, query
+
+
 def _resolve_execution_context(schema: "Schema", context: Any) -> Any:
     if context is None and schema.execution_context_class is not None:
         return schema.execution_context_class()
@@ -1442,13 +1481,14 @@ def _resolve_execution_context(schema: "Schema", context: Any) -> Any:
 
 async def execute_async(
     schema: "Schema",
-    query: str,
+    query: str | None,
     *,
     variable_values: dict[str, Any] | None = None,
     context: Any = None,
     root_value: Any = None,
     operation_name: str | None = None,
     resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
+    document: "PersistedDocument | None" = None,
 ) -> dict[str, Any]:
     """Executes `query` against `schema` (§7a/§8/§11): validates and lowers it, then walks the
     result with full null-bubbling. A malformed query, a schema-shape validation failure, or an
@@ -1463,8 +1503,13 @@ async def execute_async(
     """
     resolved_variable_values = variable_values or {}
 
-    validate_query(query, schema._compiled, operation_name)
-    operation_type, fields = lower_query(query, variable_values=resolved_variable_values, operation_name=operation_name)
+    operation_type, fields, query_source = _prepare_operation(
+        schema,
+        query,
+        variable_values=resolved_variable_values,
+        operation_name=operation_name,
+        document=document,
+    )
 
     if operation_type == "subscription":
         raise GraphQLError(
@@ -1521,13 +1566,14 @@ async def execute_async(
 
 def execute(
     schema: "Schema",
-    query: str,
+    query: str | None,
     *,
     variable_values: dict[str, Any] | None = None,
     context: Any = None,
     root_value: Any = None,
     operation_name: str | None = None,
     resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
+    document: "PersistedDocument | None" = None,
 ) -> dict[str, Any]:
     """Synchronous convenience wrapper around `execute_async` for schemas whose resolvers are all
     synchronous. Uses `asyncio.run`, so (like that function) it cannot be called from within an
@@ -1542,19 +1588,21 @@ def execute(
             root_value=root_value,
             operation_name=operation_name,
             resolved_dependencies=resolved_dependencies,
+            document=document,
         )
     )
 
 
 async def execute_incremental(
     schema: "Schema",
-    query: str,
+    query: str | None,
     *,
     variable_values: dict[str, Any] | None = None,
     context: Any = None,
     root_value: Any = None,
     operation_name: str | None = None,
     resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
+    document: "PersistedDocument | None" = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Executes a query/mutation operation using `@defer`/`@stream`, yielding one spec-shaped
     payload at a time: the initial `{"data": ..., "hasNext": bool}` (deferred subtrees omitted,
@@ -1575,8 +1623,13 @@ async def execute_incremental(
     """
     resolved_variable_values = variable_values or {}
 
-    validate_query(query, schema._compiled, operation_name)
-    operation_type, fields = lower_query(query, variable_values=resolved_variable_values, operation_name=operation_name)
+    operation_type, fields, query_source = _prepare_operation(
+        schema,
+        query,
+        variable_values=resolved_variable_values,
+        operation_name=operation_name,
+        document=document,
+    )
 
     if operation_type not in ("query", "mutation"):
         raise GraphQLError(
@@ -1643,13 +1696,14 @@ async def execute_incremental(
 
 async def subscribe_async(
     schema: "Schema",
-    query: str,
+    query: str | None,
     *,
     variable_values: dict[str, Any] | None = None,
     context: Any = None,
     root_value: Any = None,
     operation_name: str | None = None,
     resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
+    document: "PersistedDocument | None" = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Executes a subscription operation, yielding one spec-shaped `{"data": ..., "errors": [...]}`
     response per event. Per the GraphQL spec's two-phase model: `CreateSourceEventStream` (the
@@ -1678,8 +1732,13 @@ async def subscribe_async(
     """
     resolved_variable_values = variable_values or {}
 
-    validate_query(query, schema._compiled, operation_name)
-    operation_type, fields = lower_query(query, variable_values=resolved_variable_values, operation_name=operation_name)
+    operation_type, fields, query_source = _prepare_operation(
+        schema,
+        query,
+        variable_values=resolved_variable_values,
+        operation_name=operation_name,
+        document=document,
+    )
 
     if operation_type != "subscription":
         raise GraphQLError(
@@ -1723,7 +1782,7 @@ async def subscribe_async(
             context=context,
             root_value=root_value,
             variable_values=resolved_variable_values,
-            query=query,
+            query=query_source,
             errors=[],
             dependency_scope=scope,
         )

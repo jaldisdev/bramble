@@ -368,3 +368,15 @@ def test_schema_directives_applied_to_an_interface_only_are_discovered() -> None
     schema = bramble.Schema(query=Query, types=[ConcreteNode])
 
     assert "interfaceOnly" in schema.schema_directives_by_name
+
+
+def test_schema_extensions_are_rejected_rather_than_silently_ignored() -> None:
+    class _Extension:
+        pass
+
+    @bramble.type
+    class Query:
+        hello: str = "hi"
+
+    with pytest.raises(bramble.SchemaError, match="not implemented yet"):
+        bramble.Schema(query=Query, extensions=[_Extension()])

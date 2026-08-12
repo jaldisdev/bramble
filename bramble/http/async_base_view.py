@@ -23,10 +23,10 @@ import asyncio
 from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeGuard, TypeVar
 
-from bramble._bramble import lower_query
+from bramble._bramble import lower_persisted_document, lower_query
 from bramble._error import GraphQLError, error_to_dict
 from bramble._execution import _has_incremental_markers
-from bramble.http.base import BaseRequestProtocol, BaseView
+from bramble.http.base import BaseRequestProtocol, BaseView, persisted_query_hash
 from bramble.http.exceptions import HTTPException
 from bramble.http.multipart import MULTIPART_MIXED_BOUNDARY, encode_multipart_stream
 from bramble.http.parse_content_type import parse_content_type
@@ -34,6 +34,7 @@ from bramble.http.types import GraphQLRequestData
 from bramble.subscriptions.graphql_transport_ws import GRAPHQL_TRANSPORT_WS_PROTOCOL, GraphQLTransportWSHandler
 
 if TYPE_CHECKING:
+    from bramble._bramble import PersistedDocument
     from bramble._schema import Schema
 
 Request = TypeVar("Request")
@@ -139,24 +140,57 @@ class AsyncBaseHTTPView(
             return self.parse_batch(parsed, max_operations=self._max_batch_operations())
         return [self.request_data_from_dict(parsed)]
 
-    async def _execute(self, request_data: GraphQLRequestData, context: Any, root_value: Any) -> dict[str, Any]:
-        if request_data.query is None:
-            raise HTTPException(400, "No GraphQL query found in the request")
+    def _prepare_persisted_document(self, request_data: GraphQLRequestData) -> "PersistedDocument | None":
+        """Resolves an Automatic Persisted Queries request against the schema's cache, returning the
+        parsed-and-already-validated document to execute. `None` for an ordinary request carrying
+        its own query text, which takes the normal parse/validate path.
+
+        Raises `bramble.GraphQLError` (`PERSISTED_QUERY_NOT_FOUND` / `PERSISTED_QUERY_MISMATCH`) for
+        the caller to render as a spec-shaped response body -- deliberately *not* an
+        `HTTPException`: Apollo Client's APQ link detects the not-found case by matching the error
+        message in a 200 response and retries with the full query text, so failing the request at
+        the HTTP status level would break the protocol's whole recovery path.
+        """
+        sha256_hash = persisted_query_hash(request_data.extensions)
+        if sha256_hash is None:
+            return None
+        result = self.schema.prepare_persisted_query(
+            sha256_hash, query=request_data.query, operation_name=request_data.operation_name
+        )
+        return result.document
+
+    async def _execute(
+        self,
+        request_data: GraphQLRequestData,
+        context: Any,
+        root_value: Any,
+        document: "PersistedDocument | None" = None,
+    ) -> dict[str, Any]:
         try:
+            # Already resolved by `run()` on the single-operation path (which needs it to decide on
+            # incremental delivery); resolved here for each entry of a batch.
+            if document is None:
+                document = self._prepare_persisted_document(request_data)
+            if document is None and request_data.query is None:
+                raise HTTPException(400, "No GraphQL query found in the request")
+
             return await self.schema.execute_async(
                 request_data.query,
                 variable_values=request_data.variables,
                 context=context,
                 root_value=root_value,
                 operation_name=request_data.operation_name,
+                document=document,
             )
         except GraphQLError as error:
-            # A request-level failure (malformed query, unknown operation, ...) raised directly
-            # by `execute_async` rather than returned inside a successful response's own
-            # `errors` list -- still rendered in the same spec shape, just as the whole response.
+            # A request-level failure (malformed query, unknown operation, an APQ miss, ...) raised
+            # directly rather than returned inside a successful response's own `errors` list --
+            # still rendered in the same spec shape, just as the whole response.
             return {"data": None, "errors": [error_to_dict(error)]}
 
-    def _needs_incremental_delivery(self, request_data: GraphQLRequestData) -> bool:
+    def _needs_incremental_delivery(
+        self, request_data: GraphQLRequestData, document: "PersistedDocument | None" = None
+    ) -> bool:
         """A cheap lowering peek to decide whether this single operation uses `@defer`/`@stream`
         at all -- mirrors `GraphQLTransportWSHandler._run_operation`'s identical "peek, then let
         the real call re-lower properly" pattern (`bramble/subscriptions/graphql_transport_ws.py`).
@@ -164,29 +198,44 @@ class AsyncBaseHTTPView(
         `schema.execute_async` call surfaces that error in the normal (non-streamed) response
         shape, which is simpler for a client to handle than a malformed query arriving as a
         `multipart/mixed` stream.
+
+        A persisted-query request peeks at the cached document instead: a hash-only replay has no
+        query text at all to lower, so without this it could never be recognized as incremental.
         """
-        if request_data.query is None:
-            return False
         try:
-            _, fields = lower_query(
-                request_data.query,
-                variable_values=request_data.variables or {},
-                operation_name=request_data.operation_name,
-            )
+            if document is not None:
+                _, fields = lower_persisted_document(
+                    document,
+                    variable_values=request_data.variables or {},
+                    operation_name=request_data.operation_name,
+                )
+            elif request_data.query is not None:
+                _, fields = lower_query(
+                    request_data.query,
+                    variable_values=request_data.variables or {},
+                    operation_name=request_data.operation_name,
+                )
+            else:
+                return False
         except GraphQLError:
             return False
         return _has_incremental_markers(fields)
 
     async def _stream_incremental(
-        self, request_data: GraphQLRequestData, context: Any, root_value: Any
+        self,
+        request_data: GraphQLRequestData,
+        context: Any,
+        root_value: Any,
+        document: "PersistedDocument | None" = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        assert request_data.query is not None
+        assert request_data.query is not None or document is not None
         async for payload in self.schema.execute_incremental(
             request_data.query,
             variable_values=request_data.variables,
             context=context,
             root_value=root_value,
             operation_name=request_data.operation_name,
+            document=document,
         ):
             yield payload
 
@@ -231,13 +280,23 @@ class AsyncBaseHTTPView(
 
         request_data = request_data_list[0]
 
+        # Resolved once here rather than inside `_execute`: the incremental-delivery peek below
+        # needs the same document, and re-resolving would mean a second cache lookup (and, on a
+        # first registration, a second parse+validate of the same query).
+        try:
+            document = self._prepare_persisted_document(request_data)
+        except GraphQLError as error:
+            # An APQ miss is a normal, expected part of the protocol: the client is told to resend
+            # with the full query text. That has to reach it as a 200 with a spec-shaped error body.
+            return self.create_response({"data": None, "errors": [error_to_dict(error)]})
+
         # `@defer`/`@stream` delivery is `multipart/mixed` over POST only (§ incremental delivery
         # scope notes) -- a single, non-batched operation, never a GET query or a batch entry (the
         # reference incremental-delivery spec itself only ever streams a single operation's own
         # response, not a batch of them).
-        if protocol_request.method == "POST" and self._needs_incremental_delivery(request_data):
-            stream = encode_multipart_stream(self._stream_incremental(request_data, context, root_value))
+        if protocol_request.method == "POST" and self._needs_incremental_delivery(request_data, document):
+            stream = encode_multipart_stream(self._stream_incremental(request_data, context, root_value, document))
             return await self.create_multipart_response(stream)
 
-        result = await self._execute(request_data, context, root_value)
+        result = await self._execute(request_data, context, root_value, document)
         return self.create_response(result)

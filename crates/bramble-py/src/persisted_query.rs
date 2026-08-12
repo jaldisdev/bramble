@@ -17,18 +17,50 @@
 // limitations under the License.
 //
 
+use std::sync::Arc;
+
+use async_graphql_parser::types::ExecutableDocument;
 use bramble_core::persisted_query::{PersistedQueryOutcome, resolve_persisted_query as core_resolve_persisted_query};
 use pyo3::prelude::*;
 
 use crate::compiled_schema::PyCompiledSchema;
 use crate::error::raise;
 
-/// Implements the Automatic Persisted Queries protocol (§10) against `schema`'s cache. Returns
-/// `True` if `sha256_hash` was already cached (a hash-only request that hit), `False` if the
-/// query was freshly parsed/validated and just registered under its hash. Raises
+/// An opaque handle to a parsed **and already schema-validated** document sitting in a schema's
+/// persisted-query cache. Deliberately exposes no structure to Python: its only purpose is to be
+/// handed straight back to `lower_persisted_document`, which is what actually makes an APQ cache
+/// hit cheaper than a normal request. Before this existed the cache stored the parsed document but
+/// nothing could ever retrieve it, so every "hit" still re-parsed and re-validated from the raw
+/// query string -- the cache was a protocol gate with no performance benefit at all.
+///
+/// `query_text` rides along because execution still needs the original source: `Info.query` exposes
+/// it to resolvers, and error locations are only meaningful against it.
+#[pyclass(name = "PersistedDocument", frozen)]
+pub struct PyPersistedDocument {
+    pub document: Arc<ExecutableDocument>,
+    #[pyo3(get)]
+    pub query_text: String,
+}
+
+/// What `resolve_persisted_query` produced: whether the hash was already cached, plus the document
+/// itself so the caller can execute it without going back through parse/validate.
+#[pyclass(name = "PersistedQueryResult", frozen)]
+pub struct PyPersistedQueryResult {
+    /// `True` if `sha256_hash` was already in the cache; `False` if `query` was just parsed,
+    /// validated, and registered under it.
+    #[pyo3(get)]
+    pub cache_hit: bool,
+    #[pyo3(get)]
+    pub document: Py<PyPersistedDocument>,
+}
+
+/// Implements the Automatic Persisted Queries protocol (§10) against `schema`'s cache. Raises
 /// `bramble.GraphQLError` with `code=PERSISTED_QUERY_NOT_FOUND` on a hash-only miss (per the
 /// protocol, the caller should resend with `query` included) or `code=PERSISTED_QUERY_MISMATCH`
 /// if a provided `query`'s hash doesn't match `sha256_hash`.
+///
+/// On success the cached document is returned alongside the hit/miss flag, so an APQ request can
+/// skip straight to lowering rather than re-parsing text it has already parsed once.
 #[pyfunction]
 #[pyo3(signature = (sha256_hash, schema, *, query=None, operation_name=None))]
 pub fn resolve_persisted_query(
@@ -37,8 +69,27 @@ pub fn resolve_persisted_query(
     schema: &PyCompiledSchema,
     query: Option<&str>,
     operation_name: Option<String>,
-) -> PyResult<bool> {
+) -> PyResult<PyPersistedQueryResult> {
     let outcome = core_resolve_persisted_query(&schema.schema, sha256_hash, query, operation_name.as_deref())
         .map_err(|error| raise(py, error))?;
-    Ok(outcome == PersistedQueryOutcome::CacheHit)
+
+    // `resolve_persisted_query` has just guaranteed the entry exists (it either hit, or inserted
+    // it) -- but read it back through the cache rather than assuming, since `moka` is free to evict
+    // between the insert and this lookup under memory pressure. A miss here means re-parsing the
+    // text we were handed, which is only reachable on the `Some(query)` path anyway.
+    let document = match schema.schema.persisted_query_cache.get(sha256_hash) {
+        Some(document) => document,
+        None => Arc::new(bramble_core::parse_document(query.unwrap_or_default()).map_err(|error| raise(py, error))?),
+    };
+
+    // A cache hit doesn't carry the original text (only the parsed document is cached), so fall
+    // back to whatever the request supplied. A hash-only hit has none, and `Info.query` is `None`
+    // in that case -- honest about what is actually known, rather than reconstructing an
+    // approximation of the source by printing the AST back out.
+    let query_text = query.unwrap_or_default().to_string();
+
+    Ok(PyPersistedQueryResult {
+        cache_hit: outcome == PersistedQueryOutcome::CacheHit,
+        document: Py::new(py, PyPersistedDocument { document, query_text })?,
+    })
 }

@@ -29,6 +29,30 @@ from bramble.http.types import GraphQLRequestData, HTTPMethod, QueryParams
 
 Request = TypeVar("Request", contravariant=True)
 
+# The Automatic Persisted Queries protocol version this implements -- the only one Apollo has ever
+# defined. A request advertising a different version is treated as a plain (non-APQ) request rather
+# than rejected, so a future version can't turn into a hard failure against an old server.
+_APQ_VERSION = 1
+
+
+def persisted_query_hash(extensions: Mapping[str, Any] | None) -> str | None:
+    """The `sha256Hash` from a request's `extensions.persistedQuery`, if it carries a well-formed
+    one -- the Apollo APQ convention for asking a server to run a query by hash. Returns `None` for
+    any request that isn't an APQ request at all (no extensions, no `persistedQuery`, an unknown
+    protocol version, or a non-string hash), so callers can treat that uniformly as "an ordinary
+    request that must carry its own query text".
+    """
+    if not extensions:
+        return None
+    persisted = extensions.get("persistedQuery")
+    if not isinstance(persisted, Mapping):
+        return None
+    version = persisted.get("version")
+    if version is not None and version != _APQ_VERSION:
+        return None
+    sha256_hash = persisted.get("sha256Hash")
+    return sha256_hash if isinstance(sha256_hash, str) else None
+
 
 class BaseRequestProtocol(Protocol):
     """Whatever a concrete framework's own request object is, it satisfies this structurally (no
@@ -85,13 +109,18 @@ class BaseView(Generic[Request]):
         if not isinstance(data, dict):
             raise HTTPException(400, "Request data must be a JSON object")
         query = data.get("query")
-        if query is None:
+        extensions = data.get("extensions")
+        # A missing `query` is only legal for an Automatic Persisted Queries request, which
+        # deliberately sends the hash *instead of* the query text -- that being the entire point of
+        # the protocol. Rejecting it here unconditionally (as this used to) made APQ unusable over
+        # HTTP no matter what the schema supported.
+        if query is None and persisted_query_hash(extensions) is None:
             raise HTTPException(400, "No GraphQL query found in the request")
         return GraphQLRequestData(
             query=query,
             variables=data.get("variables"),
             operation_name=data.get("operationName"),
-            extensions=data.get("extensions"),
+            extensions=extensions,
         )
 
     def parse_batch(self, operations: list[Any], *, max_operations: int | None) -> list[GraphQLRequestData]:

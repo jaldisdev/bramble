@@ -35,12 +35,61 @@ was already cached. It raises `bramble.GraphQLError` with:
 - `code=PERSISTED_QUERY_MISMATCH` if a provided `query`'s hash doesn't
   actually match the given `sha256_hash`.
 
-This method only registers/checks the hash -- it doesn't execute the query
-itself. A typical HTTP handler calls it first (using the hash and/or query
-text from the request's `extensions.persistedQuery`/`query` fields), then
-proceeds to `execute_async` with the now-known query text as usual.
+## Over HTTP
 
-The cache is per-`Schema` instance and caches the already parsed and
-validated document, not just the raw query string -- so a cache hit skips
-re-parsing/re-validating on every subsequent request, only re-binding
-variables at execution time.
+Every [HTTP integration](../integrations/index.md) speaks APQ out of the box --
+there is nothing to enable. A request carrying
+`extensions.persistedQuery.sha256Hash` is resolved against the schema's cache
+before execution, and may omit `query` entirely:
+
+```jsonc
+// First attempt: hash only.
+{"extensions": {"persistedQuery": {"version": 1, "sha256Hash": "abc123..."}}}
+// -> 200 {"data": null, "errors": [{"message": "PersistedQueryNotFound", ...}]}
+
+// Client retries with the query text, which registers it.
+{"query": "query { greet }",
+ "extensions": {"persistedQuery": {"version": 1, "sha256Hash": "abc123..."}}}
+// -> 200 {"data": {"greet": "..."}}
+
+// Every later request can send the hash alone.
+{"extensions": {"persistedQuery": {"version": 1, "sha256Hash": "abc123..."}}}
+// -> 200 {"data": {"greet": "..."}}
+```
+
+A miss is returned as a **200 response with an error body**, not an HTTP
+error. That is deliberate and required: Apollo Client's APQ link detects the
+`PersistedQueryNotFound` message in the response body to trigger its automatic
+retry, and never sees it if the request fails at the status level.
+
+A request advertising a `persistedQuery` version other than `1` is treated as
+an ordinary request, so an unknown future protocol version degrades rather
+than failing.
+
+## Executing a cached document directly
+
+`resolve_persisted_query` only registers/checks the hash. To actually benefit
+from the cache, use `prepare_persisted_query`, which returns the cached
+document alongside the hit/miss flag, and hand that document to any of the
+execution methods:
+
+```python
+prepared = schema.prepare_persisted_query(sha256_hash)
+result = await schema.execute_async(None, document=prepared.document)
+```
+
+`document=` accepts the handle on `execute`, `execute_async`,
+`execute_incremental`, and `subscribe_async`. When one is supplied the query
+argument may be `None` -- a hash-only replay has no query text to pass.
+
+The cache is per-`Schema` instance and holds the already parsed and validated
+document, so executing it this way skips both parsing and validation. What is
+*not* skipped is lowering: `@skip`/`@include` evaluation and argument
+substitution depend on each request's own variable values, so those are redone
+per request. That is why the same persisted query can be replayed with
+different variables and produce different results.
+
+Because a hash-only replay never carries the query text, `Info.query` is
+`None` inside resolvers on that path -- bramble reports what the client
+actually sent rather than reconstructing an approximation from the parsed
+document.

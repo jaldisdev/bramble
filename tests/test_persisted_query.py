@@ -24,6 +24,7 @@ import hashlib
 import pytest
 
 import bramble
+import bramble._execution
 
 
 @bramble.type
@@ -133,3 +134,64 @@ def test_different_queries_get_different_cache_entries() -> None:
     with pytest.raises(bramble.GraphQLError) as excinfo:
         schema.resolve_persisted_query(_hash(second_query))
     assert excinfo.value.code is bramble.ErrorCode.PERSISTED_QUERY_NOT_FOUND
+
+
+def test_prepare_persisted_query_returns_the_cached_document_for_reuse() -> None:
+    schema = _schema()
+    query_text = 'query { greet(name: "hello") }'
+    sha256_hash = _hash(query_text)
+
+    registration = schema.prepare_persisted_query(sha256_hash, query=query_text)
+    assert registration.cache_hit is False
+
+    replay = schema.prepare_persisted_query(sha256_hash)
+    assert replay.cache_hit is True
+    assert replay.document is not None
+
+
+def test_executing_a_prepared_document_skips_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cache hit has to be cheaper than a cold request, or the cache is only a protocol gate.
+    Passing the prepared document to `execute` bypasses parse+validate entirely.
+    """
+    schema = _schema()
+    query_text = 'query { greet(name: "hello") }'
+    sha256_hash = _hash(query_text)
+    schema.prepare_persisted_query(sha256_hash, query=query_text)
+
+    calls: list[str] = []
+    real_validate = bramble._execution.validate_query
+    monkeypatch.setattr(
+        bramble._execution,
+        "validate_query",
+        lambda query, compiled, operation_name: (calls.append(query), real_validate(query, compiled, operation_name))[1],
+    )
+
+    prepared = schema.prepare_persisted_query(sha256_hash)
+    result = schema.execute(None, document=prepared.document)
+
+    assert result == {"data": {"greet": "hello"}}
+    assert calls == []
+
+
+def test_a_replayed_document_reports_no_query_source_to_resolvers() -> None:
+    """A hash-only replay genuinely has no query text -- the client never sent it. `Info.query` is
+    `None` rather than an AST printed back out into a string the client never wrote.
+    """
+    observed: list[str | None] = []
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def greet(info: bramble.Info) -> str:
+            observed.append(info.query)
+            return "hello"
+
+    schema = bramble.Schema(query=Query)
+    query_text = "query { greet }"
+    sha256_hash = _hash(query_text)
+
+    schema.prepare_persisted_query(sha256_hash, query=query_text)
+    prepared = schema.prepare_persisted_query(sha256_hash)
+    schema.execute(None, document=prepared.document)
+
+    assert observed == [None]

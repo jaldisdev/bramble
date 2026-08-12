@@ -21,12 +21,14 @@ use std::collections::HashMap;
 
 use async_graphql_value::Value;
 use bramble_core::error::{ErrorCode, GraphQLError as CoreGraphQLError};
+use async_graphql_parser::types::ExecutableDocument;
 use bramble_core::lowering::{LoweredArgument, LoweredDirective, LoweredField, lower_document};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
 use serde_json::Value as JsonValue;
 
 use crate::error::raise;
+use crate::persisted_query::PyPersistedDocument;
 
 /// Renders a Python default value as the GraphQL literal that should appear after `= ` in SDL and
 /// as introspection's `__InputValue.defaultValue`. Returns `None` for anything with no faithful
@@ -333,7 +335,31 @@ pub fn lower_query(
     operation_name: Option<String>,
 ) -> PyResult<(&'static str, Vec<Py<PyLoweredField>>)> {
     let document = bramble_core::parse_document(query).map_err(|error| raise(py, error))?;
+    lower_parsed_document(py, &document, variable_values, operation_name)
+}
 
+/// The same lowering as `lower_query`, but against a document that was parsed and schema-validated
+/// earlier and cached (`PersistedDocument`, from an APQ cache hit). This is what makes a persisted
+/// query genuinely cheaper on replay: parse and validate are both skipped, and only the
+/// variable-dependent work (`@skip`/`@include` evaluation, argument substitution) is redone -- which
+/// has to be redone, since it depends on *this* request's variable values.
+#[pyfunction]
+#[pyo3(signature = (document, *, variable_values, operation_name=None))]
+pub fn lower_persisted_document(
+    py: Python<'_>,
+    document: &PyPersistedDocument,
+    variable_values: &Bound<'_, PyDict>,
+    operation_name: Option<String>,
+) -> PyResult<(&'static str, Vec<Py<PyLoweredField>>)> {
+    lower_parsed_document(py, &document.document, variable_values, operation_name)
+}
+
+fn lower_parsed_document(
+    py: Python<'_>,
+    document: &ExecutableDocument,
+    variable_values: &Bound<'_, PyDict>,
+    operation_name: Option<String>,
+) -> PyResult<(&'static str, Vec<Py<PyLoweredField>>)> {
     // Only used for `@skip`/`@include`'s own `if` argument, which is always a boolean (or a
     // variable that should be one) -- a variable that can't convert to JSON at all (a `datetime`,
     // a custom scalar's own object, ...) could never have legitimately been a boolean anyway, so
@@ -349,7 +375,7 @@ pub fn lower_query(
     }
 
     let (operation_type, lowered) =
-        lower_document(&document, &variables, operation_name.as_deref()).map_err(|error| raise(py, error))?;
+        lower_document(document, &variables, operation_name.as_deref()).map_err(|error| raise(py, error))?;
 
     let fields = lowered
         .into_iter()

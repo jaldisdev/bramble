@@ -20,12 +20,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from typing import Any
 
 import pytest
 
 import bramble
+import bramble._execution
 from bramble.http.async_base_view import AsyncBaseHTTPView
 from bramble.http.exceptions import HTTPException
 from bramble.schema.config import SchemaConfig
@@ -222,3 +224,138 @@ def test_execute_async_error_is_wrapped_in_the_response_body() -> None:
 
     assert response["body"]["data"] is None
     assert "errors" in response["body"]
+
+
+# --- Automatic Persisted Queries ------------------------------------------------------------------
+
+
+def _apq_body(sha256_hash: str, *, query: str | None = None, variables: dict | None = None) -> bytes:
+    body: dict[str, object] = {"extensions": {"persistedQuery": {"version": 1, "sha256Hash": sha256_hash}}}
+    if query is not None:
+        body["query"] = query
+    if variables is not None:
+        body["variables"] = variables
+    return json.dumps(body).encode()
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _post(view: _FakeView, body: bytes) -> dict:
+    request = _FakeRequest(headers={"content-type": "application/json"}, body=body)
+    return _run(view.run(request, request))
+
+
+def test_hash_only_request_for_an_unregistered_query_returns_the_apq_miss_error() -> None:
+    """The miss must come back as a normal response body, not an HTTP error: Apollo Client's APQ
+    link matches on this exact message to trigger its resend-with-full-query retry, which it never
+    gets to do if the request fails at the status level. This used to be an unconditional 400.
+    """
+    view = _FakeView(bramble.Schema(query=_Query))
+    query = "{ greet }"
+
+    response = _post(view, _apq_body(_sha256(query)))
+
+    assert response["kind"] == "json"
+    assert response["body"]["data"] is None
+    assert response["body"]["errors"][0]["message"] == "PersistedQueryNotFound"
+
+
+def test_registering_then_replaying_a_persisted_query_over_http() -> None:
+    view = _FakeView(bramble.Schema(query=_Query))
+    query = 'query { greet(name: "Ada") }'
+    sha256_hash = _sha256(query)
+
+    registration = _post(view, _apq_body(sha256_hash, query=query))
+    assert registration["body"] == {"data": {"greet": "Hello, Ada!"}}
+
+    replay = _post(view, _apq_body(sha256_hash))
+    assert replay["body"] == {"data": {"greet": "Hello, Ada!"}}
+
+
+def test_replaying_a_persisted_query_does_not_reparse_or_revalidate_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole point of caching the *parsed and validated* document. Before this, a hash-only
+    replay still went through `validate_query` (which parses again internally) on every request, so
+    the cache bought nothing but the protocol handshake.
+    """
+    view = _FakeView(bramble.Schema(query=_Query))
+    query = 'query { greet(name: "Ada") }'
+    sha256_hash = _sha256(query)
+
+    _post(view, _apq_body(sha256_hash, query=query))
+
+    calls: list[str] = []
+    real_validate = bramble._execution.validate_query
+
+    def spy(query_text: str, compiled: object, operation_name: str | None) -> None:
+        calls.append(query_text)
+        return real_validate(query_text, compiled, operation_name)
+
+    monkeypatch.setattr(bramble._execution, "validate_query", spy)
+
+    replay = _post(view, _apq_body(sha256_hash))
+
+    assert replay["body"] == {"data": {"greet": "Hello, Ada!"}}
+    assert calls == [], "a persisted-query replay must not re-validate (and so must not re-parse)"
+
+
+def test_a_non_persisted_request_still_validates_normally(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The counterpart to the test above: the fast path must not have disabled validation generally.
+    view = _FakeView(bramble.Schema(query=_Query))
+
+    calls: list[str] = []
+    real_validate = bramble._execution.validate_query
+
+    def spy(query_text: str, compiled: object, operation_name: str | None) -> None:
+        calls.append(query_text)
+        return real_validate(query_text, compiled, operation_name)
+
+    monkeypatch.setattr(bramble._execution, "validate_query", spy)
+
+    _post(view, json.dumps({"query": "{ greet }"}).encode())
+
+    assert calls == ["{ greet }"]
+
+
+def test_a_persisted_replay_still_binds_this_requests_variables() -> None:
+    """Lowering is deliberately *not* cached, only parse/validate -- `@skip`/`@include` and argument
+    substitution depend on each request's own variables, so a replay must re-lower.
+    """
+    view = _FakeView(bramble.Schema(query=_Query))
+    query = "query G($n: String!) { greet(name: $n) }"
+    sha256_hash = _sha256(query)
+
+    _post(view, _apq_body(sha256_hash, query=query, variables={"n": "Ada"}))
+    replay = _post(view, _apq_body(sha256_hash, variables={"n": "Grace"}))
+
+    assert replay["body"] == {"data": {"greet": "Hello, Grace!"}}
+
+
+def test_a_hash_that_does_not_match_the_supplied_query_is_rejected() -> None:
+    view = _FakeView(bramble.Schema(query=_Query))
+
+    response = _post(view, _apq_body("0" * 64, query="{ greet }"))
+
+    assert response["body"]["data"] is None
+    assert "does not match" in response["body"]["errors"][0]["message"]
+
+
+def test_an_unknown_apq_protocol_version_is_treated_as_an_ordinary_request() -> None:
+    view = _FakeView(bramble.Schema(query=_Query))
+    body = json.dumps(
+        {"query": "{ greet }", "extensions": {"persistedQuery": {"version": 99, "sha256Hash": "x" * 64}}}
+    ).encode()
+
+    response = _post(view, body)
+
+    assert response["body"] == {"data": {"greet": "Hello, world!"}}
+
+
+def test_a_request_with_neither_query_nor_persisted_hash_is_still_a_400() -> None:
+    view = _FakeView(bramble.Schema(query=_Query))
+    request = _FakeRequest(headers={"content-type": "application/json"}, body=json.dumps({}).encode())
+
+    with pytest.raises(HTTPException) as excinfo:
+        _run(view.run(request, request))
+    assert excinfo.value.status_code == 400

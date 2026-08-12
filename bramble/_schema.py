@@ -26,6 +26,7 @@ from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Callab
 from typing import Any
 
 from bramble._bramble import (
+    PersistedDocument,
     SchemaError,
     compile_schema,
     describe_union,
@@ -361,6 +362,15 @@ class Schema:
         if getattr(query, "__bramble_type_info__", None) is None:
             raise SchemaError("Schema(query=...) must be a @bramble.type-decorated class")
 
+        # Same reasoning as `bramble.field(extensions=...)`: there is no execution-lifecycle hook
+        # for schema extensions yet, so a supplied extension would build and run while doing
+        # nothing. Failing loudly at construction is the honest option until the hooks exist.
+        if extensions:
+            raise SchemaError(
+                "Schema(extensions=...) is not implemented yet -- schema extensions have no "
+                "execution lifecycle hooks, so any value here would be silently ignored"
+            )
+
         for directive_function in directives:
             if getattr(directive_function, "__bramble_directive_info__", None) is None:
                 function_name = getattr(directive_function, "__name__", directive_function)
@@ -500,6 +510,30 @@ class Schema:
         `code=PERSISTED_QUERY_NOT_FOUND` on a hash-only miss (the client should resend with
         `query` included) or `code=PERSISTED_QUERY_MISMATCH` if a provided `query`'s hash doesn't
         match `sha256_hash`.
+
+        Use `prepare_persisted_query` instead when you intend to execute the result: it returns the
+        cached document alongside this flag, and passing that document to `execute_async` is what
+        actually lets a cache hit skip re-parsing and re-validating.
+        """
+        return self.prepare_persisted_query(
+            sha256_hash, query=query, operation_name=operation_name
+        ).cache_hit
+
+    def prepare_persisted_query(
+        self,
+        sha256_hash: str,
+        *,
+        query: str | None = None,
+        operation_name: str | None = None,
+    ) -> Any:
+        """The Automatic Persisted Queries protocol (§10), returning the cached document rather than
+        just a hit/miss flag -- raising the same `PERSISTED_QUERY_NOT_FOUND`/`PERSISTED_QUERY_MISMATCH`
+        errors as `resolve_persisted_query`.
+
+        The result carries `.cache_hit` (a bool) and `.document`, an opaque handle to the parsed,
+        already-validated document. Pass that handle as `document=` to `execute_async`/
+        `execute_incremental`/`subscribe_async` to execute it without parsing or validating the
+        query text a second time -- which is the entire point of persisting it.
         """
         return resolve_persisted_query(sha256_hash, self._compiled, query=query, operation_name=operation_name)
 
@@ -512,6 +546,7 @@ class Schema:
         root_value: Any = None,
         operation_name: str | None = None,
         resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
+        document: PersistedDocument | None = None,
     ) -> dict[str, Any]:
         """Executes `query` against this schema (§7a/§8/§11), returning a spec-shaped
         `{"data": ..., "errors": [...]}` response. See `bramble._execution.execute_async`.
@@ -528,6 +563,7 @@ class Schema:
             root_value=root_value,
             operation_name=operation_name,
             resolved_dependencies=resolved_dependencies,
+            document=document,
         )
 
     def execute(
@@ -539,6 +575,7 @@ class Schema:
         root_value: Any = None,
         operation_name: str | None = None,
         resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
+        document: PersistedDocument | None = None,
     ) -> dict[str, Any]:
         """Synchronous convenience wrapper around `execute_async` -- see its own docstring for the
         caveat about not being callable from within an already-running event loop.
@@ -551,6 +588,7 @@ class Schema:
             root_value=root_value,
             operation_name=operation_name,
             resolved_dependencies=resolved_dependencies,
+            document=document,
         )
 
     async def execute_incremental(
@@ -562,6 +600,7 @@ class Schema:
         root_value: Any = None,
         operation_name: str | None = None,
         resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
+        document: PersistedDocument | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Executes a query/mutation operation using `@defer`/`@stream`, yielding the initial
         `{"data": ..., "hasNext": bool}` payload followed by zero or more `{"incremental": [...],
@@ -582,6 +621,7 @@ class Schema:
             root_value=root_value,
             operation_name=operation_name,
             resolved_dependencies=resolved_dependencies,
+            document=document,
         )
         try:
             async for response in generator:
@@ -605,6 +645,7 @@ class Schema:
         root_value: Any = None,
         operation_name: str | None = None,
         resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
+        document: PersistedDocument | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Executes a subscription operation, yielding one spec-shaped `{"data": ..., "errors":
         [...]}` response per event. See `bramble._execution.subscribe_async`. Async-only -- unlike
@@ -621,6 +662,7 @@ class Schema:
             root_value=root_value,
             operation_name=operation_name,
             resolved_dependencies=resolved_dependencies,
+            document=document,
         )
         try:
             async for response in generator:
