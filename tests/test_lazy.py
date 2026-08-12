@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, ForwardRef
+from typing import TYPE_CHECKING, Annotated, ForwardRef
 
 from lazy_fixtures.authors import Author, AuthorSearch
 from lazy_fixtures.posts import Post
@@ -28,6 +28,9 @@ import bramble
 from bramble._lazy import LazyReference, LazyType
 from bramble.directive import DirectiveLocation, DirectiveValue
 from tests.lazy_fixtures.comments import Comment
+
+if TYPE_CHECKING:
+    from tests.lazy_fixtures.renamed import Thing
 
 
 def test_lazy_returns_a_lazy_reference() -> None:
@@ -132,4 +135,24 @@ def test_a_lazy_reference_may_be_optional() -> None:
 class _OptionalLazyQuery:
     @bramble.field
     def comment() -> Comment:
+        raise NotImplementedError
+
+
+def test_a_lazy_reference_to_a_renamed_type_uses_its_graphql_name() -> None:
+    """A lazily-referenced type that renamed itself with `@bramble.type(name=...)` must be
+    *referenced* by that name too. The placeholder carries the Python name written in the forward
+    reference, and using it unconditionally emitted SDL declaring `type RenamedThing` while every
+    field said `Thing!` -- inconsistent, and referring to a type that does not exist.
+    """
+    sdl = bramble.Schema(query=_RenamedLazyQuery).to_sdl()
+
+    assert "type RenamedThing" in sdl
+    assert "thing: RenamedThing!" in sdl
+    assert "Renamed" in sdl and ": Thing!" not in sdl
+
+
+@bramble.type
+class _RenamedLazyQuery:
+    @bramble.field
+    def thing() -> Annotated["Thing", bramble.lazy("tests.lazy_fixtures.renamed")]:
         raise NotImplementedError

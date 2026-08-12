@@ -371,9 +371,22 @@ fn builtin_scalar_cache(py: Python<'_>) -> PyResult<&BuiltinScalarCache> {
 pub(crate) fn named_type_name(py: Python<'_>, annotation: &Bound<'_, PyAny>) -> PyResult<String> {
     // A `bramble.lazy(...)`-tagged forward reference resolves (once `localns` has been seeded --
     // see `namespace_for_class`/`namespace_for_callable`) to this placeholder instead of the real
-    // class, precisely so no import is needed yet: its own name is already everything a field's
-    // type signature needs.
+    // class, precisely so no import is needed yet.
+    //
+    // The placeholder carries the *Python* name that was written in the forward reference, which is
+    // only the right GraphQL name when the target didn't rename itself with
+    // `@bramble.type(name=...)`. Using it unconditionally produced SDL that declared `type
+    // RenamedThing` while every field referring to it said `Thing!` -- internally inconsistent, and
+    // invalid against a type that does not exist. So resolve the placeholder and ask the real class
+    // for its GraphQL name, falling back to the forward-ref name when the import cannot be
+    // satisfied yet (a true circular import mid-decoration), which is no worse than before.
     if annotation.is_instance(lazy_type_class(py)?)? {
+        if let Ok(resolved) = annotation.call_method0("resolve_type")
+            && let Ok(info) = resolved.getattr("__bramble_type_info__")
+            && let Ok(name) = info.getattr("name")?.extract::<String>()
+        {
+            return Ok(name);
+        }
         return annotation.getattr("type_name")?.extract();
     }
 
