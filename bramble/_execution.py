@@ -349,7 +349,7 @@ def _field_chain(
     chain = cache.get(field_info.name)
     if chain is None:
 
-        def call_resolver(source: Any, info: Info, **kwargs: Any) -> Any:
+        def call_resolver(source: Any, info: Info, /, **kwargs: Any) -> Any:
             # Put `Parent`/`Info` back into the shape the resolver actually declares.
             if field_info.parent_parameter:
                 kwargs[field_info.parent_parameter] = source
@@ -382,7 +382,7 @@ def _default_resolver_chain(
     chain = cache.get(field_info.name)
     if chain is None:
 
-        def read_attribute(source: Any, info: Info, **kwargs: Any) -> Any:
+        def read_attribute(source: Any, info: Info, /, **kwargs: Any) -> Any:
             return info.schema.config.default_resolver(source, field_info.name)
 
         chain = build_field_resolver(read_attribute, extensions)
@@ -392,7 +392,12 @@ def _default_resolver_chain(
 
 def _wrap_with_schema_extension(extension: Any, next_: Callable[..., Any]) -> Callable[..., Any]:
     async def wrapped(
-        source: Any, info: Info, _extension: Any = extension, _next: Callable[..., Any] = next_, **kwargs: Any
+        source: Any,
+        info: Info,
+        _extension: Any = extension,
+        _next: Callable[..., Any] = next_,
+        /,
+        **kwargs: Any,
     ) -> Any:
         result = _extension.resolve(_next, source, info, **kwargs)
         if inspect.isawaitable(result):

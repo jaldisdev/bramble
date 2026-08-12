@@ -745,3 +745,38 @@ def test_an_extension_instance_is_reused_while_a_class_is_per_request() -> None:
     schema.execute("{ greeting }")
     schema.execute("{ greeting }")
     assert TRACE == ["count=1", "count=1"], "a class is instantiated fresh per request"
+
+
+# --- Fields whose arguments collide with the hook's own parameter names -----------------------------
+
+
+class _ShoutArg(bramble.FieldExtension):
+    async def resolve_async(self, next_, source, info, /, **kwargs):
+        return (await next_(source, info, **kwargs)).upper()
+
+
+class _WatchArg(bramble.SchemaExtension):
+    async def resolve(self, next_, source, info, /, **kwargs):
+        return await next_(source, info, **kwargs)
+
+
+@bramble.type
+class _CollidingArgumentQuery:
+    @bramble.field(extensions=[_ShoutArg()])
+    def log(source: str | None = None, info: str | None = None) -> str:
+        return f"source={source} info={info}"
+
+
+def test_a_field_argument_may_be_named_like_the_hooks_own_parameters() -> None:
+    """`source`/`info` are perfectly ordinary GraphQL argument names -- an activity log filtered by
+    `source`, say. They arrive in `**kwargs`, so unless every hook in the chain takes its own
+    `source`/`info` positionally, Python raises "got multiple values for argument 'source'" before
+    the resolver runs. The `/` in each wrapper and each documented hook signature is what keeps the
+    two namespaces apart.
+    """
+    schema = bramble.Schema(query=_CollidingArgumentQuery, extensions=[_WatchArg])
+
+    result = schema.execute('{ log(source: "api", info: "x") }')
+
+    assert result.get("errors") is None
+    assert result["data"] == {"log": "SOURCE=API INFO=X"}

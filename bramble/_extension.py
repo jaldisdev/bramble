@@ -108,12 +108,19 @@ class SchemaExtension:
         """
         yield None  # type: ignore[misc]
 
-    async def resolve(self, next_: Callable[..., Any], source: Any, info: "Info", **kwargs: Any) -> Any:
+    async def resolve(
+        self, next_: Callable[..., Any], source: Any, info: "Info", /, **kwargs: Any
+    ) -> Any:
         """Wraps *every* field resolution in the request -- the schema-wide counterpart to a
         `FieldExtension`. Call `next_(source, info, **kwargs)` to continue the chain.
 
         Left unimplemented by default, and extensions that don't override it are skipped entirely
         rather than adding a layer of no-op wrapping to every field.
+
+        `next_`/`source`/`info` are positional-only, and an override should keep them that way: the
+        field's own GraphQL arguments arrive in `**kwargs`, so a field declaring an argument named
+        `source` (or `info`, or `next_`) would otherwise raise "got multiple values for argument
+        'source'" before the resolver ever ran.
         """
         result = next_(source, info, **kwargs)
         if inspect.isawaitable(result):
@@ -150,10 +157,14 @@ class FieldExtension:
         field's configuration.
         """
 
-    def resolve(self, next_: Callable[..., Any], source: Any, info: "Info", **kwargs: Any) -> Any:
+    def resolve(
+        self, next_: Callable[..., Any], source: Any, info: "Info", /, **kwargs: Any
+    ) -> Any:
         raise NotImplementedError
 
-    async def resolve_async(self, next_: Callable[..., Any], source: Any, info: "Info", **kwargs: Any) -> Any:
+    async def resolve_async(
+        self, next_: Callable[..., Any], source: Any, info: "Info", /, **kwargs: Any
+    ) -> Any:
         raise NotImplementedError
 
     def map_arguments(self, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -281,7 +292,7 @@ def build_field_resolver(resolver: Callable[..., Any], extensions: Sequence[Fiel
     implement neither `resolve` nor `resolve_async` are omitted from the chain entirely.
     """
 
-    async def call_resolver(source: Any, info: "Info", **kwargs: Any) -> Any:
+    async def call_resolver(source: Any, info: "Info", /, **kwargs: Any) -> Any:
         result = resolver(source, info, **kwargs)
         if inspect.isawaitable(result):
             result = await result
@@ -302,6 +313,7 @@ def _wrap_one(extension: FieldExtension, next_: Callable[..., Any]) -> Callable[
         info: "Info",
         _extension: FieldExtension = extension,
         _next: Callable[..., Any] = next_,
+        /,
         **kwargs: Any,
     ) -> Any:
         method = _extension.resolve_async if _extension._supports_async else _extension.resolve
