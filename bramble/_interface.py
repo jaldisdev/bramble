@@ -28,7 +28,17 @@ from bramble._error import ErrorCode, GraphQLError
 def _matches(candidate: type, obj: Any, info: Any) -> bool:
     is_type_of = getattr(candidate, "is_type_of", None)
     if is_type_of is not None:
-        return is_type_of(obj, info)
+        result = is_type_of(obj, info)
+        # A returned *type* answers "which one is it" rather than "is it this one". Unlike a union,
+        # an interface has a shared base to hang a single hook on, so declaring `is_type_of` once
+        # there and returning the concrete class is the natural way to express one decision -- but
+        # every implementor inherits that same method, and read as a boolean each one returns a
+        # truthy class, so every candidate matches and resolution fails as ambiguous. Comparing the
+        # returned type against the candidate makes exactly one match, and leaves the per-type
+        # boolean form behaving exactly as before.
+        if isinstance(result, type):
+            return result is candidate
+        return result
     return isinstance(obj, candidate)
 
 
@@ -40,6 +50,11 @@ def resolve_interface_type(candidates: Sequence[type], obj: Any, info: Any) -> t
     in for a GraphQL type). Otherwise each candidate's `is_type_of` classmethod is tried, falling
     back to an `isinstance` check for candidates that declare none, per §4. Exactly one candidate
     must match -- zero or more than one is an execution-time error, not something to guess at.
+
+    `is_type_of` may answer in either of two ways: a boolean, declared per implementing type
+    ("is the value one of me?"), or the concrete type itself, which lets a single hook on the
+    shared interface decide for all of its implementors at once. The two forms can be mixed
+    freely across an interface's candidates.
     """
     tagged = getattr(obj, "__bramble_concrete_type__", None)
     if tagged is not None and tagged in candidates:

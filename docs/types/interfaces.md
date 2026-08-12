@@ -73,6 +73,43 @@ schema.execute('{ node(id: "p1") { __typename id ... on Post { title } } }')
 # {'data': {'node': {'__typename': 'Post', 'id': 'p1', 'title': 'Hello GraphQL'}}}
 ```
 
+### Deciding once, on the interface
+
+`is_type_of` may answer in either of two ways. The per-implementor form above
+returns a boolean -- "is the value one of me?". Alternatively it may return the
+concrete type itself, which lets a single hook on the shared interface decide
+for every implementor at once:
+
+```python
+@bramble.interface
+class Shape:
+    id: bramble.ID
+
+    def is_type_of(instance, *args, **kwargs) -> type:
+        return Square if getattr(instance, "side", None) else Circle
+
+
+@bramble.type
+class Square(Shape):
+    side: int
+
+
+@bramble.type
+class Circle(Shape):
+    radius: int
+```
+
+Every implementor inherits that one method, and the returned type names the
+answer directly. This is often the clearer shape when the decision is a single
+branch over a discriminator -- a row's type column, say -- rather than a
+property each type can test about itself.
+
+Returning `None` means "no match", exactly as `False` does. The two forms may
+be mixed across an interface's implementors.
+
+A union has no shared base to hang such a hook on, so it takes the equivalent
+callback on the union itself -- see [Unions](unions.md) and its `resolve_type`.
+
 Exactly one implementor must match a resolved value -- zero matches or more
 than one both raise `bramble.GraphQLError` with
 `code=ErrorCode.INTERFACE_TYPE_RESOLUTION_FAILED`, rather than silently
