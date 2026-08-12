@@ -70,6 +70,11 @@ injection reference.
 - **`description`** -- rendered as a docstring above the field in SDL.
 - **`directives`** -- a list of applied [schema directive](schema-directives.md)
   instances.
+- **`deprecation_reason`** -- marks the field deprecated, rendering
+  `@deprecated(reason: "...")` in SDL and reporting
+  `isDeprecated`/`deprecationReason` through introspection. The field keeps
+  working; deprecation is advisory. Introspection hides deprecated fields
+  unless a client asks for `fields(includeDeprecated: true)`.
 - **`default`** / **`default_factory`** -- a default value for a
   non-resolver field (mutually exclusive with each other, and with
   `resolver`).

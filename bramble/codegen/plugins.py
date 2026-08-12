@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import abc
 
-from bramble.codegen.types import CodegenType, ListType, NamedType, Operation, OptionalType
+from bramble.codegen.types import CodegenType, ListType, Operation, OptionalType
 
 
 class QueryCodegenPlugin(abc.ABC):

@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+
 import dataclasses
 
 import pytest
@@ -390,3 +392,88 @@ def test_field_without_extensions_is_unaffected() -> None:
     assert bramble.Schema(query=Query).execute("{ greeting }", root_value=Query()) == {
         "data": {"greeting": "hi"}
     }
+
+
+def test_field_deprecation_reason_renders_and_introspects() -> None:
+    """Field-level deprecation was the one gap in finding 11 with real user-visible impact:
+    `@deprecated` is core GraphQL, and `__Field.isDeprecated` was hardcoded `False`.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field(deprecation_reason="use newField")
+        def old_field() -> str:
+            return "x"
+
+        @bramble.field
+        def new_field() -> str:
+            return "y"
+
+    schema = bramble.Schema(query=Query)
+
+    assert 'oldField: String! @deprecated(reason: "use newField")' in schema.to_sdl()
+
+    result = schema.execute(
+        '{ __type(name: "Query") { fields(includeDeprecated: true) { name isDeprecated deprecationReason } } }'
+    )
+    fields = {f["name"]: f for f in result["data"]["__type"]["fields"]}
+    assert fields["oldField"]["isDeprecated"] is True
+    assert fields["oldField"]["deprecationReason"] == "use newField"
+    assert fields["newField"]["isDeprecated"] is False
+    assert fields["newField"]["deprecationReason"] is None
+
+
+def test_deprecated_fields_are_hidden_from_introspection_by_default() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field(deprecation_reason="gone")
+        def old_field() -> str:
+            return "x"
+
+        @bramble.field
+        def new_field() -> str:
+            return "y"
+
+    schema = bramble.Schema(query=Query)
+    result = schema.execute('{ __type(name: "Query") { fields { name } } }')
+    names = {f["name"] for f in result["data"]["__type"]["fields"]}
+
+    assert "newField" in names
+    assert "oldField" not in names, "includeDeprecated defaults to false"
+
+
+def test_a_deprecated_field_is_still_queryable() -> None:
+    # Deprecation is advisory: it must not stop the field working.
+    @bramble.type
+    class Query:
+        @bramble.field(deprecation_reason="gone")
+        def old_field() -> str:
+            return "still here"
+
+    assert bramble.Schema(query=Query).execute("{ oldField }") == {"data": {"oldField": "still here"}}
+
+
+def test_subscription_is_an_alias_for_field() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def ok() -> bool:
+            return True
+
+    @bramble.type
+    class Subscription:
+        @bramble.subscription
+        async def ticks() -> AsyncGenerator[int, None]:
+            yield 1
+
+    schema = bramble.Schema(query=Query, subscription=Subscription)
+
+    assert "ticks: Int!" in schema.to_sdl()
+
+
+def test_directive_and_location_markers_are_exported_from_the_package_root() -> None:
+    # Previously these could only be reached via `bramble.directive` / `bramble.schema_directive`,
+    # so no directive could be declared from the `bramble` import alone.
+    assert bramble.DirectiveLocation.FIELD.value == "FIELD"
+    assert bramble.Location.OBJECT.value == "OBJECT"
+    assert bramble.DirectiveValue is not None

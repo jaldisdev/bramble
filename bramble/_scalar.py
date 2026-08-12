@@ -62,8 +62,10 @@ Upload = NewType("Upload", bytes)
 """A scalar for file upload arguments/fields. Entirely opaque -- `serialize`/`parse_value` are
 both identity functions, so whatever object a request's transport layer puts into
 `variable_values` (bytes, a file-like object, ...) passes straight through to the resolver
-unchanged. bramble has no HTTP transport layer of its own; parsing a multipart request into
-`variable_values` is left to whatever's calling `Schema.execute`/`execute_async`.
+unchanged. `bramble.http` implements the GraphQL multipart request spec on top of this (see
+`bramble.http.base.BaseView.parse_multipart_operations` and `docs/guides/file-upload.md`); a
+caller driving `Schema.execute`/`execute_async` directly is free to populate `variable_values`
+however it likes instead.
 """
 
 UploadDefinition = scalar(

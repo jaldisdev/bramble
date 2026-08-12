@@ -1474,8 +1474,8 @@ def _prepare_operation(
 
 
 def _resolve_execution_context(schema: "Schema", context: Any) -> Any:
-    if context is None and schema.execution_context_class is not None:
-        return schema.execution_context_class()
+    if context is None and schema.default_context_factory is not None:
+        return schema.default_context_factory()
     return context
 
 

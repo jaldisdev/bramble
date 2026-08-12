@@ -28,7 +28,7 @@ from bramble._error import GraphQLError, error_to_dict
 from bramble._execution import _has_incremental_markers
 from bramble.http.base import BaseRequestProtocol, BaseView, persisted_query_hash
 from bramble.http.exceptions import HTTPException
-from bramble.http.multipart import MULTIPART_MIXED_BOUNDARY, encode_multipart_stream
+from bramble.http.multipart import encode_multipart_stream
 from bramble.http.parse_content_type import parse_content_type
 from bramble.http.types import GraphQLRequestData
 from bramble.subscriptions.graphql_transport_ws import GRAPHQL_TRANSPORT_WS_PROTOCOL, GraphQLTransportWSHandler

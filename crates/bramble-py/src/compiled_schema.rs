@@ -25,7 +25,7 @@ use pyo3::prelude::*;
 
 use crate::operation_directive_info::PyOperationDirectiveInfo;
 use crate::schema_directive_info::PySchemaDirectiveInfo;
-use crate::type_info::{PyTypeInfo, extract_applied_directives, validate_directive_locations};
+use crate::type_info::{PyTypeInfo, SchemaError, extract_applied_directives, validate_directive_locations};
 use crate::union_info::PyUnionInfo;
 
 /// Wraps the assembled `CompiledSchema` for the Python side to hold onto (as an opaque handle)
@@ -103,6 +103,10 @@ pub fn compile_schema(
         None => Vec::new(),
     };
 
+    let scalar_names: HashSet<String> = scalar_names.into_iter().collect();
+    bramble_core::schema::validate_schema_shape(&types, &unions, &scalar_names)
+        .map_err(SchemaError::new_err)?;
+
     let schema = CompiledSchema {
         types,
         unions,
@@ -112,7 +116,7 @@ pub fn compile_schema(
         operation_directives,
         schema_directives,
         schema_applied_directives,
-        scalar_names: scalar_names.into_iter().collect::<HashSet<_>>(),
+        scalar_names,
         scalar_applied_directives,
         scalar_descriptions,
         auto_camel_case,

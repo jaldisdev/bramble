@@ -264,50 +264,6 @@ def _discover_type(cls: _type, *, graph: _SchemaGraph) -> None:
             _discover_annotation(annotation, graph=graph)
 
 
-def _validate_interface_implementations(graph: _SchemaGraph) -> None:
-    """Per §4/§8b: an interface's field contract is checked once the whole graph is known. Since
-    bramble has implementing types inherit from the interface directly (no `implements=[...]`),
-    dataclass field inheritance already makes outright field *omission* structurally impossible --
-    so the checks that actually matter are covariance ones a subclass *can* still violate by
-    re-annotating a field: weakening a non-null interface field to nullable, or adding a new
-    required argument an interface field doesn't declare (matches graphql-core's own interface-
-    conformance check, `validate_type_implements_interface`).
-    """
-    for interface_name, implementors in graph.implementors_by_interface.items():
-        interface_cls = graph.types_by_name[interface_name]
-        interface_fields = {field.name: field for field in interface_cls.__bramble_type_info__.fields}
-
-        for implementor in implementors:
-            implementor_info = implementor.__bramble_type_info__
-            implementor_fields = {field.name: field for field in implementor_info.fields}
-
-            for field_name, interface_field in interface_fields.items():
-                implementor_field = implementor_fields.get(field_name)
-                if implementor_field is None:
-                    raise SchemaError(
-                        f"'{implementor_info.name}' does not implement field '{field_name}' "
-                        f"declared by interface '{interface_name}'"
-                    )
-
-                if interface_field.is_nullable is False and implementor_field.is_nullable is True:
-                    raise SchemaError(
-                        f"'{implementor_info.name}.{field_name}' is nullable, but interface "
-                        f"'{interface_name}' declares it as non-null"
-                    )
-
-                interface_argument_names = {argument.name for argument in interface_field.arguments}
-                for argument in implementor_field.arguments:
-                    if (
-                        argument.name not in interface_argument_names
-                        and not argument.is_nullable
-                        and not argument.has_default
-                    ):
-                        raise SchemaError(
-                            f"'{implementor_info.name}.{field_name}' adds required argument "
-                            f"'{argument.name}' not declared by interface '{interface_name}'"
-                        )
-
-
 def _scalar_name(python_type: Any, scalar_definition: ScalarDefinition) -> str:
     """The GraphQL name a registered scalar resolves to: its explicit `name=`, or (matching
     `resolve_graphql_type`'s own fallback for an as-yet-unregistered scalar reference) the
@@ -356,7 +312,7 @@ class Schema:
         types: Sequence[_type] = (),
         extensions: Sequence[object] = (),
         config: SchemaConfig | None = None,
-        execution_context_class: _type | None = None,
+        default_context_factory: Callable[[], Any] | None = None,
         schema_directives: Sequence[object] = (),
     ) -> None:
         if getattr(query, "__bramble_type_info__", None) is None:
@@ -408,7 +364,7 @@ class Schema:
         self.types = tuple(types)
         self.extensions = tuple(extensions)
         self.config = config if config is not None else SchemaConfig()
-        self.execution_context_class = execution_context_class
+        self.default_context_factory = default_context_factory
         self.schema_directives = tuple(schema_directives)
 
         roots = [root for root in (query_root, mutation, subscription, *types) if root is not None]
@@ -433,7 +389,9 @@ class Schema:
             for annotation in directive_hints.values():
                 _discover_annotation(annotation, graph=graph)
 
-        _validate_interface_implementations(graph)
+        # Interface conformance and name resolution are validated inside `compile_schema` (Rust),
+        # which is the boundary that owns schema *shape* -- see
+        # `bramble_core::schema::validate_schema_shape`. Nothing to do here.
 
         # `schema_directives=[...]` instances (e.g. `Link(url=...)`) are applied to the schema
         # block itself, never attached to any type/field the graph walk above already visits --
@@ -675,10 +633,9 @@ class Schema:
             await generator.aclose()
 
     def to_sdl(self) -> str:
-        """Renders this schema's GraphQL SDL (§6/§9/§12): every reachable type/union/scalar, plus
-        the operation and schema directives actually in use. See `bramble_core::sdl::render_sdl`'s
-        own doc comment for the documented rendering gaps (no argument default values, no `enum`
-        support yet).
+        """Renders this schema's GraphQL SDL (§6/§9/§12): every reachable type/union/scalar/enum,
+        plus the operation and schema directives actually in use. See `bramble_core::sdl::render_sdl`'s
+        own doc comment for the remaining documented rendering gaps.
         """
         return render_sdl(self._compiled)
 

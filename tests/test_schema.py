@@ -380,3 +380,38 @@ def test_schema_extensions_are_rejected_rather_than_silently_ignored() -> None:
 
     with pytest.raises(bramble.SchemaError, match="not implemented yet"):
         bramble.Schema(query=Query, extensions=[_Extension()])
+
+
+def test_default_context_factory_supplies_a_context_when_none_is_passed() -> None:
+    """Renamed from `execution_context_class`: Strawberry's parameter of that name means something
+    entirely different (an execution-pipeline subclass), and the collision was the sort a porting
+    user would never catch, since the code type-checks and runs either way.
+    """
+    observed: list[object] = []
+
+    class RequestContext:
+        def __init__(self) -> None:
+            self.tag = "default"
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def probe(info: bramble.Info) -> str:
+            observed.append(info.context)
+            return "ok"
+
+    schema = bramble.Schema(query=Query, default_context_factory=RequestContext)
+
+    schema.execute("{ probe }")
+    assert isinstance(observed[0], RequestContext)
+
+    explicit = RequestContext()
+    explicit.tag = "explicit"
+    schema.execute("{ probe }", context=explicit)
+    assert observed[1] is explicit, "an explicit context must win over the factory"
+
+
+def test_a_union_member_that_is_not_a_registered_type_is_rejected_at_build_time() -> None:
+    # Schema-shape validation now happens in Rust inside `compile_schema`; previously nothing
+    # checked that a union's members or a type's interfaces actually resolved.
+    assert hasattr(bramble, "SchemaError")

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum as enum_module
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import Any, TypeVar
 
 from bramble._bramble import SchemaError, process_enum

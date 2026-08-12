@@ -105,6 +105,7 @@ pub struct PyFieldInfo {
     pub graphql_type: String,
     pub type_info: Py<PyGraphQLType>,
     pub description: Option<String>,
+    pub deprecation_reason: Option<String>,
     pub is_nullable: bool,
     pub has_resolver: bool,
     pub parent_parameter: Option<String>,
@@ -126,6 +127,7 @@ pub(crate) fn convert_field(py: Python<'_>, field: FieldDefinition) -> PyResult<
         graphql_type: field.graphql_type.to_sdl_string(),
         type_info: Py::new(py, convert_graphql_type(py, &field.graphql_type)?)?,
         description: field.description,
+        deprecation_reason: field.deprecation_reason,
         has_resolver: field.has_resolver,
         parent_parameter: field.parent_parameter,
         info_parameter: field.info_parameter,
@@ -313,6 +315,10 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
             .getattr("description")
             .ok()
             .and_then(|value| value.extract().ok());
+        let deprecation_reason: Option<String> = dataclass_field
+            .getattr("deprecation_reason")
+            .ok()
+            .and_then(|value| value.extract().ok());
         let graphql_type = resolve_graphql_type(py, &typing, &resolved_type)?;
 
         let resolver = dataclass_field.getattr("resolver").unwrap_or_else(|_| py.None().into_bound(py));
@@ -337,6 +343,7 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
             graphql_name,
             graphql_type,
             description,
+            deprecation_reason,
             has_resolver,
             parent_parameter,
             info_parameter,

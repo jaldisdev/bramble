@@ -177,3 +177,31 @@ never owned it to begin with (whatever created it upstream remains responsible f
   graph at all (no SDL representation, nothing to validate ahead of time), so a mistake in one
   (an unresolvable annotation, an unsupported parameter kind) only surfaces the first time a query
   actually exercises it.
+
+## Providers must be module-level functions
+
+bramble identifies a provider by the identity of the callable object itself,
+both for the per-request cache and for `resolved_dependencies=` seeding. That
+is correct and cheap for the ordinary case -- a module-level `async def` that
+outlives every request -- but it means a provider **created fresh per request**
+(a closure, a `functools.partial`, a bound method of a short-lived object) is
+not a supported shape:
+
+```python
+# Don't: a new callable object each time, so nothing can cache or seed it.
+def make_view(request):
+    async def provider() -> Client: ...
+    return Annotated[Client, bramble.Depends(provider)]
+```
+
+Define providers at module level and pass per-request information through
+`Info` (`info.context`) instead:
+
+```python
+async def get_client(info: bramble.Info) -> AsyncIterator[Client]:
+    client = await connect(info.context["dsn"])
+    try:
+        yield client
+    finally:
+        await client.aclose()
+```

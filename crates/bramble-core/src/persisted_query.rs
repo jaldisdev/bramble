@@ -27,10 +27,9 @@ use crate::schema::CompiledSchema;
 use crate::validation::validate_query;
 
 /// Whether a persisted-query request was served straight from the cache, or freshly
-/// parsed/validated and just registered under its hash. Task 11's execution bridge doesn't exist
-/// yet to actually *run* either outcome; this exists so behavior is externally observable/testable
-/// now (a cache hit vs. a fresh parse+validate) without needing to expose `ExecutableDocument`
-/// itself across the PyO3 boundary.
+/// parsed/validated and just registered under its hash. Reported to Python alongside the cached
+/// document itself (`PersistedQueryResult`), so a caller can both observe the hit/miss and execute
+/// the result without re-parsing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersistedQueryOutcome {
     CacheHit,
@@ -40,8 +39,8 @@ pub enum PersistedQueryOutcome {
 /// An in-process, per-schema cache of parsed + validated query plans, keyed by the SHA-256 hex
 /// digest of the raw query document text (the Apollo Automatic Persisted Queries convention --
 /// hashing the raw string as-is, no normalization, since the client computes the same hash
-/// independently). The cached value is the plan as it stands after Tasks 2/9 (parsed,
-/// schema-validated) -- deliberately *not* further "lowered" against per-request variable values,
+/// independently). The cached value is the parsed, schema-validated document -- deliberately *not*
+/// further "lowered" against per-request variable values,
 /// since `@skip`/`@include` and custom operation-directive transforms both depend on those (§7's
 /// caveat); the cache represents how to execute the query shape, not a resolved request.
 #[derive(Clone)]
@@ -149,6 +148,7 @@ mod tests {
                     graphql_name: None,
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
                     description: None,
+                    deprecation_reason: None,
                     has_resolver: false,
                     parent_parameter: None,
                     info_parameter: None,

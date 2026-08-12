@@ -79,7 +79,7 @@ class Query:
 schema.execute("{ posts { title } }", context=my_database)
 ```
 
-If `Schema(execution_context_class=SomeClass)` was set, `info.context`
+If `Schema(default_context_factory=make_context)` was set, `info.context`
 defaults to a fresh `SomeClass()` instance whenever a caller doesn't pass
 `context=` explicitly.
 

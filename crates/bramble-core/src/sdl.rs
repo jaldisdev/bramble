@@ -74,7 +74,14 @@ fn render_applied_directives(directives: &[AppliedDirective]) -> String {
 
 fn render_argument(argument: &ArgumentDefinition, auto_camel_case: bool) -> String {
     let name = effective_name(&argument.name, &argument.graphql_name, auto_camel_case);
-    let mut out = format!("{name}: {}", argument.graphql_type.to_sdl_string());
+    // An argument's description renders inline (`"""text""" name: Type`) rather than on its own
+    // line the way a field's does: arguments are printed comma-separated inside one `(...)`, so a
+    // line break here would split the argument list across lines mid-expression.
+    let description = match &argument.description {
+        Some(text) if !text.is_empty() => format!("\"\"\"{text}\"\"\" "),
+        _ => String::new(),
+    };
+    let mut out = format!("{description}{name}: {}", argument.graphql_type.to_sdl_string());
     // `= <default>` goes between the type and any directives, per the spec's `InputValueDefinition`
     // grammar. Without it a defaulted non-null argument reads as *required* to every schema
     // consumer, even though bramble's own validation treats it as optional.
@@ -112,6 +119,9 @@ fn render_field(field: &FieldDefinition, auto_camel_case: bool) -> String {
     out.push_str(&render_arguments(&field.arguments, auto_camel_case));
     out.push_str(": ");
     out.push_str(&field.graphql_type.to_sdl_string());
+    if let Some(reason) = &field.deprecation_reason {
+        out.push_str(&format!(" @deprecated(reason: {reason:?})"));
+    }
     out.push_str(&render_applied_directives(&field.applied_directives));
     out.push('\n');
     out
@@ -355,6 +365,7 @@ mod tests {
                     graphql_name: None,
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
                     description: None,
+                    deprecation_reason: None,
                     has_resolver: true,
                     parent_parameter: None,
                     info_parameter: None,
@@ -447,6 +458,7 @@ mod tests {
                     graphql_name: None,
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("ID".to_string()))),
                     description: None,
+                    deprecation_reason: None,
                     has_resolver: false,
                     parent_parameter: None,
                     info_parameter: None,
@@ -471,6 +483,7 @@ mod tests {
                         graphql_name: Some("byId".to_string()),
                         graphql_type: GraphQLType::Named("ID".to_string()),
                         description: None,
+                        deprecation_reason: None,
                         has_resolver: false,
                         parent_parameter: None,
                         info_parameter: None,
@@ -482,6 +495,7 @@ mod tests {
                         graphql_name: Some("byName".to_string()),
                         graphql_type: GraphQLType::Named("String".to_string()),
                         description: None,
+                        deprecation_reason: None,
                         has_resolver: false,
                         parent_parameter: None,
                         info_parameter: None,
@@ -527,6 +541,7 @@ mod tests {
                     graphql_name: Some("oldField".to_string()),
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
                     description: None,
+                    deprecation_reason: None,
                     has_resolver: true,
                     parent_parameter: None,
                     info_parameter: None,
@@ -569,6 +584,7 @@ mod tests {
                     graphql_name: None,
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
                     description: None,
+                    deprecation_reason: None,
                     has_resolver: true,
                     parent_parameter: None,
                     info_parameter: None,
@@ -700,6 +716,7 @@ mod tests {
                 graphql_name: None,
                 graphql_type: GraphQLType::Named("Post".to_string()),
                 description: None,
+                deprecation_reason: None,
                 has_resolver: true,
                 parent_parameter: None,
                 info_parameter: None,

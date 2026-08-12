@@ -417,3 +417,17 @@ def test_argument_default_lists_and_nulls_render_as_graphql_literals() -> None:
     sdl = bramble.Schema(query=Query).to_sdl()
 
     assert 'search(tags: [String!]! = ["a", "b"], cursor: String = null)' in sdl
+
+
+def test_to_sdl_renders_argument_descriptions_inline() -> None:
+    """Inline rather than on their own line: arguments print comma-separated inside one `(...)`,
+    so a line break would split the argument list mid-expression.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def greet(name: Annotated[str, bramble.argument(description="Who to greet")]) -> str:
+            return name
+
+    assert 'greet("""Who to greet""" name: String!): String!' in bramble.Schema(query=Query).to_sdl()

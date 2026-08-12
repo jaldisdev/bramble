@@ -230,14 +230,11 @@ class __Field:
 
     @bramble_field
     def is_deprecated(parent: Parent[Any]) -> bool:
-        """Always `false`: bramble has no field-level deprecation API (`bramble.field(...)` takes
-        no `deprecation_reason`), unlike arguments and enum values which do.
-        """
-        return False
+        return parent.deprecation_reason is not None
 
     @bramble_field
     def deprecation_reason(parent: Parent[Any]) -> str | None:
-        return None
+        return parent.deprecation_reason
 
 
 class __Directive:
@@ -288,7 +285,11 @@ class __Type:
         type_class = info.schema.types_by_name.get(parent.name)
         if type_class is None:
             return None
-        return list(type_class.__bramble_type_info__.fields)
+        return [
+            field_info
+            for field_info in type_class.__bramble_type_info__.fields
+            if include_deprecated or field_info.deprecation_reason is None
+        ]
 
     @bramble_field
     def interfaces(parent: Parent[_TypeRef], info: Info) -> list["__Type"] | None:

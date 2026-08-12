@@ -44,6 +44,7 @@ class Field(dataclasses.Field):
         *,
         name: str | None = None,
         description: str | None = None,
+        deprecation_reason: str | None = None,
         directives: Sequence[object] = (),
         extensions: Sequence[object] = (),
         default: Any = dataclasses.MISSING,
@@ -90,6 +91,7 @@ class Field(dataclasses.Field):
         # under a different attribute to avoid clobbering it.
         self.graphql_name = name
         self.description = description
+        self.deprecation_reason = deprecation_reason
         self.directives = tuple(directives)
         self.extensions = tuple(extensions)
         self._resolver: Callable[..., Any] | None = None
@@ -119,6 +121,7 @@ def field(
     *,
     name: str | None = None,
     description: str | None = None,
+    deprecation_reason: str | None = None,
     directives: Sequence[object] = (),
     extensions: Sequence[object] = (),
     default: Any = dataclasses.MISSING,
@@ -128,6 +131,7 @@ def field(
         resolver,
         name=name,
         description=description,
+        deprecation_reason=deprecation_reason,
         directives=directives,
         extensions=extensions,
         default=default,
@@ -136,6 +140,17 @@ def field(
 
 
 def mutation(*args: Any, **kwargs: Any) -> Any:
+    return field(*args, **kwargs)
+
+
+def subscription(*args: Any, **kwargs: Any) -> Any:
+    """An alias for `bramble.field`, for declaring a field on the subscription root type.
+
+    Purely for readability at the declaration site -- a subscription field is an ordinary field
+    whose resolver happens to be an async generator, and nothing downstream distinguishes one
+    declared this way from one declared with `bramble.field`. Exists so the three root types read
+    symmetrically (`bramble.field` / `bramble.mutation` / `bramble.subscription`).
+    """
     return field(*args, **kwargs)
 
 

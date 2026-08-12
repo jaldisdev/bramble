@@ -99,6 +99,9 @@ pub struct FieldDefinition {
     pub graphql_name: Option<String>,
     pub graphql_type: GraphQLType,
     pub description: Option<String>,
+    /// `bramble.field(deprecation_reason=...)` -- rendered as `@deprecated(reason: "...")` in SDL
+    /// and reported through `__Field.isDeprecated`/`deprecationReason`.
+    pub deprecation_reason: Option<String>,
     pub has_resolver: bool,
     /// The resolver parameter bound to the parent/root value (`Parent[T]`), if any.
     pub parent_parameter: Option<String>,
@@ -294,6 +297,130 @@ mod tests {
         assert!(!GraphQLType::NonNull(Box::new(GraphQLType::List(Box::new(named("Int"))))).is_nullable());
     }
 
+    fn field(name: &str, graphql_type: GraphQLType, arguments: Vec<ArgumentDefinition>) -> FieldDefinition {
+        FieldDefinition {
+            name: name.to_string(),
+            graphql_name: None,
+            graphql_type,
+            description: None,
+            deprecation_reason: None,
+            has_resolver: false,
+            parent_parameter: None,
+            info_parameter: None,
+            arguments,
+            applied_directives: Vec::new(),
+        }
+    }
+
+    fn argument(name: &str, graphql_type: GraphQLType, has_default: bool) -> ArgumentDefinition {
+        ArgumentDefinition {
+            name: name.to_string(),
+            graphql_name: None,
+            graphql_type,
+            has_default,
+            default_value: None,
+            description: None,
+            deprecation_reason: None,
+            applied_directives: Vec::new(),
+        }
+    }
+
+    fn type_def(name: &str, kind: TypeKind, interfaces: Vec<&str>, fields: Vec<FieldDefinition>) -> TypeDefinition {
+        TypeDefinition {
+            kind,
+            name: name.to_string(),
+            description: None,
+            one_of: false,
+            interfaces: interfaces.into_iter().map(str::to_string).collect(),
+            enum_values: Vec::new(),
+            fields,
+            applied_directives: Vec::new(),
+        }
+    }
+
+    fn non_null(name: &str) -> GraphQLType {
+        GraphQLType::NonNull(Box::new(named(name)))
+    }
+
+    fn check(types: Vec<TypeDefinition>, unions: Vec<UnionDefinition>) -> Result<(), String> {
+        let types = types.into_iter().map(|type_def| (type_def.name.clone(), type_def)).collect();
+        let unions = unions.into_iter().map(|union| (union.name.clone(), union)).collect();
+        validate_schema_shape(&types, &unions, &HashSet::new())
+    }
+
+    #[test]
+    fn a_conforming_implementor_passes() {
+        let node = type_def("Node", TypeKind::Interface, vec![], vec![field("id", non_null("ID"), vec![])]);
+        let user = type_def("User", TypeKind::Type, vec!["Node"], vec![field("id", non_null("ID"), vec![])]);
+        check(vec![node, user], vec![]).expect("a conforming implementor is valid");
+    }
+
+    #[test]
+    fn widening_a_non_null_interface_field_to_nullable_is_rejected() {
+        let node = type_def("Node", TypeKind::Interface, vec![], vec![field("id", non_null("ID"), vec![])]);
+        let user = type_def("User", TypeKind::Type, vec!["Node"], vec![field("id", named("ID"), vec![])]);
+        let error = check(vec![node, user], vec![]).expect_err("nullability widening must be rejected");
+        assert!(error.contains("is nullable, but interface"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn adding_a_required_argument_the_interface_does_not_declare_is_rejected() {
+        let node = type_def("Node", TypeKind::Interface, vec![], vec![field("id", non_null("ID"), vec![])]);
+        let user = type_def(
+            "User",
+            TypeKind::Type,
+            vec!["Node"],
+            vec![field("id", non_null("ID"), vec![argument("format", non_null("String"), false)])],
+        );
+        let error = check(vec![node, user], vec![]).expect_err("a new required argument must be rejected");
+        assert!(error.contains("adds required argument"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn adding_an_optional_or_defaulted_argument_is_allowed() {
+        let node = type_def("Node", TypeKind::Interface, vec![], vec![field("id", non_null("ID"), vec![])]);
+        let nullable_extra = type_def(
+            "A",
+            TypeKind::Type,
+            vec!["Node"],
+            vec![field("id", non_null("ID"), vec![argument("format", named("String"), false)])],
+        );
+        let defaulted_extra = type_def(
+            "B",
+            TypeKind::Type,
+            vec!["Node"],
+            vec![field("id", non_null("ID"), vec![argument("format", non_null("String"), true)])],
+        );
+        check(vec![node, nullable_extra, defaulted_extra], vec![]).expect("optional additions are allowed");
+    }
+
+    #[test]
+    fn a_missing_interface_field_is_rejected() {
+        let node = type_def("Node", TypeKind::Interface, vec![], vec![field("id", non_null("ID"), vec![])]);
+        let user = type_def("User", TypeKind::Type, vec!["Node"], vec![]);
+        let error = check(vec![node, user], vec![]).expect_err("a missing field must be rejected");
+        assert!(error.contains("does not implement field"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn implementing_an_unregistered_interface_is_rejected() {
+        let user = type_def("User", TypeKind::Type, vec!["Ghost"], vec![]);
+        let error = check(vec![user], vec![]).expect_err("an unresolvable interface name must be rejected");
+        assert!(error.contains("not a registered type"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn a_union_member_that_resolves_to_nothing_is_rejected() {
+        let union = UnionDefinition {
+            name: "Media".to_string(),
+            description: None,
+            member_names: vec!["Audio".to_string()],
+            has_custom_resolve_type: false,
+        };
+        let error = check(vec![], vec![union]).expect_err("an unresolvable union member must be rejected");
+        assert!(error.contains("not a registered type"), "unexpected: {error}");
+    }
+
     #[test]
     fn inner_name_unwraps_every_wrapper_layer() {
         let deep = GraphQLType::NonNull(Box::new(GraphQLType::List(Box::new(GraphQLType::NonNull(Box::new(
@@ -302,4 +429,81 @@ mod tests {
         assert_eq!(deep.inner_name(), "User");
         assert_eq!(named("User").inner_name(), "User");
     }
+}
+
+/// Validates every type's interface conformance against the interfaces it declares, plus that each
+/// name a type or union refers to actually resolves (§4/§8b). Runs once, when the schema is
+/// compiled -- this is the "Rust owns schema-shape validation" boundary; it used to live in Python
+/// (`bramble._schema._validate_interface_implementations`), which meant the compiled schema was
+/// assembled without anything checking its shape.
+///
+/// The conformance checks are deliberately the covariance ones an implementor can still violate by
+/// *re-annotating* an inherited field: bramble has implementing types inherit from the interface
+/// directly (there is no `implements=[...]` list to get out of sync), so dataclass field
+/// inheritance already makes outright omission structurally impossible. This matches the checks
+/// graphql-core's own `validate_type_implements_interface` actually performs.
+pub fn validate_schema_shape(
+    types: &HashMap<String, TypeDefinition>,
+    unions: &HashMap<String, UnionDefinition>,
+    scalar_names: &HashSet<String>,
+) -> Result<(), String> {
+    for type_def in types.values() {
+        for interface_name in &type_def.interfaces {
+            let Some(interface) = types.get(interface_name) else {
+                return Err(format!(
+                    "'{}' implements interface '{interface_name}', which is not a registered type",
+                    type_def.name
+                ));
+            };
+            check_implements(type_def, interface)?;
+        }
+    }
+
+    for union_def in unions.values() {
+        for member_name in &union_def.member_names {
+            // A union member must be a real object type. Tolerating a scalar name here would let a
+            // union silently include something no `... on Member` selection could ever match.
+            if !types.contains_key(member_name) && !scalar_names.contains(member_name) {
+                return Err(format!(
+                    "union '{}' has member '{member_name}', which is not a registered type",
+                    union_def.name
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn check_implements(implementor: &TypeDefinition, interface: &TypeDefinition) -> Result<(), String> {
+    for interface_field in &interface.fields {
+        let Some(implementor_field) = implementor.fields.iter().find(|field| field.name == interface_field.name) else {
+            return Err(format!(
+                "'{}' does not implement field '{}' declared by interface '{}'",
+                implementor.name, interface_field.name, interface.name
+            ));
+        };
+
+        // Widening a non-null interface field to nullable breaks every client that trusted the
+        // interface's own contract.
+        if !interface_field.graphql_type.is_nullable() && implementor_field.graphql_type.is_nullable() {
+            return Err(format!(
+                "'{}.{}' is nullable, but interface '{}' declares it as non-null",
+                implementor.name, interface_field.name, interface.name
+            ));
+        }
+
+        for argument in &implementor_field.arguments {
+            let declared_by_interface = interface_field.arguments.iter().any(|other| other.name == argument.name);
+            // A *newly required* argument is the violation: a client selecting the field through
+            // the interface has no way to know it must supply one.
+            if !declared_by_interface && !argument.graphql_type.is_nullable() && !argument.has_default {
+                return Err(format!(
+                    "'{}.{}' adds required argument '{}' not declared by interface '{}'",
+                    implementor.name, interface_field.name, argument.name, interface.name
+                ));
+            }
+        }
+    }
+    Ok(())
 }

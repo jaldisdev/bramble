@@ -40,6 +40,12 @@ or while resolving that event's own selection set) is scoped to that single
 response's `"errors"` list -- it doesn't end the subscription; the generator
 keeps running and later events still deliver normally.
 
+`bramble.subscription` is available as an alias for `bramble.field`, so the
+three root types read symmetrically (`bramble.field` / `bramble.mutation` /
+`bramble.subscription`). It is purely a readability choice at the declaration
+site -- a subscription field is an ordinary field whose resolver happens to be
+an async generator, and nothing downstream tells the two spellings apart.
+
 ## Serving subscriptions over WebSocket
 
 Over HTTP, subscriptions are served via the `graphql-transport-ws`

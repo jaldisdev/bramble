@@ -11,7 +11,7 @@ bramble.Schema(
     directives: Sequence[Callable] = (),
     types: Sequence[type] = (),
     config: SchemaConfig | None = None,
-    execution_context_class: type | None = None,
+    default_context_factory: Callable[[], Any] | None = None,
     schema_directives: Sequence[object] = (),
 )
 ```
@@ -29,12 +29,18 @@ bramble.Schema(
   field typed as the interface itself).
 - **`config`** -- a [`SchemaConfig`](schema-configurations.md) controlling
   naming, custom scalar registration, and batching.
-- **`execution_context_class`** -- if given, instantiated with no arguments
-  and used as the resolver-facing `context` for any call to
+- **`default_context_factory`** -- if given, called with no arguments to
+  produce the resolver-facing `context` for any call to
   `execute`/`execute_async`/`subscribe_async`/`execute_incremental` that
   doesn't pass its own `context=...` explicitly. Useful when a caller (an
   HTTP integration, a test) can reasonably be expected to always supply its
   own context, but you still want a sensible default for ad hoc calls.
+
+  Note for anyone porting a Strawberry schema: this is deliberately *not*
+  named `execution_context_class`. Strawberry's parameter of that name takes
+  a `GraphQLExecutionContext` subclass that customises the execution
+  pipeline, which is a different concept entirely -- reusing the name for
+  this would have type-checked, run, and quietly done something else.
 - **`schema_directives`** -- applied [schema directive](schema-directives.md)
   instances attached to the `schema { ... }` block itself (there's no
   `@bramble.type`-decorated class representing the schema itself to attach
