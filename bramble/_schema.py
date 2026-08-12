@@ -25,6 +25,7 @@ import typing
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Callable, Sequence
 from typing import Any
 
+from bramble import _resolver
 from bramble._bramble import (
     PersistedDocument,
     SchemaError,
@@ -684,3 +685,12 @@ class Schema:
     def __str__(self) -> str:
         """The schema's SDL -- so `print(schema)` renders it. See `to_sdl`."""
         return self.to_sdl()
+
+
+# `bramble._resolver.Info` annotates `schema: "Schema"`, but `_resolver` cannot import this module
+# (the dependency runs the other way: `_schema` -> `_execution` -> `_resolver`). Binding the name
+# here, once the class actually exists, is what makes `typing.get_type_hints(Info)` resolve instead
+# of raising `NameError` -- a `TYPE_CHECKING`-only import would satisfy a type checker while leaving
+# the runtime annotation dangling. Importing this module is unconditional (`bramble/__init__` does
+# it), so the name is always bound before anything can observe it missing.
+_resolver.Schema = Schema

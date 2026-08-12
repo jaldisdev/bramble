@@ -33,46 +33,17 @@ from bramble._dependency import DependencyScope, resolve_dependencies
 from bramble._error import ErrorCode, GraphQLError
 from bramble._error import error_to_dict as _error_to_dict
 from bramble._interface import resolve_interface_type
-from bramble._resolver import Info
+
+# `Path`/`SelectedField` are defined in `_resolver` (they are resolver-facing types) and
+# re-exported here, where they are actually constructed, so the original import path keeps
+# working for anything that used it.
+from bramble._resolver import Info, Path, SelectedField
 from bramble._union import resolve_union_type
 from bramble.directive import apply_directive
 
 if TYPE_CHECKING:
     from bramble._bramble import ArgumentInfo, FieldInfo, GraphQLTypeInfo, LoweredField, PersistedDocument
     from bramble._schema import Schema
-
-
-@dataclass(frozen=True, slots=True)
-class Path:
-    """One segment of a GraphQL response path (§8's `path` field), linked back to its parent --
-    mirrors graphql-core's own `Path` rather than a plain list, so building one for a deeply
-    nested field is O(1) (append a segment) instead of O(depth) (copy-and-append a list).
-    """
-
-    key: str | int
-    prev: "Path | None" = None
-
-    def as_list(self) -> list[str | int]:
-        segments: list[str | int] = []
-        node: Path | None = self
-        while node is not None:
-            segments.append(node.key)
-            node = node.prev
-        segments.reverse()
-        return segments
-
-
-@dataclass(frozen=True, slots=True)
-class SelectedField:
-    """A read-only view of one of the current field's own sub-selections (`Info.selected_fields`),
-    for a resolver that wants to inspect what's being asked of it (e.g. to avoid fetching a column
-    nothing selected). Only one level deep -- each entry's own `selections` goes one level further,
-    same as the query itself nests.
-    """
-
-    name: str
-    arguments: dict[str, Any]
-    selections: list["SelectedField"]
 
 
 def _selected_fields(lowered_fields: Sequence["LoweredField"]) -> list[SelectedField]:

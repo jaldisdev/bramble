@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 
 import pytest
 
@@ -264,3 +265,80 @@ def test_schema_execute_incremental_delegates_correctly() -> None:
     assert payloads[0] == {"data": {"id": "q1"}, "hasNext": True}
     assert payloads[1]["incremental"][0]["label"] == "extra"
     assert payloads[1]["hasNext"] is False
+
+
+@bramble.type
+class _GcItem:
+    @bramble.field
+    async def name() -> str:
+        await asyncio.sleep(0)
+        return "item"
+
+
+def test_deferred_and_streamed_jobs_survive_a_garbage_collection_pass() -> None:
+    """Incremental delivery completes across a full GC pass between the initial payload and the
+    patches.
+
+    Deliberately *not* claimed as a regression test for the discarded-task-reference bug (audit
+    finding 24): it was checked against the unfixed code and still passed. asyncio only keeps a
+    weak reference in its task registry, but a task that is scheduled or awaiting a future is kept
+    alive by the loop's own callback queue, so the collection window is real but not reachable on
+    demand from a test. This covers the surrounding behaviour; `_JobTracker`'s own reference
+    handling is covered directly below.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        async def slow() -> str:
+            await asyncio.sleep(0)
+            return "deferred value"
+
+        @bramble.field
+        async def items() -> bramble.Streamable[_GcItem]:
+            for _ in range(3):
+                await asyncio.sleep(0)
+                yield _GcItem()
+
+    schema = bramble.Schema(query=Query, types=[_GcItem])
+
+    async def run() -> list[dict]:
+        payloads = []
+        generator = schema.execute_incremental(
+            "query { items @stream(initialCount: 0) { name } ... @defer { slow } }"
+        )
+        async for payload in generator:
+            if not payloads:
+                # Between the initial payload and the patches: anything only weakly referenced is
+                # gone from here on.
+                gc.collect()
+            payloads.append(payload)
+        return payloads
+
+    payloads = asyncio.run(asyncio.wait_for(run(), timeout=10))
+
+    assert payloads[0]["hasNext"] is True
+    assert payloads[-1]["hasNext"] is False
+    delivered = [patch for payload in payloads[1:] for patch in payload.get("incremental", [])]
+    assert delivered, "no incremental patches arrived -- a job was collected mid-flight"
+
+
+def test_job_tracker_releases_task_references_once_jobs_finish() -> None:
+    # The strong references must not become a leak: they are discarded as each task completes.
+    from bramble._execution import _JobTracker
+
+    tracker = _JobTracker()
+
+    async def run() -> None:
+        async def job() -> None:
+            await asyncio.sleep(0)
+
+        tracker.spawn(job())
+        assert len(tracker.tasks) == 1
+        # The done-callback that discards the reference is scheduled with `call_soon`, so it needs
+        # a further turn beyond the one that finishes the task itself.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert tracker.tasks == set()
+
+    asyncio.run(run())

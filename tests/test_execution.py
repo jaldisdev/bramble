@@ -23,6 +23,7 @@ import asyncio
 import base64
 import datetime
 import decimal
+import typing
 import uuid
 from typing import Annotated, NewType, Union
 
@@ -959,3 +960,25 @@ def test_info_python_name_respects_an_explicit_field_name_override() -> None:
     bramble.Schema(query=Query).execute("{ renamed }")
 
     assert observed == {"field_name": "renamed", "python_name": "original_name"}
+
+
+def test_info_annotations_resolve_at_runtime() -> None:
+    """`typing.get_type_hints(Info)` used to raise `NameError`: `Path`, `SelectedField`, and
+    `Schema` were annotated as strings that nothing imported at runtime. A `TYPE_CHECKING`-only
+    import satisfies a linter and a type checker while leaving the annotation just as dangling,
+    which is exactly the trap this guards against -- so assert resolution, not tidiness.
+    """
+    hints = typing.get_type_hints(bramble.Info)
+
+    assert hints["path"] is bramble.Path
+    assert hints["selected_fields"] == list[bramble.SelectedField]
+    assert hints["schema"] is bramble.Schema
+
+
+def test_path_and_selected_field_are_importable_from_both_modules() -> None:
+    # They moved to `bramble._resolver` to break the import cycle; `bramble._execution` re-exports
+    # them so the older path still resolves to the same objects.
+    from bramble import _execution, _resolver
+
+    assert _execution.Path is _resolver.Path
+    assert _execution.SelectedField is _resolver.SelectedField

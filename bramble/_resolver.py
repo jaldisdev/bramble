@@ -20,15 +20,53 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 if TYPE_CHECKING:
-    # `Info`'s annotations below name these purely for documentation and type-checker benefit --
-    # nothing at runtime resolves them (the attributes are assigned by the executor, never read
-    # off `__annotations__`). Importing them here anyway keeps the names real, so a reader or a
-    # tool following `Info.path` lands somewhere instead of on an unresolvable string.
-    from bramble._execution import Path, SelectedField
+    # `Schema` is the one name here that genuinely cannot be imported at runtime: `_schema` imports
+    # `_execution`, which imports this module. It is instead bound late, by `_schema` itself once
+    # the class exists -- see the assignment at the bottom of `bramble/_schema.py`, which is what
+    # keeps `typing.get_type_hints(Info)` working.
     from bramble._schema import Schema
+
+# `Path` and `SelectedField` live here rather than in `bramble._execution` where they are built:
+# both are part of the *resolver-facing* surface (they are what `Info.path`/`Info.selected_fields`
+# hand a resolver), and defining them here is what lets `Info`'s own annotations reference them
+# without an import cycle. `bramble._execution` re-exports them, so the older import path still
+# works.
+@dataclass(frozen=True, slots=True)
+class Path:
+    """One segment of a GraphQL response path (§8's `path` field), linked back to its parent --
+    mirrors graphql-core's own `Path` rather than a plain list, so building one for a deeply
+    nested field is O(1) (append a segment) instead of O(depth) (copy-and-append a list).
+    """
+
+    key: str | int
+    prev: "Path | None" = None
+
+    def as_list(self) -> list[str | int]:
+        segments: list[str | int] = []
+        node: Path | None = self
+        while node is not None:
+            segments.append(node.key)
+            node = node.prev
+        segments.reverse()
+        return segments
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedField:
+    """A read-only view of one of the current field's own sub-selections (`Info.selected_fields`),
+    for a resolver that wants to inspect what's being asked of it (e.g. to avoid fetching a column
+    nothing selected). Only one level deep -- each entry's own `selections` goes one level further,
+    same as the query itself nests.
+    """
+
+    name: str
+    arguments: dict[str, Any]
+    selections: list["SelectedField"]
+
 
 ParentType = TypeVar("ParentType")
 ContextType = TypeVar("ContextType")
