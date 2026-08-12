@@ -23,6 +23,11 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
+# A real import, not a `TYPE_CHECKING` one: the compiled module has no cycle with this one, and
+# `Info`'s annotations must stay resolvable at runtime (see `_schema`'s late binding of `Schema`
+# for the one name that genuinely can't be).
+from bramble._bramble import GraphQLTypeInfo
+
 if TYPE_CHECKING:
     # `Schema` is the one name here that genuinely cannot be imported at runtime: `_schema` imports
     # `_execution`, which imports this module. It is instead bound late, by `_schema` itself once
@@ -106,6 +111,13 @@ class Info(Generic[ContextType, RootValueType]):
 
     field_name: str
     python_name: str
+    #: The `@bramble.type`-decorated class this field is being resolved on -- the *concrete* one,
+    #: already dispatched, when the field's declared type is an interface or union.
+    parent_type: type
+    #: This field's declared GraphQL type, wrappers included (`[Post!]!`).
+    return_type: GraphQLTypeInfo
+    #: The operation type currently executing: `"query"`, `"mutation"`, or `"subscription"`.
+    operation: str
     context: ContextType
     root_value: RootValueType
     variable_values: dict[str, Any]

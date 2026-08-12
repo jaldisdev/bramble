@@ -79,6 +79,7 @@ class _ExecutionState:
     query: str | None
     errors: list[GraphQLError]
     dependency_scope: DependencyScope
+    operation: str = "query"
 
 
 def _build_info(
@@ -88,6 +89,8 @@ def _build_info(
     path: Path,
     selections: Sequence["LoweredField"],
     state: _ExecutionState,
+    parent_type: type | None = None,
+    return_type: "GraphQLTypeInfo | None" = None,
 ) -> Info:
     """`field_name` is the name as written in the query (camelCase by default); `python_name` is
     the resolver/attribute identifier it maps back to (`postId` -> `post_id`). They are genuinely
@@ -98,6 +101,9 @@ def _build_info(
     info = Info()
     info.field_name = field_name
     info.python_name = python_name
+    info.parent_type = parent_type
+    info.return_type = return_type
+    info.operation = state.operation
     info.context = state.context
     info.root_value = state.root_value
     info.variable_values = state.variable_values
@@ -579,6 +585,8 @@ async def _execute_field(
         path=path,
         selections=selections,
         state=state,
+        parent_type=concrete_type,
+        return_type=field_info.type_info,
     )
 
     try:
@@ -805,6 +813,8 @@ async def _execute_field_incremental(
         path=path,
         selections=selections,
         state=state,
+        parent_type=concrete_type,
+        return_type=field_info.type_info,
     )
 
     try:
@@ -1011,6 +1021,8 @@ async def _start_streamed_field(
         path=path,
         selections=selections,
         state=state,
+        parent_type=concrete_type,
+        return_type=field_info.type_info,
     )
     resolver = getattr(concrete_type, field_info.name)
     kwargs = await _bind_resolver_kwargs(
@@ -1532,6 +1544,7 @@ async def execute_async(
         query=query_source,
         errors=errors,
         dependency_scope=scope,
+        operation=operation_type,
     )
 
     try:
@@ -1645,6 +1658,7 @@ async def execute_incremental(
         query=query_source,
         errors=errors,
         dependency_scope=scope,
+        operation=operation_type,
     )
     incremental = _IncrementalContext(patch_queue=asyncio.Queue(), tracker=_JobTracker())
 
@@ -1776,6 +1790,7 @@ async def subscribe_async(
             query=query_source,
             errors=[],
             dependency_scope=scope,
+            operation=operation_type,
         )
         info = _build_info(
             field_name=primary.field_name,
@@ -1783,6 +1798,8 @@ async def subscribe_async(
             path=field_path,
             selections=merged_selections,
             state=setup_state,
+            parent_type=root_type,
+            return_type=field_info.type_info,
         )
 
         resolver = getattr(root_type, field_info.name)
@@ -1813,6 +1830,7 @@ async def subscribe_async(
                     query=query_source,
                     errors=[],
                     dependency_scope=scope,
+                    operation=operation_type,
                 )
                 try:
                     value = await _finish_field(

@@ -405,3 +405,13 @@ def input(
         directives=directives,
         one_of=one_of,
     )
+
+
+def asdict(instance: Any) -> dict[str, Any]:
+    """Converts a `@bramble.type`/`@bramble.input` instance into a plain dict.
+
+    A thin pass-through to `dataclasses.asdict` -- bramble types are real dataclasses, so this
+    exists for discoverability rather than because it does anything extra. Recurses into nested
+    types, lists, and dicts, as `dataclasses.asdict` does.
+    """
+    return dataclasses.asdict(instance)

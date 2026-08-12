@@ -26,7 +26,8 @@ from bramble._private import Private  # noqa: F401
 from bramble._resolver import Argument, Depends, Info, Parent, Streamable, argument  # noqa: F401
 from bramble._scalar import ID, ScalarDefinition, Upload, UploadDefinition, scalar  # noqa: F401
 from bramble._schema import Schema  # noqa: F401
-from bramble._type import Field, field, input, interface, mutation, subscription, type  # noqa: F401
+from bramble._type import Field, asdict, field, input, interface, mutation, subscription, type  # noqa: F401
 from bramble._union import UnionDefinition, union  # noqa: F401
+from bramble._unset import UNSET, UnsetType  # noqa: F401
 from bramble.directive import DirectiveLocation, DirectiveValue, directive  # noqa: F401
 from bramble.schema_directive import Location, directive_field, schema_directive  # noqa: F401

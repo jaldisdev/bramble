@@ -476,3 +476,53 @@ def test_directive_and_location_markers_are_exported_from_the_package_root() -> 
     assert bramble.DirectiveLocation.FIELD.value == "FIELD"
     assert bramble.Location.OBJECT.value == "OBJECT"
     assert bramble.DirectiveValue is not None
+
+
+@bramble.input
+class _UnsetInput:
+    name: str | None = bramble.UNSET
+    nickname: str | None = bramble.UNSET
+
+
+def test_unset_distinguishes_an_omitted_field_from_an_explicit_null() -> None:
+    """GraphQL treats "not provided" and "provided as null" as different; Python's `None` collapses
+    them. `UNSET` is what keeps a partial-update mutation able to tell "leave alone" from "clear".
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def probe(input: _UnsetInput) -> str:
+            def render(name: str) -> str:
+                value = getattr(input, name)
+                return f"{name}=UNSET" if value is bramble.UNSET else f"{name}={value!r}"
+
+            return " ".join(render(name) for name in ("name", "nickname"))
+
+    schema = bramble.Schema(query=Query, types=[_UnsetInput])
+
+    assert schema.execute("{ probe(input: {}) }")["data"]["probe"] == "name=UNSET nickname=UNSET"
+    assert schema.execute("{ probe(input: {name: null}) }")["data"]["probe"] == "name=None nickname=UNSET"
+    assert schema.execute('{ probe(input: {name: "Ada"}) }')["data"]["probe"] == "name='Ada' nickname=UNSET"
+
+
+def test_an_unset_default_renders_no_sdl_default() -> None:
+    # UNSET has no GraphQL literal spelling; printing one would claim a default the server never
+    # actually applies.
+    @bramble.type
+    class Query:
+        @bramble.field
+        def probe(input: _UnsetInput) -> str:
+            return "x"
+
+    sdl = bramble.Schema(query=Query, types=[_UnsetInput]).to_sdl()
+
+    assert "name: String\n" in sdl
+    assert "= UNSET" not in sdl
+
+
+def test_unset_is_a_falsy_singleton() -> None:
+    assert bramble.UNSET is bramble.UnsetType()
+    assert not bramble.UNSET
+    assert repr(bramble.UNSET) == "UNSET"
+    assert str(bramble.UNSET) == ""

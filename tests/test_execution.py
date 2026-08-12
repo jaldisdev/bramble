@@ -982,3 +982,52 @@ def test_path_and_selected_field_are_importable_from_both_modules() -> None:
 
     assert _execution.Path is _resolver.Path
     assert _execution.SelectedField is _resolver.SelectedField
+
+
+def test_info_exposes_parent_type_return_type_and_operation() -> None:
+    observed: dict[str, object] = {}
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def greet(info: bramble.Info) -> str:
+            observed["parent_type"] = info.parent_type
+            observed["return_type"] = info.return_type.of_type.name
+            observed["operation"] = info.operation
+            return "hi"
+
+    bramble.Schema(query=Query).execute("{ greet }")
+
+    assert observed["parent_type"].__name__ == "_IntrospectiveQuery"
+    assert observed["return_type"] == "String"
+    assert observed["operation"] == "query"
+
+
+def test_info_operation_reports_mutation_for_a_mutation() -> None:
+    observed: list[str] = []
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def ok() -> bool:
+            return True
+
+    @bramble.type
+    class Mutation:
+        @bramble.mutation
+        def touch(info: bramble.Info) -> bool:
+            observed.append(info.operation)
+            return True
+
+    bramble.Schema(query=Query, mutation=Mutation).execute("mutation { touch }")
+
+    assert observed == ["mutation"]
+
+
+def test_asdict_converts_a_bramble_type_to_a_plain_dict() -> None:
+    @bramble.type
+    class Point:
+        x: int
+        y: int
+
+    assert bramble.asdict(Point(x=1, y=2)) == {"x": 1, "y": 2}

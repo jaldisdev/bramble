@@ -72,3 +72,36 @@ class Pagination:
 Use `dataclasses.field(default_factory=...)` (or `bramble.field(default_factory=...)`)
 for a default that shouldn't be shared between instances (a mutable
 default, like an empty list).
+
+## Distinguishing "omitted" from "explicit null"
+
+GraphQL treats a field the client left out and a field the client sent as
+`null` as different things; Python's `None` collapses them. Use
+`bramble.UNSET` as the default when that difference matters — a partial-update
+mutation being the usual case, where "leave this alone" and "clear this" must
+not be confused:
+
+```python
+@bramble.input
+class UpdateUser:
+    name: str | None = bramble.UNSET
+    nickname: str | None = bramble.UNSET
+
+@bramble.mutation
+def update_user(input: UpdateUser) -> User:
+    if input.nickname is not bramble.UNSET:
+        # Provided — possibly as null, which means "clear it".
+        user.nickname = input.nickname
+    return user
+```
+
+| Client sends | Attribute value |
+| --- | --- |
+| `{}` | `bramble.UNSET` |
+| `{nickname: null}` | `None` |
+| `{nickname: "ada"}` | `"ada"` |
+
+`UNSET` is a falsy singleton — compare with `is`, not `==`. A field defaulting
+to it is optional in the schema, and no default is rendered in SDL, since
+`UNSET` has no GraphQL literal spelling and printing one would claim a default
+the server never applies.
