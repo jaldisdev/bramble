@@ -105,3 +105,34 @@ def update_user(input: UpdateUser) -> User:
 to it is optional in the schema, and no default is rendered in SDL, since
 `UNSET` has no GraphQL literal spelling and printing one would claim a default
 the server never applies.
+
+### `Maybe[T]` — the same distinction in the type system
+
+`UNSET` puts the distinction in a *default*; `bramble.Maybe[T]` puts it in the
+*type*, so it survives into something a type checker understands:
+
+```python
+@bramble.input
+class UpdateUser:
+    nickname: bramble.Maybe[str] = None
+
+@bramble.mutation
+def update_user(input: UpdateUser) -> User:
+    if input.nickname is not None:      # provided at all?
+        user.nickname = input.nickname.value   # possibly None, meaning "clear it"
+    return user
+```
+
+| Client sends | Attribute value |
+| --- | --- |
+| `{}` | `None` |
+| `{nickname: null}` | `Some(None)` |
+| `{nickname: "ada"}` | `Some("ada")` |
+
+`Some` is truthy even when it wraps `None`, so `if input.nickname:` reads as
+"was it provided". `Maybe[T]` also works on a resolver argument.
+
+On the wire it is a plain nullable `T` — GraphQL has no separate type for the
+distinction, which is why it has to live in the wrapper. No `= null` default
+is rendered either: that would tell clients omission substitutes null, which
+is precisely what `Maybe` guarantees it doesn't.

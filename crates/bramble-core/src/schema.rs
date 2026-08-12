@@ -90,6 +90,9 @@ pub struct ArgumentDefinition {
     pub default_value: Option<String>,
     pub description: Option<String>,
     pub deprecation_reason: Option<String>,
+    /// Declared as `Maybe[T]`: the GraphQL type is a plain nullable `T`, but execution wraps a
+    /// supplied value in `Some(...)` so a resolver can tell "provided as null" from "omitted".
+    pub is_maybe: bool,
     pub applied_directives: Vec<AppliedDirective>,
 }
 
@@ -108,6 +111,8 @@ pub struct FieldDefinition {
     /// `ArgumentDefinition::default_value`: pre-rendered once on the PyO3 side so SDL and
     /// introspection cannot disagree, and `None` for a default with no faithful literal spelling.
     pub default_value: Option<String>,
+    /// Declared as `Maybe[T]` -- see `ArgumentDefinition::is_maybe`.
+    pub is_maybe: bool,
     pub has_resolver: bool,
     /// The resolver parameter bound to the parent/root value (`Parent[T]`), if any.
     pub parent_parameter: Option<String>,
@@ -388,6 +393,7 @@ mod tests {
             description: None,
             deprecation_reason: None,
             default_value: None,
+            is_maybe: false,
             has_resolver: false,
             parent_parameter: None,
             info_parameter: None,
@@ -403,6 +409,7 @@ mod tests {
             graphql_type,
             has_default,
             default_value: None,
+            is_maybe: false,
             description: None,
             deprecation_reason: None,
             applied_directives: Vec::new(),

@@ -27,7 +27,9 @@ use pyo3::types::{PyDict, PyType};
 
 use crate::lowering::{python_default_to_graphql_literal, python_to_json_value};
 use crate::resolver_binding::bind_resolver_arguments;
-use crate::typing_utils::{find_marker, resolve_graphql_type, seed_lazy_namespace_for_class, unwrap_annotated};
+use crate::typing_utils::{
+    find_marker, is_maybe_annotation, resolve_graphql_type, seed_lazy_namespace_for_class, unwrap_annotated,
+};
 
 create_exception!(
     _bramble,
@@ -82,6 +84,8 @@ pub struct PyArgumentInfo {
     pub default_value: Option<String>,
     pub description: Option<String>,
     pub deprecation_reason: Option<String>,
+    /// Declared as `Maybe[T]` -- execution wraps a supplied value in `Some(...)`.
+    pub is_maybe: bool,
 }
 
 pub(crate) fn convert_argument(py: Python<'_>, argument: ArgumentDefinition) -> PyResult<PyArgumentInfo> {
@@ -95,6 +99,7 @@ pub(crate) fn convert_argument(py: Python<'_>, argument: ArgumentDefinition) -> 
         default_value: argument.default_value,
         description: argument.description,
         deprecation_reason: argument.deprecation_reason,
+        is_maybe: argument.is_maybe,
     })
 }
 
@@ -109,6 +114,8 @@ pub struct PyFieldInfo {
     /// The field's default as a GraphQL literal -- populated for an input object's fields, which
     /// is the only place GraphQL allows one. `None` otherwise.
     pub default_value: Option<String>,
+    /// Declared as `Maybe[T]` -- execution wraps a supplied value in `Some(...)`.
+    pub is_maybe: bool,
     pub is_nullable: bool,
     pub has_resolver: bool,
     pub parent_parameter: Option<String>,
@@ -132,6 +139,7 @@ pub(crate) fn convert_field(py: Python<'_>, field: FieldDefinition) -> PyResult<
         description: field.description,
         deprecation_reason: field.deprecation_reason,
         default_value: field.default_value,
+        is_maybe: field.is_maybe,
         has_resolver: field.has_resolver,
         parent_parameter: field.parent_parameter,
         info_parameter: field.info_parameter,
@@ -327,14 +335,25 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
         // calling a factory at schema-build time to render a literal would run arbitrary user code
         // for a documentation string, and could differ from what a request actually gets.
         // `dataclasses.MISSING` means no default, and is not a value any literal should render for.
+        let is_maybe = is_maybe_annotation(py, &typing, &resolved_type)?;
         let dataclasses = py.import("dataclasses")?;
         let missing = dataclasses.getattr("MISSING")?;
         let default_value = match dataclass_field.getattr("default") {
             Ok(default) if !default.is(&missing) => python_default_to_graphql_literal(&default)?,
             _ => None,
         };
+        // A `Maybe[T]` field's Python default of `None` means "omitted", not "defaults to null".
+        // Rendering `= null` would tell clients the server substitutes null when the field is left
+        // out, which is precisely the distinction `Maybe` exists to preserve.
+        let default_value = if is_maybe { None } else { default_value };
 
-        let graphql_type = resolve_graphql_type(py, &typing, &resolved_type)?;
+        // `bramble.field(graphql_type=...)` replaces the annotation-derived type outright, letting
+        // a field expose a type its Python annotation can't express.
+        let type_override = dataclass_field.getattr("graphql_type").ok().filter(|value| !value.is_none());
+        let graphql_type = match &type_override {
+            Some(override_annotation) => resolve_graphql_type(py, &typing, override_annotation)?,
+            None => resolve_graphql_type(py, &typing, &resolved_type)?,
+        };
 
         let resolver = dataclass_field
             .getattr("resolver")
@@ -362,6 +381,7 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
             description,
             deprecation_reason,
             default_value,
+            is_maybe,
             has_resolver,
             parent_parameter,
             info_parameter,

@@ -125,3 +125,43 @@ def test_graphql_error_is_a_real_exception_with_spec_shaped_fields() -> None:
     assert error.locations is None
     assert error.path is None
     assert error.extensions == {}
+
+
+@bramble.interface
+class _CastNode:
+    name: str
+
+
+@bramble.type
+class _CastDog(_CastNode):
+    pass
+
+
+class _CastRow:
+    """Deliberately not an instance of any implementor."""
+
+
+def test_cast_tags_a_value_that_isinstance_cannot_identify() -> None:
+    """The escape hatch for an interface value that isn't an instance of any implementor -- a dict
+    or ORM row standing in for a GraphQL type, where neither `is_type_of` nor `isinstance` works.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def node() -> _CastNode:
+            row = _CastRow()
+            row.name = "from a row"
+            return bramble.cast(_CastDog, row)
+
+    schema = bramble.Schema(query=Query, types=[_CastDog])
+    result = schema.execute("{ node { __typename name } }")
+
+    assert result["data"] == {"node": {"__typename": "_CastDog", "name": "from a row"}}
+
+
+def test_cast_returns_values_it_cannot_tag_unchanged() -> None:
+    # An `int`/`str`/tuple has nowhere to put the tag; falling back to normal dispatch beats
+    # failing a resolver over it.
+    assert bramble.cast(int, 5) == 5
+    assert bramble.cast(str, "x") == "x"

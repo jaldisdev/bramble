@@ -667,3 +667,76 @@ def test_field_metadata_is_stored_on_the_dataclass_field() -> None:
 
     (field,) = [f for f in dataclasses.fields(Query) if f.name == "greeting"]
     assert field.metadata["owner"] == "team-a"
+
+
+@bramble.input
+class _MaybeUpdate:
+    nickname: bramble.Maybe[str] = None
+
+
+def test_maybe_distinguishes_omitted_from_explicit_null_on_an_input_field() -> None:
+    """`UNSET` covers the argument-default case; `Maybe` covers it in the type system, so the
+    distinction survives into a typed wrapper rather than a sentinel comparison.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def patch(input: _MaybeUpdate) -> str:
+            value = input.nickname
+            return "OMITTED" if value is None else f"Some({value.value!r})"
+
+    schema = bramble.Schema(query=Query, types=[_MaybeUpdate])
+
+    assert schema.execute("{ patch(input: {}) }")["data"]["patch"] == "OMITTED"
+    assert schema.execute("{ patch(input: {nickname: null}) }")["data"]["patch"] == "Some(None)"
+    assert schema.execute('{ patch(input: {nickname: "ada"}) }')["data"]["patch"] == "Some('ada')"
+
+
+def test_maybe_works_on_a_resolver_argument_too() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def probe(name: bramble.Maybe[str] = None) -> str:
+            return "OMITTED" if name is None else f"Some({name.value!r})"
+
+    schema = bramble.Schema(query=Query)
+
+    assert schema.execute("{ probe }")["data"]["probe"] == "OMITTED"
+    assert schema.execute("{ probe(name: null) }")["data"]["probe"] == "Some(None)"
+    assert schema.execute('{ probe(name: "ada") }')["data"]["probe"] == "Some('ada')"
+
+
+def test_maybe_resolves_to_a_plain_nullable_type_with_no_default_rendered() -> None:
+    """`Maybe[T]` is a nullable `T` on the wire -- GraphQL has no separate type for it. And no
+    `= null` default: that would tell clients omission substitutes null, which is the opposite of
+    what `Maybe` guarantees.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def probe(name: bramble.Maybe[str] = None) -> str:
+            return "x"
+
+    sdl = bramble.Schema(query=Query, types=[_MaybeUpdate]).to_sdl()
+
+    assert "probe(name: String): String!" in sdl
+    assert "= null" not in sdl
+
+
+def test_some_is_truthy_even_when_it_wraps_none() -> None:
+    # So `if field:` reads as "was it provided", which is the whole point.
+    assert bool(bramble.Some(None))
+    assert bramble.Some(1) == bramble.Some(1)
+    assert bramble.Some(1) != bramble.Some(2)
+    assert repr(bramble.Some("a")) == "Some('a')"
+
+
+def test_field_graphql_type_overrides_the_annotation() -> None:
+    @bramble.type
+    class Query:
+        # Annotated `str`, but published as `ID`.
+        code: str = bramble.field(default="x", graphql_type=bramble.ID)
+
+    assert "code: ID!" in bramble.Schema(query=Query).to_sdl()

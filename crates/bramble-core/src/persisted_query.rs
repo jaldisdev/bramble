@@ -153,6 +153,7 @@ mod tests {
                     description: None,
                     deprecation_reason: None,
                     default_value: None,
+                    is_maybe: false,
                     has_resolver: false,
                     parent_parameter: None,
                     info_parameter: None,

@@ -23,7 +23,9 @@ use pyo3::types::{PyDict, PyTuple, PyType};
 
 use crate::lowering::python_default_to_graphql_literal;
 use crate::type_info::{SchemaError, extract_applied_directives, validate_directive_locations};
-use crate::typing_utils::{find_marker, resolve_graphql_type, seed_lazy_namespace_for_callable, unwrap_annotated};
+use crate::typing_utils::{
+    find_marker, is_maybe_annotation, resolve_graphql_type, seed_lazy_namespace_for_callable, unwrap_annotated,
+};
 
 pub struct ResolverBinding {
     pub parent_parameter: Option<String>,
@@ -39,6 +41,7 @@ pub(crate) fn classify_argument<'py>(
     has_default: bool,
     default_value: Option<String>,
 ) -> PyResult<ArgumentDefinition> {
+    let is_maybe = is_maybe_annotation(py, typing, &annotation)?;
     let (underlying, metadata) = unwrap_annotated(typing, annotation)?;
     let argument_class = py.import("bramble._resolver")?.getattr("Argument")?;
     let argument_marker = find_marker(&metadata, &argument_class)?;
@@ -57,6 +60,10 @@ pub(crate) fn classify_argument<'py>(
         ),
     };
 
+    // A `Maybe[T]` argument's Python default of `None` means "omitted", not "defaults to null" --
+    // see `read_fields` for the same suppression on input fields.
+    let default_value = if is_maybe { None } else { default_value };
+
     let graphql_type = match type_override {
         Some(override_annotation) => resolve_graphql_type(py, typing, &override_annotation)?,
         None => resolve_graphql_type(py, typing, &underlying)?,
@@ -74,6 +81,7 @@ pub(crate) fn classify_argument<'py>(
         default_value,
         description,
         deprecation_reason,
+        is_maybe,
         applied_directives,
     })
 }

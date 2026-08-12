@@ -57,6 +57,7 @@ class Field(dataclasses.Field):
         description: str | None = None,
         deprecation_reason: str | None = None,
         permission_classes: Sequence[_type] = (),
+        graphql_type: Any | None = None,
         directives: Sequence[object] = (),
         extensions: Sequence[object] = (),
         metadata: Mapping[Any, Any] | None = None,
@@ -106,6 +107,7 @@ class Field(dataclasses.Field):
         self.description = description
         self.deprecation_reason = deprecation_reason
         self.permission_classes = tuple(permission_classes)
+        self.graphql_type = graphql_type
         self.directives = tuple(directives)
         self.extensions = tuple(extensions)
         self._resolver: Callable[..., Any] | None = None
@@ -137,6 +139,7 @@ def field(
     description: str | None = None,
     deprecation_reason: str | None = None,
     permission_classes: Sequence[_type] = (),
+    graphql_type: Any | None = None,
     directives: Sequence[object] = (),
     extensions: Sequence[object] = (),
     metadata: Mapping[Any, Any] | None = None,
@@ -172,6 +175,8 @@ def field(
             it unless a client passes `fields(includeDeprecated: true)`.
         permission_classes: `bramble.BasePermission` subclasses checked before the resolver runs,
             in order, short-circuiting on the first denial.
+        graphql_type: overrides the GraphQL type derived from the annotation, the same way
+            `bramble.argument(graphql_type=...)` does for an argument.
         metadata: an arbitrary mapping stored on the underlying `dataclasses.Field`, for your own
             tooling. bramble never reads it.
         directives: applied schema-directive instances, checked against `FIELD_DEFINITION`.
@@ -188,6 +193,7 @@ def field(
         description=description,
         deprecation_reason=deprecation_reason,
         permission_classes=permission_classes,
+        graphql_type=graphql_type,
         directives=directives,
         extensions=extensions,
         metadata=metadata,
@@ -434,3 +440,24 @@ def asdict(instance: Any) -> dict[str, Any]:
     types, lists, and dicts, as `dataclasses.asdict` does.
     """
     return dataclasses.asdict(instance)
+
+
+def cast(graphql_type: _type, value: Any) -> Any:
+    """Tags `value` with the concrete GraphQL type it should resolve as.
+
+        return bramble.cast(Dog, row)
+
+    Only relevant where the declared type is an interface or union and the runtime value can't be
+    identified by `isinstance` -- a plain dict or ORM row standing in for a GraphQL type, say.
+    bramble's normal dispatch (`is_type_of`, then `isinstance`) is tried first; this is the escape
+    hatch when neither can work.
+
+    Returns `value` so it can be used inline in a `return`. Values that can't carry an attribute
+    (`int`, `str`, a tuple) are returned untagged rather than raising -- there is nowhere to put
+    the tag, and failing a resolver over it would be worse than falling back to normal dispatch.
+    """
+    try:
+        value.__bramble_concrete_type__ = graphql_type
+    except AttributeError:
+        pass
+    return value

@@ -219,6 +219,15 @@ fn resolve_core(py: Python<'_>, typing: &Bound<'_, PyAny>, annotation: &Bound<'_
         return resolve_core(py, typing, &underlying);
     }
 
+    // `Maybe[T]` is a nullable `T` in the schema. The wrapper only carries the *runtime*
+    // distinction between "omitted" and "provided as null", which GraphQL has no separate type for.
+    if is_maybe_origin(py, &origin)? {
+        let args = typing.call_method1("get_args", (annotation,))?;
+        let element = args.get_item(0)?;
+        let (core, _) = resolve_core(py, typing, &element)?;
+        return Ok((core, true));
+    }
+
     if is_union_origin(py, &origin)? {
         return resolve_union(py, typing, annotation, annotation);
     }
@@ -260,6 +269,22 @@ fn resolve_core(py: Python<'_>, typing: &Bound<'_, PyAny>, annotation: &Bound<'_
 
     // A leaf/named type.
     Ok((GraphQLType::Named(named_type_name(py, annotation)?), false))
+}
+
+fn is_maybe_origin(py: Python<'_>, origin: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if origin.is_none() {
+        return Ok(false);
+    }
+    let maybe_class = py.import("bramble._maybe")?.getattr("Maybe")?;
+    Ok(origin.is(&maybe_class))
+}
+
+/// Whether an annotation is `Maybe[T]`, looking through any `Annotated[...]` wrapper. Execution
+/// needs this to know whether to hand a resolver a bare value or wrap it in `Some(...)`.
+pub fn is_maybe_annotation(py: Python<'_>, typing: &Bound<'_, PyAny>, annotation: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let (underlying, _) = unwrap_annotated(typing, annotation.clone())?;
+    let origin = typing.call_method1("get_origin", (&underlying,))?;
+    is_maybe_origin(py, &origin)
 }
 
 /// Resolves a union annotation: `describe_annotation` is whatever should be handed to

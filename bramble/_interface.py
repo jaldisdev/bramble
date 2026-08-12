@@ -35,10 +35,16 @@ def _matches(candidate: type, obj: Any, info: Any) -> bool:
 def resolve_interface_type(candidates: Sequence[type], obj: Any, info: Any) -> type:
     """Determines which of an interface's implementing types a resolved value is.
 
-    Tries each candidate's `is_type_of` classmethod (falling back to an `isinstance` check
-    against candidates that declare none) in order, per §4. Exactly one candidate must match --
-    zero or more than one is an execution-time error, not something to silently guess at.
+    A value tagged by `bramble.cast(...)` short-circuits this: it names its own concrete type, for
+    the case where neither `is_type_of` nor `isinstance` can identify it (a dict or ORM row standing
+    in for a GraphQL type). Otherwise each candidate's `is_type_of` classmethod is tried, falling
+    back to an `isinstance` check for candidates that declare none, per §4. Exactly one candidate
+    must match -- zero or more than one is an execution-time error, not something to guess at.
     """
+    tagged = getattr(obj, "__bramble_concrete_type__", None)
+    if tagged is not None and tagged in candidates:
+        return tagged
+
     matches = [candidate for candidate in candidates if _matches(candidate, obj, info)]
 
     if not matches:

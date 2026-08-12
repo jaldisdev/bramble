@@ -84,6 +84,10 @@ def resolve_union_type(
     addition since a union has no shared base class to hang a per-member `is_type_of` on);
     otherwise falls back to an `isinstance` check against each member, same as interfaces.
     """
+    tagged = getattr(obj, "__bramble_concrete_type__", None)
+    if tagged is not None and tagged in members:
+        return tagged
+
     if definition is not None and definition.resolve_type is not None:
         resolved = definition.resolve_type(obj, info)
         if resolved not in members:

@@ -33,6 +33,7 @@ from bramble._dependency import DependencyScope, resolve_dependencies
 from bramble._error import ErrorCode, GraphQLError
 from bramble._error import error_to_dict as _error_to_dict
 from bramble._interface import resolve_interface_type
+from bramble._maybe import Some
 from bramble._permission import check_permissions
 
 # `Path`/`SelectedField` are defined in `_resolver` (they are resolver-facing types) and
@@ -238,7 +239,9 @@ def _coerce_value(type_info: "GraphQLTypeInfo", value: Any, schema: "Schema") ->
                 # error) -- pass through defensively rather than silently dropping the key.
                 kwargs[key] = item_value
             else:
-                kwargs[field_info.name] = _coerce_value(field_info.type_info, item_value, schema)
+                coerced = _coerce_value(field_info.type_info, item_value, schema)
+                # Same rule as a `Maybe` argument: present in the literal means provided, so wrap.
+                kwargs[field_info.name] = Some(coerced) if field_info.is_maybe else coerced
         return input_type(**kwargs)
 
     return value
@@ -257,7 +260,12 @@ async def _bind_resolver_kwargs(
     kwargs = _map_arguments(field_info.arguments, lowered_field.arguments, auto_camel_case=schema.config.auto_camel_case)
     for argument in field_info.arguments:
         if argument.name in kwargs:
-            kwargs[argument.name] = _coerce_value(argument.type_info, kwargs[argument.name], schema)
+            coerced = _coerce_value(argument.type_info, kwargs[argument.name], schema)
+            # `Maybe[T]`: reaching here at all means the client supplied the argument, so it is
+            # wrapped -- including when the value is an explicit `null`, which is exactly the case
+            # `Maybe` exists to distinguish from omission. An omitted argument never enters
+            # `kwargs`, so the parameter keeps its Python default (`None`) untouched.
+            kwargs[argument.name] = Some(coerced) if argument.is_maybe else coerced
     if field_info.parent_parameter is not None:
         kwargs[field_info.parent_parameter] = parent_value
     if field_info.info_parameter is not None:
