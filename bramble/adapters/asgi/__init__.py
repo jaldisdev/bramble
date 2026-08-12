@@ -53,8 +53,10 @@ class _RawUploadFile:
     resolver code to work against either adapter, without actually depending on Starlette.
     """
 
-    def __init__(self, filename: str | None, data: bytes) -> None:
+    def __init__(self, filename: str | None, data: bytes, content_type: str | None = None) -> None:
         self.filename = filename
+        self.content_type = content_type
+        self.size = len(data)
         self._data = data
 
     async def read(self) -> bytes:
@@ -225,7 +227,17 @@ class GraphQL(
             file.file_object.seek(0)
             data = file.file_object.read()
             filename = file.file_name.decode("utf-8") if file.file_name else None
-            fields[file.field_name.decode("utf-8")] = _RawUploadFile(filename=filename, data=data)
+            # `file_name` comes back as bytes but `content_type` as `str`, so this cannot mirror
+            # the decode above.
+            raw_content_type = file.content_type
+            content_type = (
+                raw_content_type.decode("utf-8")
+                if isinstance(raw_content_type, bytes)
+                else raw_content_type or None
+            )
+            fields[file.field_name.decode("utf-8")] = _RawUploadFile(
+                filename=filename, data=data, content_type=content_type
+            )
 
         body = await request.body()
         parse_form({"Content-Type": content_type}, io.BytesIO(body), on_field, on_file)

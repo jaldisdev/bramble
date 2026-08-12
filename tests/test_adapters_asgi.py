@@ -47,6 +47,13 @@ class _Query:
         content = await file.read()  # type: ignore[attr-defined]
         return len(content)
 
+    @bramble.field
+    async def upload_meta(file: bramble.Upload) -> str:
+        """Every adapter's wrapper exposes the same four, so this resolver is portable."""
+        return (
+            f"{file.filename}|{file.content_type}|{file.size}"  # type: ignore[attr-defined]
+        )
+
 
 @bramble.type
 class _Subscription:
@@ -156,6 +163,29 @@ def test_post_multipart_upload_executes() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"data": {"uploadSize": len(b"hello upload")}}
+
+
+def test_an_upload_carries_its_filename_content_type_and_size() -> None:
+    """The MIME type the framework already parsed used to be discarded by the wrapper, and there
+    was no way to get it back -- the underlying object is not reachable from a resolver.
+    """
+    schema = bramble.Schema(query=_Query)
+
+    async def request(client: httpx2.AsyncClient) -> httpx2.Response:
+        return await client.post(
+            "/graphql",
+            data={
+                "operations": '{"query": "query($f: Upload!) { uploadMeta(file: $f) }", "variables": {"f": null}}',
+                "map": '{"0": ["variables.f"]}',
+            },
+            files={"0": ("greeting.txt", b"hello upload", "text/plain")},
+        )
+
+    response = asyncio.run(_run_http(schema, request))
+
+    assert response.json() == {
+        "data": {"uploadMeta": f"greeting.txt|text/plain|{len(b'hello upload')}"}
+    }
 
 
 def test_disallowed_method_returns_405() -> None:

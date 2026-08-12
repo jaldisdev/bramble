@@ -42,6 +42,9 @@ class _Query:
     async def upload_size(file: bramble.Upload) -> int:
         content = await file.read()  # type: ignore[attr-defined]
         return len(content)
+    @bramble.field
+    async def upload_meta(file: bramble.Upload) -> str:
+        return f"{file.filename}|{file.content_type}"  # type: ignore[attr-defined]
 
 
 @bramble.type
@@ -133,6 +136,23 @@ def test_post_multipart_upload_executes() -> None:
 
     assert response.status_code == 200
     assert response.get_json() == {"data": {"uploadSize": len(b"hello upload")}}
+
+
+def test_an_upload_carries_its_filename_and_content_type() -> None:
+    schema = bramble.Schema(query=_Query)
+    client = _make_client(schema)
+
+    response = client.post(
+        "/graphql",
+        data={
+            "operations": '{"query": "query($f: Upload!) { uploadMeta(file: $f) }", "variables": {"f": null}}',
+            "map": '{"0": ["variables.f"]}',
+            "0": (io.BytesIO(b"hello upload"), "greeting.txt", "text/plain"),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.get_json() == {"data": {"uploadMeta": "greeting.txt|text/plain"}}
 
 
 def test_defer_query_streams_a_multipart_mixed_response() -> None:

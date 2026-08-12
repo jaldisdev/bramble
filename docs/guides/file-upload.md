@@ -49,8 +49,33 @@ app = GraphQL(schema, multipart_uploads_enabled=False)  # reject multipart reque
 The concrete Python object a resolver receives for `Upload` differs by
 integration -- Starlette/FastAPI hand over a real `starlette.datastructures.UploadFile`;
 raw ASGI, Flask, and Django each wrap their own framework's upload object
-in a small adapter exposing the same `async def read()` -- so a resolver
-written against `.read()` works portably across all of them.
+in a small adapter. All of them expose the same four members, so a resolver
+written against these works portably across every integration:
+
+| Member | |
+| --- | --- |
+| `await read()` | the file's bytes |
+| `filename` | as the client sent it, or `None` |
+| `content_type` | the MIME type the client declared, or `None` |
+| `size` | in bytes, or `None` where the framework does not report it |
+
+`content_type` in particular is worth reaching for rather than sniffing the
+filename extension -- picking a storage bucket, recording a `mimetype` column,
+or rejecting a disallowed kind are all better keyed off what the client
+declared:
+
+```python
+@bramble.field
+async def upload_avatar(file: bramble.Upload) -> str:
+    if file.content_type not in {"image/png", "image/jpeg"}:
+        raise bramble.GraphQLError(
+            "avatars must be PNG or JPEG", code=bramble.ErrorCode.FIELD_RESOLUTION_FAILED
+        )
+    ...
+```
+
+Treat both metadata attributes as client-supplied: they are declared by the
+uploading client, not verified by bramble.
 
 ## Registering `Upload` for SDL
 

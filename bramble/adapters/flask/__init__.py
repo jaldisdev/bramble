@@ -78,6 +78,10 @@ class _FlaskUploadFile:
 
     def __init__(self, storage: "FileStorage") -> None:
         self.filename = storage.filename
+        self.content_type = storage.content_type
+        # Werkzeug reports 0 rather than `None` when the client sent no `Content-Length` for the
+        # part, which would read as "an empty file" rather than "unknown".
+        self.size = storage.content_length or None
         self._storage = storage
 
     async def read(self) -> bytes:

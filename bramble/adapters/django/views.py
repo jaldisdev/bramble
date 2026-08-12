@@ -71,10 +71,17 @@ class _DjangoUploadFile:
     """The value a resolver sees for an `Upload!` argument -- wraps Django's `UploadedFile`
     (whose own `read()` is synchronous) with an `async def read()` so resolver code stays
     portable across adapters.
+
+    Carries `filename`, `content_type` and `size` alongside `read()`: every adapter's wrapper
+    exposes the same four, so a resolver that picks a storage bucket by MIME type or rejects an
+    oversized upload works unchanged across them. Either metadata attribute may be `None` when the
+    client did not send it.
     """
 
     def __init__(self, uploaded_file: "UploadedFile") -> None:
         self.filename = uploaded_file.name
+        self.content_type = uploaded_file.content_type
+        self.size = uploaded_file.size
         self._uploaded_file = uploaded_file
 
     async def read(self) -> bytes:

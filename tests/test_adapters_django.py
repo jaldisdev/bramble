@@ -35,6 +35,7 @@ from channels.testing import WebsocketCommunicator
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpRequest
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import RequestFactory
 from django.views.decorators.csrf import csrf_exempt
 
@@ -70,6 +71,9 @@ class _Query:
     async def upload_size(file: bramble.Upload) -> int:
         content = await file.read()  # type: ignore[attr-defined]
         return len(content)
+    @bramble.field
+    async def upload_meta(file: bramble.Upload) -> str:
+        return f"{file.filename}|{file.content_type}"  # type: ignore[attr-defined]
 
 
 @bramble.type
@@ -170,6 +174,24 @@ def test_post_multipart_upload_executes() -> None:
 
     assert response.status_code == 200
     assert json.loads(response.content) == {"data": {"uploadSize": len(b"hello upload")}}
+
+
+def test_an_upload_carries_its_filename_and_content_type() -> None:
+    schema = bramble.Schema(query=_Query)
+    view = graphql_view(schema)
+    upload = SimpleUploadedFile("greeting.txt", b"hello upload", content_type="text/plain")
+    request = RequestFactory().post(
+        "/graphql",
+        data={
+            "operations": '{"query": "query($f: Upload!) { uploadMeta(file: $f) }", "variables": {"f": null}}',
+            "map": '{"0": ["variables.f"]}',
+            "0": upload,
+        },
+    )
+
+    response = asyncio.run(view(request))
+
+    assert json.loads(response.content) == {"data": {"uploadMeta": "greeting.txt|text/plain"}}
 
 
 def test_disallowed_method_returns_405() -> None:
