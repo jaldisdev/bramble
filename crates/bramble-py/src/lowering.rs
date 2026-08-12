@@ -388,3 +388,75 @@ fn lower_parsed_document(
 
     Ok((bramble_core::lowering::operation_type_str(operation_type), fields))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eval<'py>(py: Python<'py>, expression: &str) -> Bound<'py, PyAny> {
+        let globals = PyDict::new(py);
+        py.eval(std::ffi::CString::new(expression).unwrap().as_c_str(), Some(&globals), None)
+            .expect("expression evaluates")
+    }
+
+    #[test]
+    fn python_to_json_value_covers_every_variable_shape() {
+        Python::attach(|py| {
+            for (expression, expected) in [
+                ("None", "null"),
+                ("True", "true"),
+                ("False", "false"),
+                ("7", "7"),
+                ("-7", "-7"),
+                ("1.5", "1.5"),
+                ("\"text\"", "\"text\""),
+                ("[1, \"a\", None]", "[1,\"a\",null]"),
+                ("{\"k\": [1, 2]}", "{\"k\":[1,2]}"),
+                ("[]", "[]"),
+                ("{}", "{}"),
+            ] {
+                let value = eval(py, expression);
+                let json = python_to_json_value(&value).expect("converts");
+                assert_eq!(json.to_string(), expected, "for {expression}");
+            }
+        });
+    }
+
+    #[test]
+    fn booleans_are_not_silently_converted_to_integers() {
+        // Python's `bool` subclasses `int`, so an `extract::<i64>()` placed before the bool check
+        // would turn `True` into `1` and corrupt every boolean variable.
+        Python::attach(|py| {
+            let value = eval(py, "True");
+            assert_eq!(python_to_json_value(&value).unwrap().to_string(), "true");
+        });
+    }
+
+    #[test]
+    fn a_non_json_serializable_variable_errors_rather_than_guessing() {
+        Python::attach(|py| {
+            let value = eval(py, "object()");
+            let error = python_to_json_value(&value).expect_err("an arbitrary object has no JSON form");
+            assert!(error.to_string().contains("not JSON-serializable"), "unexpected: {error}");
+        });
+    }
+
+    #[test]
+    fn a_dict_with_non_string_keys_is_rejected() {
+        // GraphQL object keys are always names; a non-string key means the caller handed us
+        // something that was never a valid variable value.
+        Python::attach(|py| {
+            let value = eval(py, "{1: 2}");
+            assert!(python_to_json_value(&value).is_err());
+        });
+    }
+
+    #[test]
+    fn nested_structures_round_trip_through_both_directions() {
+        Python::attach(|py| {
+            let value = eval(py, "{\"outer\": [{\"inner\": True}, None]}");
+            let json = python_to_json_value(&value).unwrap();
+            assert_eq!(json.to_string(), "{\"outer\":[{\"inner\":true},null]}");
+        });
+    }
+}

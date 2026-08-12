@@ -548,3 +548,184 @@ pub fn process_enum(
         definition,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::types::PyAnyMethods;
+
+    /// Builds a class from `setup` and runs **this crate's** `process_type` over it, returning the
+    /// resulting `TypeDefinition`.
+    ///
+    /// Deliberately not going through the `@bramble.type` decorator: that calls `process_type` in
+    /// the *separately compiled* extension module on `sys.path`, whose `PyTypeInfo` is a different
+    /// Rust type than this test binary's, so its result cannot be extracted here (it fails with the
+    /// memorable "'TypeInfo' object is not an instance of 'TypeInfo'"). Running the Python-side
+    /// preparation the decorator does, then calling our own `process_type`, tests the code in this
+    /// crate rather than the installed copy of it.
+    fn definition(py: Python<'_>, setup: &str, class_name: &str, kind: &str) -> PyResult<TypeDefinition> {
+        let globals = PyDict::new(py);
+        let sys = py.import("sys")?;
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let repo_root = repo_root.to_str().unwrap();
+        let path = sys.getattr("path")?;
+        if !path.contains(repo_root).unwrap_or(false) {
+            path.call_method1("insert", (0, repo_root))?;
+        }
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&globals), None)?;
+
+        let cls = globals.get_item(class_name)?.unwrap();
+        let bramble_type = py.import("bramble._type")?;
+        bramble_type.call_method1("_ensure_field_annotations", (&cls,))?;
+        let dataclasses = py.import("dataclasses")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("kw_only", true)?;
+        let cls = dataclasses.call_method("dataclass", (&cls,), Some(&kwargs))?;
+        bramble_type.call_method1("_restore_resolvers", (&cls,))?;
+
+        let cls = cls.cast::<PyType>()?;
+        let info = process_type(py, cls, kind, None, None, &pyo3::types::PyTuple::empty(py).into_any(), false)?;
+        Ok(info.definition)
+    }
+
+    #[test]
+    fn reads_field_names_types_and_nullability() {
+        Python::attach(|py| {
+            let def = definition(
+                py,
+                "import bramble\nclass T:\n    name: str\n    nickname: str | None\n    tags: list[str]\n",
+                "T",
+                "type",
+            )
+            .unwrap();
+
+            let rendered: Vec<(String, String)> = def
+                .fields
+                .iter()
+                .map(|field| (field.name.clone(), field.graphql_type.to_sdl_string()))
+                .collect();
+            assert_eq!(
+                rendered,
+                vec![
+                    ("name".to_string(), "String!".to_string()),
+                    ("nickname".to_string(), "String".to_string()),
+                    ("tags".to_string(), "[String!]!".to_string()),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn a_private_field_is_excluded_from_the_schema_entirely() {
+        Python::attach(|py| {
+            let def = definition(
+                py,
+                "import bramble\nclass T:\n    shown: str\n    hidden: bramble.Private[str]\n",
+                "T",
+                "type",
+            )
+            .unwrap();
+
+            let names: Vec<&str> = def.fields.iter().map(|field| field.name.as_str()).collect();
+            assert_eq!(names, vec!["shown"], "a Private field must not become a FieldDefinition");
+        });
+    }
+
+    #[test]
+    fn a_field_name_override_survives_onto_the_definition() {
+        Python::attach(|py| {
+            let def = definition(
+                py,
+                "import bramble\nclass T:\n    internal: str = bramble.field(name='publicName', default='x')\n",
+                "T",
+                "type",
+            )
+            .unwrap();
+
+            // The type name comes from the decorator's own `name=`, which this helper bypasses;
+            // what matters here is that the *field* override reaches the definition.
+            assert_eq!(def.fields[0].name, "internal", "the Python attribute name is unchanged");
+            assert_eq!(def.fields[0].graphql_name.as_deref(), Some("publicName"));
+        });
+    }
+
+    #[test]
+    fn an_input_type_rejects_a_field_with_a_resolver() {
+        Python::attach(|py| {
+            let error = definition(
+                py,
+                "import bramble\nclass T:\n    @bramble.field\n    def computed() -> str:\n        return 'x'\n",
+                "T",
+                "input",
+            )
+            .expect_err("an input field cannot resolve");
+            assert!(error.to_string().contains("cannot declare a resolver"), "unexpected: {error}");
+        });
+    }
+
+    #[test]
+    fn interfaces_are_collected_from_the_mro_in_order() {
+        Python::attach(|py| {
+            let def = definition(
+                py,
+                "import bramble\n@bramble.interface\nclass Node:\n    id: str\n@bramble.interface\nclass Timestamped(Node):\n    at: str\nclass T(Timestamped):\n    name: str\n",
+                "T",
+                "type",
+            )
+            .unwrap();
+
+            // MRO order, transitive parents included -- `implements Timestamped & Node`.
+            assert_eq!(def.interfaces, vec!["Timestamped".to_string(), "Node".to_string()]);
+        });
+    }
+
+    #[test]
+    fn an_input_field_default_is_read_but_an_object_field_default_is_not_rendered() {
+        Python::attach(|py| {
+            let def = definition(
+                py,
+                "import bramble\nclass T:\n    limit: int = 10\n    cursor: str | None = None\n",
+                "T",
+                "input",
+            )
+            .unwrap();
+
+            let defaults: Vec<Option<&str>> = def.fields.iter().map(|field| field.default_value.as_deref()).collect();
+            assert_eq!(defaults, vec![Some("10"), Some("null")]);
+        });
+    }
+
+    #[test]
+    fn a_resolvers_arguments_are_classified_off_its_annotations() {
+        Python::attach(|py| {
+            let def = definition(
+                py,
+                "import bramble\nclass T:\n    @bramble.field\n    def greet(parent: bramble.Parent['T'], info: bramble.Info, name: str, shout: bool = False) -> str:\n        return name\n",
+                "T",
+                "type",
+            )
+            .unwrap();
+
+            let field = &def.fields[0];
+            // `Parent`/`Info` are bramble injections, never GraphQL arguments.
+            assert_eq!(field.parent_parameter.as_deref(), Some("parent"));
+            assert_eq!(field.info_parameter.as_deref(), Some("info"));
+            let arguments: Vec<(&str, bool)> = field.arguments.iter().map(|a| (a.name.as_str(), a.has_default)).collect();
+            assert_eq!(arguments, vec![("name", false), ("shout", true)]);
+        });
+    }
+
+    #[test]
+    fn an_unannotated_self_parameter_gets_the_targeted_parent_hint() {
+        Python::attach(|py| {
+            let error = definition(
+                py,
+                "import bramble\nclass T:\n    @bramble.field\n    def greet(self) -> str:\n        return 'x'\n",
+                "T",
+                "type",
+            )
+            .expect_err("an unannotated self must be rejected");
+            assert!(error.to_string().contains("Parent[T]"), "unexpected: {error}");
+        });
+    }
+}
