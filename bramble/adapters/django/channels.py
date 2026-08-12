@@ -105,8 +105,6 @@ class GraphQLWSConsumer(AsyncWebsocketConsumer):
     channel_layer: Any
     channel_name: str
 
-    graphql_transport_ws_handler_class: type[_ConsumerTransportWSHandler] = _ConsumerTransportWSHandler
-
     def __init__(self, schema: "Schema", **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.schema = schema
@@ -225,7 +223,7 @@ class GraphQLWSConsumer(AsyncWebsocketConsumer):
         if GRAPHQL_TRANSPORT_WS_PROTOCOL not in offered:
             await adapter.close(code=4406, reason="Subprotocol not acceptable")
             return
-        await self.graphql_transport_ws_handler_class(schema=self.schema, websocket=adapter, consumer=self).handle()
+        await _ConsumerTransportWSHandler(schema=self.schema, websocket=adapter, consumer=self).handle()
 
 
 __all__ = ["GraphQLWSConsumer"]

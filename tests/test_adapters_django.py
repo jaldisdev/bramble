@@ -543,3 +543,32 @@ def test_listen_to_channel_without_a_channel_layer_raises() -> None:
 
     with pytest.raises(RuntimeError, match="CHANNEL_LAYERS"):
         asyncio.run(scenario())
+
+
+def test_a_schema_extension_can_map_errors_onto_the_status_code() -> None:
+    """A `SchemaExtension` sees the whole operation, so the status code can be decided from the
+    errors it produced rather than field by field -- the shape an application-wide
+    error-code-to-HTTP-status mapping takes.
+    """
+
+    class UpdateStatusCode(bramble.SchemaExtension):
+        def on_operation(self) -> Any:
+            yield
+            for error in self.execution_context.errors or ():
+                if (error.extensions or {}).get("reason") == "forbidden":
+                    self.execution_context.context.response.status_code = 403
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def secret() -> str | None:
+            raise bramble.GraphQLError(
+                "nope", code=bramble.ErrorCode.FIELD_RESOLUTION_FAILED, extensions={"reason": "forbidden"}
+            )
+
+    view = _ContextView.as_view(schema=bramble.Schema(query=Query, extensions=[UpdateStatusCode]))
+
+    response = _post(view, "{ secret }")
+
+    assert response.status_code == 403
+    assert json.loads(response.content)["data"] == {"secret": None}
