@@ -419,10 +419,7 @@ fn is_leaf_type(name: &str, schema: &CompiledSchema) -> Option<bool> {
     if schema.unions.contains_key(name) {
         return Some(false);
     }
-    match schema.types.get(name) {
-        Some(type_def) => Some(type_def.kind == TypeKind::Enum),
-        None => None,
-    }
+    schema.types.get(name).map(|type_def| type_def.kind == TypeKind::Enum)
 }
 
 fn field_key(field: &FieldDefinition, auto_camel_case: bool) -> String {

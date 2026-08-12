@@ -124,3 +124,171 @@ pub fn resolve_persisted_query(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+    use crate::schema::{CompiledSchema, FieldDefinition, GraphQLType, TypeDefinition, TypeKind};
+
+    fn schema() -> CompiledSchema {
+        let mut types = HashMap::new();
+        types.insert(
+            "Query".to_string(),
+            TypeDefinition {
+                kind: TypeKind::Type,
+                name: "Query".to_string(),
+                description: None,
+                one_of: false,
+                interfaces: Vec::new(),
+                enum_values: Vec::new(),
+                applied_directives: Vec::new(),
+                fields: vec![FieldDefinition {
+                    name: "greet".to_string(),
+                    graphql_name: None,
+                    graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
+                    description: None,
+                    has_resolver: false,
+                    parent_parameter: None,
+                    info_parameter: None,
+                    arguments: Vec::new(),
+                    applied_directives: Vec::new(),
+                }],
+            },
+        );
+        CompiledSchema {
+            types,
+            unions: HashMap::new(),
+            query_type_name: "Query".to_string(),
+            mutation_type_name: None,
+            subscription_type_name: None,
+            operation_directives: HashMap::new(),
+            schema_directives: HashMap::new(),
+            schema_applied_directives: Vec::new(),
+            scalar_names: HashSet::new(),
+            scalar_applied_directives: HashMap::new(),
+            scalar_descriptions: HashMap::new(),
+            auto_camel_case: true,
+            persisted_query_cache: PersistedQueryCache::new(),
+        }
+    }
+
+    const QUERY: &str = "query { greet }";
+
+    #[test]
+    fn sha256_hex_matches_the_known_digest_clients_compute() {
+        // Lowercase hex of the raw string, no normalization -- the client computes the same digest
+        // independently, so any drift here silently breaks every APQ client at once.
+        assert_eq!(
+            sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(sha256_hex("").len(), 64);
+    }
+
+    #[test]
+    fn a_hash_only_miss_reports_the_exact_apollo_message() {
+        // Apollo Client's APQ link matches this literal string to trigger its resend-with-query
+        // retry. Paraphrasing it breaks interop with every such client.
+        let error = resolve_persisted_query(&schema(), &sha256_hex(QUERY), None, None)
+            .expect_err("a hash-only miss must error");
+        assert_eq!(error.message, "PersistedQueryNotFound");
+        assert_eq!(error.extensions.code, ErrorCode::PersistedQueryNotFound);
+    }
+
+    #[test]
+    fn a_query_plus_hash_registers_and_then_hits() {
+        let schema = schema();
+        let hash = sha256_hex(QUERY);
+
+        assert_eq!(
+            resolve_persisted_query(&schema, &hash, Some(QUERY), None).unwrap(),
+            PersistedQueryOutcome::Registered
+        );
+        assert_eq!(
+            resolve_persisted_query(&schema, &hash, None, None).unwrap(),
+            PersistedQueryOutcome::CacheHit
+        );
+    }
+
+    #[test]
+    fn a_mismatched_hash_is_rejected_before_anything_is_cached() {
+        let schema = schema();
+        let wrong_hash = "0".repeat(64);
+
+        let error = resolve_persisted_query(&schema, &wrong_hash, Some(QUERY), None)
+            .expect_err("a mismatched hash must error");
+        assert_eq!(error.extensions.code, ErrorCode::PersistedQueryMismatch);
+        // The content-addressing guarantee: nothing was stored under the claimed hash.
+        assert!(schema.persisted_query_cache.get(&wrong_hash).is_none());
+    }
+
+    #[test]
+    fn an_invalid_query_is_not_cached_even_though_its_hash_matched() {
+        let schema = schema();
+        let bad = "query { doesNotExist }";
+        let hash = sha256_hex(bad);
+
+        assert!(resolve_persisted_query(&schema, &hash, Some(bad), None).is_err());
+        assert!(
+            schema.persisted_query_cache.get(&hash).is_none(),
+            "a document that failed validation must never become replayable by hash"
+        );
+    }
+
+    #[test]
+    fn a_malformed_query_is_not_cached_either() {
+        let schema = schema();
+        let bad = "query { greet";
+        let hash = sha256_hex(bad);
+
+        assert!(resolve_persisted_query(&schema, &hash, Some(bad), None).is_err());
+        assert!(schema.persisted_query_cache.get(&hash).is_none());
+    }
+
+    #[test]
+    fn each_schema_gets_its_own_cache() {
+        let first = schema();
+        let hash = sha256_hex(QUERY);
+        resolve_persisted_query(&first, &hash, Some(QUERY), None).unwrap();
+
+        let second = schema();
+        assert!(
+            resolve_persisted_query(&second, &hash, None, None).is_err(),
+            "a fresh schema must start with an empty cache"
+        );
+    }
+
+    #[test]
+    fn flush_empties_the_cache() {
+        let schema = schema();
+        let hash = sha256_hex(QUERY);
+        resolve_persisted_query(&schema, &hash, Some(QUERY), None).unwrap();
+
+        schema.persisted_query_cache.flush();
+
+        assert!(resolve_persisted_query(&schema, &hash, None, None).is_err());
+    }
+
+    #[test]
+    fn the_cache_evicts_rather_than_growing_without_bound() {
+        // The 1000-entry `moka` bound was never exercised by any test. An unbounded cache keyed by
+        // client-supplied hashes would be a memory-exhaustion vector, so this asserts the bound is
+        // real -- not *which* entries survive, which is moka's own eviction policy to decide.
+        let cache = PersistedQueryCache::new();
+        let document = crate::parse_document(QUERY).unwrap();
+
+        for index in 0..5_000 {
+            cache.insert(format!("hash-{index}"), document.clone());
+        }
+        // moka evicts asynchronously; force the pending work through so the bound is
+        // observable synchronously. Reaching into the private field is fine here -- a child module
+        // can see it, and this is not behaviour worth exposing on the public wrapper.
+        cache.cache.run_pending_tasks();
+
+        let surviving = (0..5_000).filter(|index| cache.get(&format!("hash-{index}")).is_some()).count();
+        assert!(surviving > 0, "the cache should still hold recent entries");
+        assert!(surviving <= 1000, "the cache must stay bounded, but held {surviving} entries");
+    }
+}

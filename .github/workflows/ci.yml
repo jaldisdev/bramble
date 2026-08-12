@@ -11,6 +11,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      # `bramble-py`'s own tests start an embedded interpreter and `import bramble` from the repo
+      # root, so the compiled extension has to exist before `cargo test` runs. `-e` places
+      # `bramble/_bramble.abi3.so` in the source tree, which is where those tests look for it.
+      - run: pip install -e "."
       - run: cargo test --workspace
 
   cargo-bench:

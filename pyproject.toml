@@ -34,3 +34,5 @@ bramble = "bramble.cli.app:main"
 [tool.maturin]
 manifest-path = "crates/bramble-py/Cargo.toml"
 module-name = "bramble._bramble"
+# Not a default Cargo feature: it would break `cargo test`, which has to link libpython.
+features = ["extension-module"]

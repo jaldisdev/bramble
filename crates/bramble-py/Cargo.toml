@@ -7,12 +7,26 @@ repository.workspace = true
 
 [lib]
 name = "_bramble"
-crate-type = ["cdylib"]
+# `rlib` alongside `cdylib` so the crate can be linked into a Rust test binary at all -- a
+# cdylib-only crate builds no test harness, which is why this crate had zero Rust tests.
+crate-type = ["cdylib", "rlib"]
 path = "src/bramble_py.rs"
+
+[features]
+# NOT enabled by default. `pyo3/extension-module` tells the linker not to link libpython (correct
+# for a Python extension, since the interpreter provides those symbols), but a `cargo test` binary
+# has no interpreter hosting it and fails to link. maturin turns it on for real wheel builds via
+# `[tool.maturin] features` in pyproject.toml.
+extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 bramble-core = { path = "../bramble-core" }
 async-graphql-parser = "7.2.1"
 async-graphql-value = "7.2.1"
-pyo3 = { version = "0.29.0", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.29.0", features = ["abi3-py310"] }
 serde_json = "1.0.151"
+
+[dev-dependencies]
+# `auto-initialize` starts an interpreter on demand so `Python::attach` works in a plain test
+# binary, without a Python process already hosting it.
+pyo3 = { version = "0.29.0", features = ["abi3-py310", "auto-initialize"] }

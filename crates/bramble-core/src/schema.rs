@@ -262,3 +262,44 @@ pub struct CompiledSchema {
     /// flushes it (Task 10's schema-reload decision), since there's nothing to inherit from.
     pub persisted_query_cache: crate::persisted_query::PersistedQueryCache,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn named(name: &str) -> GraphQLType {
+        GraphQLType::Named(name.to_string())
+    }
+
+    #[test]
+    fn to_sdl_string_renders_standard_wrapper_syntax() {
+        assert_eq!(named("String").to_sdl_string(), "String");
+        assert_eq!(GraphQLType::NonNull(Box::new(named("String"))).to_sdl_string(), "String!");
+        assert_eq!(GraphQLType::List(Box::new(named("Int"))).to_sdl_string(), "[Int]");
+        assert_eq!(
+            GraphQLType::NonNull(Box::new(GraphQLType::List(Box::new(GraphQLType::NonNull(Box::new(named(
+                "Int"
+            )))))))
+            .to_sdl_string(),
+            "[Int!]!"
+        );
+    }
+
+    #[test]
+    fn is_nullable_looks_only_at_the_outermost_wrapper() {
+        assert!(named("String").is_nullable());
+        assert!(GraphQLType::List(Box::new(GraphQLType::NonNull(Box::new(named("Int"))))).is_nullable());
+        assert!(!GraphQLType::NonNull(Box::new(named("String"))).is_nullable());
+        // A nullable element inside a non-null list does not make the list itself nullable.
+        assert!(!GraphQLType::NonNull(Box::new(GraphQLType::List(Box::new(named("Int"))))).is_nullable());
+    }
+
+    #[test]
+    fn inner_name_unwraps_every_wrapper_layer() {
+        let deep = GraphQLType::NonNull(Box::new(GraphQLType::List(Box::new(GraphQLType::NonNull(Box::new(
+            named("User"),
+        ))))));
+        assert_eq!(deep.inner_name(), "User");
+        assert_eq!(named("User").inner_name(), "User");
+    }
+}

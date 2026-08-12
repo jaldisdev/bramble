@@ -54,3 +54,49 @@ pub fn select_operation<'a>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_document;
+
+    fn select(query: &str, operation_name: Option<&str>) -> GraphQLResult<String> {
+        let document = parse_document(query).expect("query parses");
+        select_operation(&document, operation_name).map(|operation| format!("{:?}", operation.ty))
+    }
+
+    #[test]
+    fn a_sole_anonymous_operation_needs_no_name() {
+        assert_eq!(select("{ hello }", None).unwrap(), "Query");
+    }
+
+    #[test]
+    fn a_sole_named_operation_is_still_selected_without_a_name() {
+        assert_eq!(select("query Only { hello }", None).unwrap(), "Query");
+    }
+
+    #[test]
+    fn a_named_operation_is_selected_by_name() {
+        let query = "query A { hello } mutation B { hello }";
+        assert_eq!(select(query, Some("B")).unwrap(), "Mutation");
+    }
+
+    #[test]
+    fn multiple_operations_without_a_name_are_ambiguous() {
+        let error = select("query A { hello } query B { hello }", None).expect_err("ambiguous");
+        assert!(error.message.contains("operation_name is required"), "unexpected: {}", error.message);
+        assert_eq!(error.extensions.code, ErrorCode::GraphqlValidationFailed);
+    }
+
+    #[test]
+    fn an_unknown_operation_name_is_rejected() {
+        let error = select("query A { hello }", Some("Nope")).expect_err("unknown name");
+        assert!(error.message.contains("no operation named 'Nope'"), "unexpected: {}", error.message);
+    }
+
+    #[test]
+    fn naming_an_operation_in_a_single_operation_document_still_has_to_match() {
+        // The single-operation shortcut must not paper over a name the client actually asked for.
+        assert!(select("query A { hello }", Some("B")).is_err());
+    }
+}
