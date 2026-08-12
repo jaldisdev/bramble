@@ -152,10 +152,10 @@ def value(x: Annotated[str, bramble.Depends(get_request_id, use_cache=False)]) -
     ...
 ```
 
-## Pre-seeding with `resolved_dependencies`
+## Overriding a provider with `resolved_dependencies`
 
-Skip a provider entirely by seeding its value directly into the cache before execution starts,
-keyed by the provider callable itself:
+Skip a provider entirely by supplying its value before execution starts, keyed by the provider
+callable itself:
 
 ```python
 result = await schema.execute_async(
@@ -168,6 +168,11 @@ result = await schema.execute_async(
 Available on `Schema.execute`/`execute_async`/`execute_incremental`/`subscribe_async`. A seeded
 value's provider is never called -- and bramble never runs its teardown either, since bramble
 never owned it to begin with (whatever created it upstream remains responsible for cleanup).
+
+Seeding *replaces* the provider, so it applies to every injection site of that provider,
+including any declared `use_cache=False`. The two settings are independent: seeding decides
+whether the provider runs at all, `use_cache` only decides whether its result is shared across
+sites within the scope.
 
 ## Scope limits
 

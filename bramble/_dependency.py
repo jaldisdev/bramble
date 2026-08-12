@@ -211,7 +211,12 @@ async def _provider_kwargs(provider: Callable[..., Any], *, info: Info, scope: D
 async def _resolve_dependency(marker: Depends, *, info: Info, scope: DependencyScope) -> Any:
     provider = marker.provider
 
-    if marker.use_cache and provider in scope.seeded:
+    # Checked before `use_cache` is consulted at all: seeding *replaces* a provider rather than
+    # pre-filling its cache entry, so opting an injection site out of caching must not also opt it
+    # out of substitution. `use_cache=False` exists for a dependency whose value legitimately
+    # varies within one request -- exactly the kind a test most wants to pin -- and reading the
+    # seed only on the cached path made that combination silently un-substitutable.
+    if provider in scope.seeded:
         return scope.seeded[provider]
 
     async def _run() -> Any:

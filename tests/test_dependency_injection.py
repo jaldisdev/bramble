@@ -634,3 +634,74 @@ def test_classification_cache_does_not_pin_locally_defined_callables() -> None:
     gc.collect()
 
     assert reference() is None, "the cache must not keep a locally-defined callable alive"
+
+
+# --- seeding overrides a provider regardless of use_cache ----------------------------------------
+#
+# Seeding replaces the provider; `use_cache` only governs whether its result is shared within the
+# request. Conflating the two made an uncached injection site -- the kind whose value legitimately
+# varies mid-request, and so the kind a test most wants to pin -- silently un-substitutable.
+
+_uncached_calls = {"n": 0}
+
+
+def _uncached_provider() -> str:
+    _uncached_calls["n"] += 1
+    return f"real-{_uncached_calls['n']}"
+
+
+@bramble.type
+class _SeedUncachedQuery:
+    @bramble.field
+    def uncached(x: Annotated[str, bramble.Depends(_uncached_provider, use_cache=False)]) -> str:
+        return x
+
+    @bramble.field
+    def cached(x: Annotated[str, bramble.Depends(_uncached_provider)]) -> str:
+        return x
+
+
+def test_seeding_replaces_an_uncached_dependency() -> None:
+    _uncached_calls["n"] = 0
+    schema = bramble.Schema(query=_SeedUncachedQuery)
+
+    result = schema.execute(
+        "{ uncached }", resolved_dependencies={_uncached_provider: "seeded"}
+    )
+
+    assert result["data"]["uncached"] == "seeded"
+
+
+def test_a_seeded_uncached_provider_is_never_called() -> None:
+    _uncached_calls["n"] = 0
+    schema = bramble.Schema(query=_SeedUncachedQuery)
+
+    schema.execute("{ uncached }", resolved_dependencies={_uncached_provider: "seeded"})
+
+    assert _uncached_calls["n"] == 0
+
+
+def test_seeding_reaches_cached_and_uncached_sites_alike() -> None:
+    """Both spellings of the same provider answer with the seed, so a test does not have to know
+    which injection sites opted out of caching.
+    """
+    _uncached_calls["n"] = 0
+    schema = bramble.Schema(query=_SeedUncachedQuery)
+
+    result = schema.execute(
+        "{ uncached cached }", resolved_dependencies={_uncached_provider: "seeded"}
+    )
+
+    assert result["data"] == {"uncached": "seeded", "cached": "seeded"}
+
+
+def test_an_unseeded_uncached_provider_still_runs_per_site() -> None:
+    """The pre-existing behaviour, unchanged: without a seed, `use_cache=False` still means a
+    fresh call rather than a shared one.
+    """
+    _uncached_calls["n"] = 0
+    schema = bramble.Schema(query=_SeedUncachedQuery)
+
+    result = schema.execute("{ uncached cached }")
+
+    assert result["data"]["uncached"] != result["data"]["cached"]
