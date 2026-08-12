@@ -277,6 +277,39 @@ pub struct CompiledSchema {
     pub persisted_query_cache: crate::persisted_query::PersistedQueryCache,
 }
 
+/// The scalars bramble names and serialises for standard-library types with no registration at all
+/// (`typing_utils.rs` maps `datetime.datetime` onto `DateTime` and so on; `_serialize_scalar`
+/// converts the values). Each carries the description it is declared with, matching Strawberry's
+/// wording so a ported schema's SDL does not shift under the migration.
+///
+/// The specification's own five (`Int`, `Float`, `String`, `Boolean`, `ID`) are deliberately
+/// absent: those are defined by the specification itself, and declaring them is invalid.
+pub const BUILTIN_SCALARS: &[(&str, &str)] = &[
+    ("Date", "Date (isoformat)"),
+    ("DateTime", "Date with time (isoformat)"),
+    ("Decimal", "Decimal (fixed-point)"),
+    ("Time", "Time (isoformat)"),
+    ("UUID", "UUID"),
+];
+
+/// Every named type reachable from a field's own type or one of its arguments, unwrapping any
+/// list/non-null wrappers. Used to decide which built-in scalars a schema actually *references*:
+/// declaring all of them unconditionally would put five unused `scalar` lines into every schema,
+/// and declaring none leaves the SDL referring to a type it never defines.
+#[must_use]
+pub fn referenced_type_names(types: &HashMap<String, TypeDefinition>) -> HashSet<String> {
+    let mut referenced = HashSet::new();
+    for type_def in types.values() {
+        for field in &type_def.fields {
+            referenced.insert(field.graphql_type.inner_name().to_string());
+            for argument in &field.arguments {
+                referenced.insert(argument.graphql_type.inner_name().to_string());
+            }
+        }
+    }
+    referenced
+}
+
 /// Validates every type's interface conformance against the interfaces it declares, plus that each
 /// name a type or union refers to actually resolves (§4/§8b). Runs once, when the schema is
 /// compiled -- this is the "Rust owns schema-shape validation" boundary; it used to live in Python

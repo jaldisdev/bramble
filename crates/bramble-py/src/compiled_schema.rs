@@ -103,7 +103,24 @@ pub fn compile_schema(
         None => Vec::new(),
     };
 
-    let scalar_names: HashSet<String> = scalar_names.into_iter().collect();
+    let mut scalar_names: HashSet<String> = scalar_names.into_iter().collect();
+    let mut scalar_descriptions = scalar_descriptions;
+
+    // Declare the standard-library scalars this schema actually refers to. bramble names and
+    // serialises `datetime`/`date`/`time`/`Decimal`/`UUID` with no registration, so without this
+    // the SDL says `when: DateTime!` while defining no `DateTime` -- output a spec-compliant parser
+    // rejects outright, and which disagrees with what introspection reports. Registering one
+    // explicitly still wins: an existing entry keeps its own directives and description.
+    let referenced = bramble_core::schema::referenced_type_names(&types);
+    for (name, description) in bramble_core::schema::BUILTIN_SCALARS {
+        if !referenced.contains(*name) || types.contains_key(*name) || unions.contains_key(*name) {
+            continue;
+        }
+        if scalar_names.insert((*name).to_string()) {
+            scalar_descriptions.insert((*name).to_string(), (*description).to_string());
+        }
+    }
+
     bramble_core::schema::validate_schema_shape(&types, &unions, &scalar_names).map_err(SchemaError::new_err)?;
 
     let schema = CompiledSchema {

@@ -352,3 +352,112 @@ def test_a_builtin_container_is_rejected_rather_than_stringified() -> None:
     """
     with pytest.raises(Exception, match="String cannot represent value"):
         bramble.Schema(query=_StringCoercionQuery).execute("{ container }")
+
+
+# --- built-in scalars are declared when referenced ------------------------------------------------
+#
+# bramble names and serialises the standard-library date/decimal/UUID types with no registration at
+# all, so a schema using them used to emit SDL that *referenced* `DateTime` while *defining* it
+# nowhere -- output graphql-core rejects outright, and which disagreed with introspection.
+
+
+@bramble.type
+class _BuiltinScalarQuery:
+    @bramble.field
+    def when() -> datetime.datetime: ...
+
+    @bramble.field
+    def day() -> datetime.date: ...
+
+    @bramble.field
+    def clock() -> datetime.time: ...
+
+    @bramble.field
+    def amount() -> decimal.Decimal: ...
+
+    @bramble.field
+    def key() -> uuid.UUID: ...
+
+
+def test_every_referenced_builtin_scalar_is_declared() -> None:
+    sdl = str(bramble.Schema(query=_BuiltinScalarQuery))
+
+    for name in ("Date", "DateTime", "Decimal", "Time", "UUID"):
+        assert f"scalar {name}" in sdl, f"{name} is referenced by a field but never declared"
+
+
+def test_the_declarations_carry_a_description() -> None:
+    sdl = str(bramble.Schema(query=_BuiltinScalarQuery))
+
+    assert '"""Date with time (isoformat)"""\nscalar DateTime' in sdl
+
+
+@bramble.type
+class _OnlyDateQuery:
+    @bramble.field
+    def day() -> datetime.date: ...
+
+
+def test_an_unreferenced_builtin_is_not_declared() -> None:
+    """Declaring all five unconditionally would put unused `scalar` lines into every schema."""
+    sdl = str(bramble.Schema(query=_OnlyDateQuery))
+
+    assert "scalar Date" in sdl
+    for name in ("DateTime", "Decimal", "Time", "UUID"):
+        assert f"scalar {name}" not in sdl
+
+
+@bramble.type
+class _NoBuiltinQuery:
+    @bramble.field
+    def name() -> str: ...
+
+
+def test_a_schema_using_none_of_them_declares_none() -> None:
+    sdl = str(bramble.Schema(query=_NoBuiltinQuery))
+
+    assert "scalar " not in sdl
+
+
+def test_the_spec_scalars_are_never_declared() -> None:
+    """`Int`/`Float`/`String`/`Boolean`/`ID` are defined by the specification; declaring one is
+    invalid.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def count() -> int: ...
+
+        @bramble.field
+        def label() -> str: ...
+
+    sdl = str(bramble.Schema(query=Query))
+
+    for name in ("Int", "Float", "String", "Boolean", "ID"):
+        assert f"scalar {name}" not in sdl
+
+
+def test_registering_one_explicitly_still_wins() -> None:
+    """An explicit registration keeps its own description rather than being overwritten by the
+    built-in default.
+    """
+    definition = bramble.scalar(
+        name="DateTime",
+        description="Our own wording",
+        serialize=lambda value: value.isoformat(),
+        parse_value=lambda value: value,
+    )
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def when() -> datetime.datetime: ...
+
+    schema = bramble.Schema(
+        query=Query, config=SchemaConfig(scalar_map={datetime.datetime: definition})
+    )
+    sdl = str(schema)
+
+    assert '"""Our own wording"""\nscalar DateTime' in sdl
+    assert "Date with time (isoformat)" not in sdl

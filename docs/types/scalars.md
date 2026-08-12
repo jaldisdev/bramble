@@ -18,6 +18,23 @@ needed to use them in a field or argument annotation:
 | `decimal.Decimal`      | `Decimal`      |
 | `uuid.UUID`            | `UUID`         |
 
+The first five are defined by the GraphQL specification itself and are never
+declared in SDL. The last five are bramble's own, so a schema that refers to
+one gets a matching `scalar` declaration automatically:
+
+```graphql
+type Query {
+  when: DateTime!
+}
+
+"""Date with time (isoformat)"""
+scalar DateTime
+```
+
+Only the ones actually referenced are declared, and registering one yourself
+through `SchemaConfig(scalar_map=...)` takes precedence -- your description and
+directives are kept rather than overwritten.
+
 `bramble.ID` is a `typing.NewType` over `str`, matching GraphQL's own `ID`
 semantics (serialized as a string, but semantically an opaque identifier
 rather than free text):
