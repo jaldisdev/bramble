@@ -367,3 +367,48 @@ def test_field_with_neither_defer_nor_stream_has_both_unset() -> None:
     assert field_info.is_streamed is False
     assert field_info.stream_initial_count is None
     assert field_info.stream_label is None
+
+
+# --- Optional variables the caller omits ----------------------------------------------------------
+
+
+@bramble.type
+class _OptionalVariableQuery:
+    @bramble.field
+    def items(cursor: str | None = None, limit: int | None = 30) -> str:
+        return f"cursor={cursor!r} limit={limit!r}"
+
+
+_OPTIONAL_QUERY = "query Q($cursor: String, $limit: Int) { items(cursor: $cursor, limit: $limit) }"
+
+
+def test_an_omitted_optional_variable_falls_back_to_the_arguments_default() -> None:
+    """§CoerceArgumentValues: an argument whose variable has no supplied value is *omitted*, so the
+    default applies. Treating it as an undefined variable instead made every ordinary paginating
+    query fail -- `items(cursor: $cursor)` with no cursor is exactly what a client sends for the
+    first page.
+    """
+    schema = bramble.Schema(query=_OptionalVariableQuery)
+
+    result = schema.execute(_OPTIONAL_QUERY, variable_values={})
+
+    assert result["data"] == {"items": "cursor=None limit=30"}
+
+
+def test_an_explicit_null_is_distinct_from_an_omitted_variable() -> None:
+    """Passing `null` means null; omitting means "use the default". Collapsing the two would make
+    `limit` unclearable.
+    """
+    schema = bramble.Schema(query=_OptionalVariableQuery)
+
+    result = schema.execute(_OPTIONAL_QUERY, variable_values={"cursor": None, "limit": None})
+
+    assert result["data"] == {"items": "cursor=None limit=None"}
+
+
+def test_supplied_variables_are_still_passed_through() -> None:
+    schema = bramble.Schema(query=_OptionalVariableQuery)
+
+    result = schema.execute(_OPTIONAL_QUERY, variable_values={"cursor": "abc", "limit": 5})
+
+    assert result["data"] == {"items": "cursor='abc' limit=5"}

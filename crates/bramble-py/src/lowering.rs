@@ -266,6 +266,18 @@ fn convert_arguments(
 ) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     for argument in arguments {
+        // An argument whose value is a variable the caller did not supply is *omitted*, not an
+        // error: §CoerceArgumentValues says such an argument falls back to its default value, and
+        // leaving it out of the dict is what lets the resolver's own default apply. Erroring here
+        // instead made every ordinary optional-variable query fail -- `query Q($cursor: ID) {
+        // items(cursor: $cursor) }` run without a cursor is exactly what a paginating client
+        // sends for the first page. A variable that is genuinely undeclared is still reported,
+        // by `bramble-core`'s validation, which is where that check belongs.
+        if let Value::Variable(name) = &argument.value
+            && variable_values.get_item(name.as_str())?.is_none()
+        {
+            continue;
+        }
         let value = graphql_value_to_python(py, &argument.value, variable_values)?;
         dict.set_item(argument.graphql_name, value)?;
     }
