@@ -359,3 +359,65 @@ def test_a_request_with_neither_query_nor_persisted_hash_is_still_a_400() -> Non
     with pytest.raises(HTTPException) as excinfo:
         _run(view.run(request, request))
     assert excinfo.value.status_code == 400
+
+
+# --- Malformed input must be a 400, never a 500 ---------------------------------------------------
+
+
+def test_multipart_map_path_that_does_not_resolve_is_a_400() -> None:
+    view = _FakeView(bramble.Schema(query=_Query))
+    request = _FakeRequest(
+        headers={"content-type": "multipart/form-data"},
+        form={
+            "operations": json.dumps({"query": "mutation { echo(file: null) }", "variables": {}}),
+            "map": json.dumps({"file": ["variables.nope.deeper"]}),
+            "file": b"contents",
+        },
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        _run(view.run(request, request))
+    assert excinfo.value.status_code == 400
+    assert "map" in excinfo.value.message
+
+
+def test_multipart_map_path_indexing_a_non_list_is_a_400() -> None:
+    view = _FakeView(bramble.Schema(query=_Query))
+    request = _FakeRequest(
+        headers={"content-type": "multipart/form-data"},
+        form={
+            "operations": json.dumps({"query": "mutation { echo(file: null) }", "variables": {"file": None}}),
+            "map": json.dumps({"file": ["variables.file.0"]}),
+            "file": b"contents",
+        },
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        _run(view.run(request, request))
+    assert excinfo.value.status_code == 400
+
+
+def test_multipart_map_path_with_a_non_numeric_list_index_is_a_400() -> None:
+    view = _FakeView(bramble.Schema(query=_Query))
+    request = _FakeRequest(
+        headers={"content-type": "multipart/form-data"},
+        form={
+            "operations": json.dumps({"query": "mutation { echo(file: null) }", "variables": {"files": [None]}}),
+            "map": json.dumps({"file": ["variables.files.notanindex"]}),
+            "file": b"contents",
+        },
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        _run(view.run(request, request))
+    assert excinfo.value.status_code == 400
+
+
+def test_empty_json_batch_is_a_400_not_an_index_error() -> None:
+    schema = bramble.Schema(query=_Query, config=SchemaConfig(batching_config={"max_operations": 5}))
+    view = _FakeView(schema)
+    request = _FakeRequest(headers={"content-type": "application/json"}, body=b"[]")
+
+    with pytest.raises(HTTPException) as excinfo:
+        _run(view.run(request, request))
+    assert excinfo.value.status_code == 400

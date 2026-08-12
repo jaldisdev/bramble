@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
 from bramble._bramble import lower_query
@@ -29,6 +30,16 @@ if TYPE_CHECKING:
     from bramble._schema import Schema
 
 GRAPHQL_TRANSPORT_WS_PROTOCOL = "graphql-transport-ws"
+
+logger = logging.getLogger(__name__)
+
+# The close codes `graphql-transport-ws` defines for protocol violations. Clients distinguish these
+# from ordinary disconnects, so closing with a bare 1000 (or just dropping the socket) leaves them
+# unable to tell "you sent something invalid" from "the server went away".
+CLOSE_BAD_REQUEST = 4400
+CLOSE_UNAUTHORIZED = 4401
+CLOSE_SUBSCRIBER_ALREADY_EXISTS = 4409
+CLOSE_TOO_MANY_INIT_REQUESTS = 4429
 
 
 class WebSocketProtocol(Protocol):
@@ -79,39 +90,112 @@ class GraphQLTransportWSHandler:
             while True:
                 message = await self.websocket.receive_json()
                 await self._handle_message(message)
-        except Exception:  # noqa: BLE001 -- any receive/protocol failure just ends the socket cleanly.
+        except asyncio.CancelledError:
+            raise
+        except (ConnectionError, EOFError, OSError):
+            # The socket went away mid-receive. Ordinary, and nothing to report.
             pass
+        except Exception:
+            # Anything else reaching here is a bug in message handling, not a disconnect. It still
+            # has to end the socket cleanly, but silently swallowing it (as this used to) meant a
+            # real defect looked exactly like a client hanging up.
+            logger.exception("graphql-transport-ws handler failed; closing the socket")
         finally:
-            for task in self.operations.values():
-                task.cancel()
+            await self._shutdown_operations()
             try:
                 await self.websocket.close()
             except Exception:  # noqa: BLE001 -- already closing; nothing meaningful to do with this.
-                pass
+                logger.debug("failed to close the websocket cleanly", exc_info=True)
+
+    async def _shutdown_operations(self) -> None:
+        """Cancels every in-flight operation *and waits for each to finish unwinding.*
+
+        Awaiting matters: `Task.cancel()` only schedules the cancellation. Returning immediately
+        left each operation's own teardown -- a subscription resolver's `finally`, and any
+        generator-based `Depends` provider's cleanup (§3c) -- to run after the socket had already
+        closed, or not before the process moved on at all.
+        """
+        tasks = list(self.operations.values())
+        self.operations.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _close(self, code: int, reason: str) -> None:
+        await self._shutdown_operations()
+        await self.websocket.close(code=code, reason=reason)
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
+        if not isinstance(message, dict):
+            await self._close(CLOSE_BAD_REQUEST, "Invalid message")
+            return
+
         message_type = message.get("type")
 
         if message_type == "connection_init":
+            if self.connection_initialised:
+                await self._close(CLOSE_TOO_MANY_INIT_REQUESTS, "Too many initialisation requests")
+                return
             self.connection_initialised = True
             self.connection_params = message.get("payload")
             await self.websocket.send_json({"type": "connection_ack"})
             return
 
+        # `ping` is answerable at any time, including before `connection_init` -- it's a liveness
+        # check, not an operation. A client using protocol-level keepalive gets no reply at all
+        # without this and eventually times the connection out on its own.
+        if message_type == "ping":
+            payload = message.get("payload")
+            pong: dict[str, Any] = {"type": "pong"}
+            if payload is not None:
+                pong["payload"] = payload
+            await self.websocket.send_json(pong)
+            return
+
+        if message_type == "pong":
+            # A reply to a ping bramble never sends, or an unsolicited keepalive. Both are legal
+            # and require no response.
+            return
+
         if not self.connection_initialised:
-            await self.websocket.close(code=4401, reason="Unauthorized")
+            await self._close(CLOSE_UNAUTHORIZED, "Unauthorized")
             return
 
         if message_type == "subscribe":
-            operation_id = message["id"]
-            self.operations[operation_id] = asyncio.create_task(self._run_operation(operation_id, message["payload"]))
+            operation_id = message.get("id")
+            if not isinstance(operation_id, str):
+                await self._close(CLOSE_BAD_REQUEST, "Invalid message")
+                return
+            if operation_id in self.operations:
+                # Overwriting the entry would orphan the running task: nothing would ever cancel
+                # it, and it would keep streaming into the socket under an id the client believes
+                # it has just re-bound.
+                await self._close(
+                    CLOSE_SUBSCRIBER_ALREADY_EXISTS, f"Subscriber for {operation_id} already exists"
+                )
+                return
+            payload = message.get("payload")
+            if not isinstance(payload, dict):
+                await self._close(CLOSE_BAD_REQUEST, "Invalid message")
+                return
+            self.operations[operation_id] = asyncio.create_task(self._run_operation(operation_id, payload))
             return
 
         if message_type == "complete":
-            task = self.operations.pop(message["id"], None)
+            operation_id = message.get("id")
+            if not isinstance(operation_id, str):
+                await self._close(CLOSE_BAD_REQUEST, "Invalid message")
+                return
+            task = self.operations.pop(operation_id, None)
             if task is not None:
                 task.cancel()
+                # Awaited for the same reason `_shutdown_operations` does: the client asked this
+                # operation to stop, so its teardown should have run by the time we move on.
+                await asyncio.gather(task, return_exceptions=True)
             return
+
+        await self._close(CLOSE_BAD_REQUEST, f"Unknown message type: {message_type!r}")
 
     async def _run_operation(self, operation_id: str, payload: dict[str, Any]) -> None:
         query = payload.get("query")

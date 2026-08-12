@@ -126,6 +126,10 @@ class BaseView(Generic[Request]):
     def parse_batch(self, operations: list[Any], *, max_operations: int | None) -> list[GraphQLRequestData]:
         if max_operations is None:
             raise HTTPException(400, "Batching is not enabled")
+        # An empty array used to pass straight through, and the view then indexed `[0]` on the
+        # empty result -- an `IndexError` escaping as a 500 for what is plainly a malformed request.
+        if not operations:
+            raise HTTPException(400, "No GraphQL operations found in the request")
         if len(operations) > max_operations:
             raise HTTPException(400, "Too many operations")
         return [self.request_data_from_dict(operation) for operation in operations]
@@ -160,6 +164,8 @@ class BaseView(Generic[Request]):
                 _set_path(operations, path, file_value)
 
         operations_list = operations if isinstance(operations, list) else [operations]
+        if not operations_list:
+            raise HTTPException(400, "No GraphQL operations found in the request")
         return [self.request_data_from_dict(operation) for operation in operations_list]
 
     @property
@@ -171,12 +177,20 @@ def _set_path(root: Any, path: str, value: Any) -> None:
     """`path` is a dot-separated string (e.g. `"variables.file"`, or `"1.variables.files.0"` for
     the second operation of a batch) -- walks every segment but the last, then replaces whatever
     the final segment currently points at (always the spec's own `null` placeholder) with `value`.
+
+    Every segment comes from the client's own `map`, so a path that doesn't resolve is malformed
+    input, not a server bug: `KeyError`/`IndexError`/`TypeError` (indexing something that isn't a
+    container) and `ValueError` (a non-numeric index into a list) all become a 400 rather than
+    escaping as an unhandled 500 out of a file-upload endpoint.
     """
     segments = path.split(".")
-    target = root
-    for segment in segments[:-1]:
-        key: str | int = int(segment) if isinstance(target, list) else segment
-        target = target[key]
+    try:
+        target = root
+        for segment in segments[:-1]:
+            key: str | int = int(segment) if isinstance(target, list) else segment
+            target = target[key]
 
-    last_key: str | int = int(segments[-1]) if isinstance(target, list) else segments[-1]
-    target[last_key] = value
+        last_key: str | int = int(segments[-1]) if isinstance(target, list) else segments[-1]
+        target[last_key] = value
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        raise HTTPException(400, f"Invalid `map` path '{path}' in the multipart request") from error

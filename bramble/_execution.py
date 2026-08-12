@@ -1807,37 +1807,47 @@ async def subscribe_async(
                 code=ErrorCode.FIELD_RESOLUTION_FAILED,
             )
 
-        async for event in source_stream:
-            # A fresh errors list per event -- each yielded response reports only its own errors,
-            # not ones accumulated from earlier events -- but the *same* dependency scope
-            # throughout, so a dependency used across events (or by the root resolver above) is
-            # still cached/torn down once for the whole subscription, not once per event.
-            event_state = _ExecutionState(
-                schema=schema,
-                context=context,
-                root_value=root_value,
-                variable_values=resolved_variable_values,
-                query=query,
-                errors=[],
-                dependency_scope=scope,
-            )
-            try:
-                value = await _finish_field(
-                    field_info=field_info,
-                    lowered_field=primary,
-                    selections=merged_selections,
-                    raw_value=event,
-                    path=field_path,
-                    state=event_state,
-                    info=info,
+        try:
+            async for event in source_stream:
+                # A fresh errors list per event -- each yielded response reports only its own
+                # errors, not ones accumulated from earlier events -- but the *same* dependency
+                # scope throughout, so a dependency used across events (or by the root resolver
+                # above) is still cached/torn down once for the whole subscription, not once per
+                # event.
+                event_state = _ExecutionState(
+                    schema=schema,
+                    context=context,
+                    root_value=root_value,
+                    variable_values=resolved_variable_values,
+                    query=query_source,
+                    errors=[],
+                    dependency_scope=scope,
                 )
-                data: dict[str, Any] | None = {response_key: value}
-            except _PropagateNull:
-                data = None
+                try:
+                    value = await _finish_field(
+                        field_info=field_info,
+                        lowered_field=primary,
+                        selections=merged_selections,
+                        raw_value=event,
+                        path=field_path,
+                        state=event_state,
+                        info=info,
+                    )
+                    data: dict[str, Any] | None = {response_key: value}
+                except _PropagateNull:
+                    data = None
 
-            response: dict[str, Any] = {"data": data}
-            if event_state.errors:
-                response["errors"] = [_error_to_dict(error) for error in event_state.errors]
-            yield response
+                response: dict[str, Any] = {"data": data}
+                if event_state.errors:
+                    response["errors"] = [_error_to_dict(error) for error in event_state.errors]
+                yield response
+        finally:
+            # `async for` alone never closes the generator it iterates. On an early consumer
+            # disconnect (`GeneratorExit` thrown in at the `yield` above) the source stream would
+            # otherwise be left to Python's async-generator GC finalizer, so a subscription
+            # resolver's own `finally` -- unsubscribing from a broker, closing a cursor, releasing
+            # a channel -- ran at some arbitrary later point instead of at unsubscribe. Same
+            # reasoning, and same fix, as the wrapper generators in `bramble._schema`.
+            await source_stream.aclose()
     finally:
         await scope.aclose()

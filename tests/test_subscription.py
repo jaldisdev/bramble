@@ -364,3 +364,69 @@ def test_type_nested_inside_an_async_wrapper_is_discovered() -> None:
 
     responses = asyncio.run(_collect(schema.subscribe_async("subscription { events { value } }")))
     assert responses == [{"data": {"events": [{"value": "a"}]}}]
+
+
+def test_subscription_source_generator_is_closed_on_unsubscribe_not_at_gc() -> None:
+    """A subscription resolver's own `finally` -- unsubscribing from a broker, closing a cursor --
+    must run when the consumer disconnects, not whenever the GC eventually finalizes the generator.
+    `async for` alone never closes what it iterates, so this used to be deferred indefinitely.
+    """
+    closed: list[str] = []
+
+    @bramble.type
+    class Query:
+        ok: bool = True
+
+    @bramble.type
+    class Subscription:
+        @bramble.field
+        async def ticks() -> AsyncGenerator[int, None]:
+            try:
+                index = 0
+                while True:
+                    yield index
+                    index += 1
+                    await asyncio.sleep(0)
+            finally:
+                closed.append("torn down")
+
+    schema = bramble.Schema(query=Query, subscription=Subscription)
+
+    async def run() -> None:
+        generator = schema.subscribe_async("subscription { ticks }")
+        seen = 0
+        async for _ in generator:
+            seen += 1
+            if seen == 2:
+                break
+        assert closed == [], "not torn down while still subscribed"
+        await generator.aclose()
+        # Synchronously after aclose() -- no GC pass, no event-loop turn in between.
+        assert closed == ["torn down"]
+
+    asyncio.run(run())
+
+
+def test_subscription_source_generator_is_closed_when_the_stream_ends_normally() -> None:
+    closed: list[str] = []
+
+    @bramble.type
+    class Query:
+        ok: bool = True
+
+    @bramble.type
+    class Subscription:
+        @bramble.field
+        async def ticks() -> AsyncGenerator[int, None]:
+            try:
+                yield 1
+            finally:
+                closed.append("torn down")
+
+    schema = bramble.Schema(query=Query, subscription=Subscription)
+
+    async def run() -> list[dict]:
+        return await _collect(schema.subscribe_async("subscription { ticks }"))
+
+    assert asyncio.run(run()) == [{"data": {"ticks": 1}}]
+    assert closed == ["torn down"]
