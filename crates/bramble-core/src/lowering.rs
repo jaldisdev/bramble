@@ -319,11 +319,19 @@ fn lower_directives(directives: &[Positioned<async_graphql_parser::types::Direct
 /// deferred fragments colliding on the same key is rarer and, for now, simply also falls back to
 /// immediate (non-deferred) resolution rather than attempting a real merge. Both cases are a
 /// conservative "resolve eagerly instead of deferring" fallback, never silently dropped data.
+///
+/// `spread_chain` carries the fragment names currently being expanded on this path, guarding the
+/// spec's "Fragment spreads must not form cycles" rule. Lowering has to enforce it independently of
+/// `validation::validate_query` rather than assuming validation ran first: `_needs_incremental_delivery`
+/// (`bramble/http/async_base_view.py`) and the WebSocket handler both lower raw, *unvalidated*
+/// client input to peek at the operation type, so an unguarded recursion here is reachable on its
+/// own.
 fn lower_selection_set(
     selection_set: &SelectionSet,
     fragments: &HashMap<Name, Positioned<FragmentDefinition>>,
     variable_values: &HashMap<String, JsonValue>,
     type_condition: Option<&str>,
+    spread_chain: &mut Vec<String>,
 ) -> GraphQLResult<Vec<LoweredField>> {
     // Each entry's `Option<Option<String>>` mirrors `defer_label`'s own return shape: `None` if
     // this particular occurrence isn't deferred at all, `Some(label)` if it is (with `label`
@@ -339,7 +347,7 @@ fn lower_selection_set(
                 let response_key = field.node.response_key().node.as_str().to_string();
                 let field_name = field.node.name.node.as_str().to_string();
                 let selections =
-                    lower_selection_set(&field.node.selection_set.node, fragments, variable_values, None)?;
+                    lower_selection_set(&field.node.selection_set.node, fragments, variable_values, None, spread_chain)?;
                 let streamed = stream_marker(&field.node.directives, variable_values)?;
                 collected.push((
                     LoweredField {
@@ -367,6 +375,7 @@ fn lower_selection_set(
                     fragments,
                     variable_values,
                     nested_condition.or(type_condition),
+                    spread_chain,
                 )?;
                 collected.extend(nested.into_iter().map(|field| (field, label.clone())));
             }
@@ -384,17 +393,26 @@ fn lower_selection_set(
                 if should_prune(&fragment.node.directives, variable_values)? {
                     continue;
                 }
+                if spread_chain.iter().any(|seen| seen == fragment_name.as_str()) {
+                    return Err(Box::new(GraphQLError::new(
+                        format!("Fragment cycle detected involving '{fragment_name}'"),
+                        ErrorCode::InvalidFragmentTarget,
+                    )));
+                }
                 // `@defer` is read off the spread itself (`...Foo @defer`), matching where the
                 // spec allows it -- never off the `fragment Foo on Type { ... }` definition.
                 let label = defer_label(&spread.node.directives, variable_values)?;
                 let nested_condition = fragment.node.type_condition.node.on.node.as_str();
+                spread_chain.push(fragment_name.to_string());
                 let nested = lower_selection_set(
                     &fragment.node.selection_set.node,
                     fragments,
                     variable_values,
                     Some(nested_condition),
-                )?;
-                collected.extend(nested.into_iter().map(|field| (field, label.clone())));
+                    spread_chain,
+                );
+                spread_chain.pop();
+                collected.extend(nested?.into_iter().map(|field| (field, label.clone())));
             }
         }
     }
@@ -447,7 +465,8 @@ pub fn lower_document(
     operation_name: Option<&str>,
 ) -> GraphQLResult<(OperationType, Vec<LoweredField>)> {
     let operation = select_operation(document, operation_name)?;
-    let fields = lower_selection_set(&operation.selection_set.node, &document.fragments, variable_values, None)?;
+    let fields =
+        lower_selection_set(&operation.selection_set.node, &document.fragments, variable_values, None, &mut Vec::new())?;
     Ok((operation.ty, fields))
 }
 
@@ -464,6 +483,48 @@ mod tests {
 
     fn field<'a>(fields: &'a [LoweredField], response_key: &str) -> &'a LoweredField {
         fields.iter().find(|field| field.response_key == response_key).expect("field present")
+    }
+
+    fn lowering_error(query: &str) -> String {
+        let document = parse_document(query).expect("query parses");
+        lower_document(&document, &HashMap::new(), None).expect_err("expected a lowering error").message
+    }
+
+    // Lowering enforces the fragment-cycle rule on its own, independently of `validate_query` --
+    // the HTTP view's `@defer`/`@stream` peek and the WebSocket handler's operation-type peek both
+    // lower unvalidated client input, so an unguarded recursion here would hang on its own.
+    #[test]
+    fn a_self_referencing_fragment_is_rejected_rather_than_looping_forever() {
+        let message = lowering_error("query { user { ...A } } fragment A on User { name ...A }");
+        assert!(message.contains("Fragment cycle detected involving 'A'"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn a_mutually_recursive_fragment_pair_is_rejected_during_lowering() {
+        let message =
+            lowering_error("query { user { ...A } } fragment A on User { ...B } fragment B on User { ...A }");
+        assert!(message.contains("Fragment cycle detected"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn the_same_fragment_lowered_twice_in_sibling_positions_is_not_a_cycle() {
+        let fields = lower(
+            "query { user { ...A } other { ...A } } fragment A on User { name }",
+            &HashMap::new(),
+        );
+        assert_eq!(field(&fields, "user").selections.len(), 1);
+        assert_eq!(field(&fields, "other").selections.len(), 1);
+    }
+
+    #[test]
+    fn a_pruned_cyclic_fragment_spread_does_not_trip_the_guard() {
+        // `@skip(if: true)` removes the spread structurally before it is ever expanded, so the
+        // cycle is never reached -- the guard must not fire on a spread that was pruned.
+        let fields = lower(
+            "query { user { name ...A @skip(if: true) } } fragment A on User { ...A }",
+            &HashMap::new(),
+        );
+        assert_eq!(field(&fields, "user").selections.len(), 1);
     }
 
     #[test]

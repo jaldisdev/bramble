@@ -19,6 +19,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
 
 import bramble
@@ -256,3 +259,80 @@ def test_parse_error_surfaces_as_graphql_error() -> None:
         schema.validate_query("query { greet(")
 
     assert excinfo.value.code is bramble.ErrorCode.GRAPHQL_PARSE_FAILED
+
+
+# --- Fragment cycles -------------------------------------------------------------------------
+#
+# A cyclic fragment spread used to send both the Rust validator and the lowering pass into an
+# unbounded loop, hanging the worker on any unauthenticated request. These run in a *subprocess*
+# with a hard timeout rather than in-process: the Rust bindings hold the GIL for the whole call,
+# so a regression would freeze the whole pytest run (including any in-process watchdog thread)
+# rather than failing. A subprocess is the only thing that can still be killed.
+
+_CYCLE_PROBE = """
+import bramble
+
+@bramble.type
+class Author:
+    name: str
+
+@bramble.type
+class Query:
+    author: Author
+
+schema = bramble.Schema(query=Query, types=[Author])
+try:
+    schema.{method}({args})
+except bramble.GraphQLError as error:
+    print("ERROR:" + error.message)
+else:
+    print("NO_ERROR")
+"""
+
+
+def _run_probe(method: str, args: str, timeout: float = 30.0) -> str:
+    completed = subprocess.run(
+        [sys.executable, "-c", _CYCLE_PROBE.format(method=method, args=args)],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+    return completed.stdout.strip()
+
+
+@pytest.mark.parametrize(
+    ("label", "query"),
+    [
+        ("self reference", "query { author { ...A } } fragment A on Author { name ...A }"),
+        (
+            "mutual recursion",
+            "query { author { ...A } } fragment A on Author { ...B } fragment B on Author { ...A }",
+        ),
+        (
+            "cycle behind an inline fragment",
+            "query { author { ...A } } fragment A on Author { ... on Author { ...A } }",
+        ),
+    ],
+)
+def test_cyclic_fragments_are_rejected_by_validation_without_hanging(label: str, query: str) -> None:
+    output = _run_probe("validate_query", repr(query))
+    assert output.startswith("ERROR:"), f"{label}: expected a validation error, got {output!r}"
+    assert "Fragment cycle detected" in output, f"{label}: unexpected message {output!r}"
+
+
+def test_cyclic_fragments_are_rejected_by_lowering_without_hanging() -> None:
+    # `execute_async` validates first, but the HTTP view's `@defer`/`@stream` peek and the
+    # WebSocket handler both lower *unvalidated* input -- so lowering needs its own guard, and
+    # this exercises the path that reaches it.
+    query = "query { author { ...A } } fragment A on Author { ...A }"
+    output = _run_probe("execute", repr(query))
+    assert output.startswith("ERROR:"), f"expected an error, got {output!r}"
+    assert "Fragment cycle detected" in output
+
+
+def test_repeated_non_cyclic_fragment_spreads_are_still_accepted() -> None:
+    schema = _schema()
+    schema.validate_query(
+        "query { first: author { ...frag } second: author { ...frag } } fragment frag on Author { name }"
+    )

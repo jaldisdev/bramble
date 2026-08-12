@@ -345,6 +345,7 @@ fn validate_field(
     parent_type: &TypeDefinition,
     schema: &CompiledSchema,
     fragments: &HashMap<Name, Positioned<FragmentDefinition>>,
+    spread_chain: &mut Vec<String>,
 ) -> GraphQLResult<()> {
     validate_directives(&field.node.directives, OperationDirectiveLocation::Field, schema)?;
 
@@ -379,9 +380,34 @@ fn validate_field(
     if !field.node.selection_set.node.items.is_empty()
         && let Some(nested_type) = schema.types.get(field_def.graphql_type.inner_name())
     {
-        validate_selection_set(&field.node.selection_set.node, nested_type, schema, fragments)?;
+        validate_selection_set(&field.node.selection_set.node, nested_type, schema, fragments, spread_chain)?;
     }
 
+    Ok(())
+}
+
+/// The spec's "Fragment spreads must not form cycles" rule (§ Validation). `spread_chain` holds
+/// the fragment names currently being expanded on *this* path down the tree -- a name already on
+/// it means expanding it again would recurse forever. Deliberately a stack, popped on the way back
+/// out, not a cumulative "already seen" set: spreading the same fragment twice in sibling
+/// positions (`{ ...A ...A }`, or a diamond) is perfectly legal and must keep validating, only a
+/// genuine cycle is an error.
+///
+/// Without this, a self-referencing (`fragment A on T { ...A }`) or mutually-recursive
+/// (`A -> B -> A`) document sends this recursion into an unbounded loop -- reachable from any
+/// unauthenticated request, since every HTTP adapter validates raw client input.
+fn check_fragment_cycle(
+    fragment_name: &Name,
+    spread_chain: &[String],
+    pos: async_graphql_parser::Pos,
+) -> GraphQLResult<()> {
+    if spread_chain.iter().any(|seen| seen == fragment_name.as_str()) {
+        return Err(error_at(
+            format!("Fragment cycle detected involving '{fragment_name}'"),
+            ErrorCode::InvalidFragmentTarget,
+            pos,
+        ));
+    }
     Ok(())
 }
 
@@ -390,10 +416,11 @@ fn validate_selection_set(
     parent_type: &TypeDefinition,
     schema: &CompiledSchema,
     fragments: &HashMap<Name, Positioned<FragmentDefinition>>,
+    spread_chain: &mut Vec<String>,
 ) -> GraphQLResult<()> {
     for selection in &selection_set.items {
         match &selection.node {
-            Selection::Field(field) => validate_field(field, parent_type, schema, fragments)?,
+            Selection::Field(field) => validate_field(field, parent_type, schema, fragments, spread_chain)?,
             Selection::InlineFragment(inline) => {
                 validate_directives(&inline.node.directives, OperationDirectiveLocation::InlineFragment, schema)?;
 
@@ -410,7 +437,7 @@ fn validate_selection_set(
                     }
                     None => parent_type,
                 };
-                validate_selection_set(&inline.node.selection_set.node, target_type, schema, fragments)?;
+                validate_selection_set(&inline.node.selection_set.node, target_type, schema, fragments, spread_chain)?;
             }
             Selection::FragmentSpread(spread) => {
                 validate_directives(&spread.node.directives, OperationDirectiveLocation::FragmentSpread, schema)?;
@@ -424,6 +451,8 @@ fn validate_selection_set(
                     )
                 })?;
 
+                check_fragment_cycle(fragment_name, spread_chain, spread.pos)?;
+
                 let target_name = fragment.node.type_condition.node.on.node.as_str();
                 let target_type = schema.types.get(target_name).ok_or_else(|| {
                     error_at(
@@ -432,7 +461,12 @@ fn validate_selection_set(
                         fragment.node.type_condition.pos,
                     )
                 })?;
-                validate_selection_set(&fragment.node.selection_set.node, target_type, schema, fragments)?;
+
+                spread_chain.push(fragment_name.to_string());
+                let result =
+                    validate_selection_set(&fragment.node.selection_set.node, target_type, schema, fragments, spread_chain);
+                spread_chain.pop();
+                result?;
             }
         }
     }
@@ -473,5 +507,176 @@ pub fn validate_query(document: &ExecutableDocument, schema: &CompiledSchema, op
         ))
     })?;
 
-    validate_selection_set(&operation.selection_set.node, root_type, schema, &document.fragments)
+    validate_selection_set(&operation.selection_set.node, root_type, schema, &document.fragments, &mut Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::parser::parse_document;
+    use crate::persisted_query::PersistedQueryCache;
+
+    fn named(name: &str) -> GraphQLType {
+        GraphQLType::NonNull(Box::new(GraphQLType::Named(name.to_string())))
+    }
+
+    fn nullable(name: &str) -> GraphQLType {
+        GraphQLType::Named(name.to_string())
+    }
+
+    fn list_of(name: &str) -> GraphQLType {
+        GraphQLType::NonNull(Box::new(GraphQLType::List(Box::new(named(name)))))
+    }
+
+    fn argument(name: &str, graphql_type: GraphQLType, has_default: bool) -> ArgumentDefinition {
+        ArgumentDefinition {
+            name: name.to_string(),
+            graphql_name: None,
+            graphql_type,
+            has_default,
+            description: None,
+            deprecation_reason: None,
+            applied_directives: Vec::new(),
+        }
+    }
+
+    fn field(name: &str, graphql_type: GraphQLType, arguments: Vec<ArgumentDefinition>) -> FieldDefinition {
+        FieldDefinition {
+            name: name.to_string(),
+            graphql_name: None,
+            graphql_type,
+            description: None,
+            has_resolver: !arguments.is_empty(),
+            parent_parameter: None,
+            info_parameter: None,
+            arguments,
+            applied_directives: Vec::new(),
+        }
+    }
+
+    fn object(name: &str, fields: Vec<FieldDefinition>) -> TypeDefinition {
+        TypeDefinition {
+            kind: TypeKind::Type,
+            name: name.to_string(),
+            description: None,
+            one_of: false,
+            interfaces: Vec::new(),
+            enum_values: Vec::new(),
+            fields,
+            applied_directives: Vec::new(),
+        }
+    }
+
+    /// A small blog-shaped schema covering the pieces validation actually branches on: an object
+    /// with a nested object field, a list field, a scalar leaf, and an argument with a default.
+    fn test_schema() -> CompiledSchema {
+        let mut types = HashMap::new();
+        types.insert(
+            "Query".to_string(),
+            object(
+                "Query",
+                vec![
+                    field("user", named("User"), vec![argument("id", named("ID"), false)]),
+                    field("search", list_of("User"), vec![argument("limit", named("Int"), true)]),
+                    field("motto", named("String"), Vec::new()),
+                ],
+            ),
+        );
+        types.insert(
+            "User".to_string(),
+            object(
+                "User",
+                vec![
+                    field("id", named("ID"), Vec::new()),
+                    field("name", named("String"), Vec::new()),
+                    field("bio", nullable("String"), Vec::new()),
+                    field("posts", list_of("Post"), Vec::new()),
+                ],
+            ),
+        );
+        types.insert(
+            "Post".to_string(),
+            object("Post", vec![field("id", named("ID"), Vec::new()), field("author", named("User"), Vec::new())]),
+        );
+
+        CompiledSchema {
+            types,
+            unions: HashMap::new(),
+            query_type_name: "Query".to_string(),
+            mutation_type_name: None,
+            subscription_type_name: None,
+            operation_directives: HashMap::new(),
+            schema_directives: HashMap::new(),
+            schema_applied_directives: Vec::new(),
+            scalar_names: HashSet::new(),
+            scalar_applied_directives: HashMap::new(),
+            scalar_descriptions: HashMap::new(),
+            auto_camel_case: true,
+            persisted_query_cache: PersistedQueryCache::new(),
+        }
+    }
+
+    fn validate(query: &str) -> GraphQLResult<()> {
+        let document = parse_document(query).expect("query parses");
+        validate_query(&document, &test_schema(), None)
+    }
+
+    fn error_message(query: &str) -> String {
+        validate(query).expect_err("expected a validation error").message
+    }
+
+    #[test]
+    fn a_self_referencing_fragment_is_rejected_rather_than_looping_forever() {
+        let message = error_message("query { user(id: \"1\") { ...A } } fragment A on User { name ...A }");
+        assert!(message.contains("Fragment cycle detected involving 'A'"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn a_mutually_recursive_fragment_pair_is_rejected() {
+        let message = error_message(
+            "query { user(id: \"1\") { ...A } } fragment A on User { ...B } fragment B on User { ...A }",
+        );
+        assert!(message.contains("Fragment cycle detected"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn a_cycle_reached_through_a_nested_field_is_rejected() {
+        let message = error_message(
+            "query { user(id: \"1\") { ...A } } fragment A on User { posts { author { ...A } } }",
+        );
+        assert!(message.contains("Fragment cycle detected involving 'A'"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn a_cycle_reached_through_an_inline_fragment_is_rejected() {
+        let message = error_message(
+            "query { user(id: \"1\") { ...A } } fragment A on User { ... on User { ...A } }",
+        );
+        assert!(message.contains("Fragment cycle detected involving 'A'"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn the_same_fragment_spread_twice_in_sibling_positions_is_not_a_cycle() {
+        // The guard is a stack popped on the way back out, not a cumulative seen-set -- spreading
+        // one fragment from two independent positions is legal and must keep validating.
+        validate("query { user(id: \"1\") { ...A posts { author { ...A } } } } fragment A on User { name }")
+            .expect("sibling spreads of the same fragment are valid");
+    }
+
+    #[test]
+    fn a_deep_acyclic_fragment_chain_still_validates() {
+        validate(
+            "query { user(id: \"1\") { ...A } } \
+             fragment A on User { ...B } fragment B on User { ...C } fragment C on User { name }",
+        )
+        .expect("an acyclic chain is valid");
+    }
+
+    #[test]
+    fn an_undefined_fragment_is_still_reported_as_undefined_not_as_a_cycle() {
+        let message = error_message("query { user(id: \"1\") { ...Missing } }");
+        assert!(message.contains("undefined fragment 'Missing'"), "unexpected message: {message}");
+    }
 }
