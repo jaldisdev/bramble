@@ -190,18 +190,14 @@ pub(crate) fn classify_parameters<'py>(
             )));
         }
 
-        let annotation = resolved_hints
-            .get_item(&parameter_name)?
-            .unwrap_or(raw_annotation);
+        let annotation = resolved_hints.get_item(&parameter_name)?.unwrap_or(raw_annotation);
         let origin = typing.call_method1("get_origin", (&annotation,))?;
 
         if let Some(parent_class) = parent_class
             && origin.is(parent_class)
         {
             if parent_parameter.is_some() {
-                return Err(SchemaError::new_err(
-                    "resolver declares more than one Parent[T] parameter",
-                ));
+                return Err(SchemaError::new_err("resolver declares more than one Parent[T] parameter"));
             }
             parent_parameter = Some(parameter_name);
             continue;
@@ -234,8 +230,19 @@ pub(crate) fn classify_parameters<'py>(
 
         let default = parameter.getattr("default")?;
         let has_default = !default.is(&empty);
-        let default_value = if has_default { python_default_to_graphql_literal(&default)? } else { None };
-        arguments.push(classify_argument(py, &typing, parameter_name, annotation, has_default, default_value)?);
+        let default_value = if has_default {
+            python_default_to_graphql_literal(&default)?
+        } else {
+            None
+        };
+        arguments.push(classify_argument(
+            py,
+            &typing,
+            parameter_name,
+            annotation,
+            has_default,
+            default_value,
+        )?);
     }
 
     Ok(ClassifiedParameters {

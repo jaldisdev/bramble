@@ -84,14 +84,22 @@ mod tests {
     #[test]
     fn multiple_operations_without_a_name_are_ambiguous() {
         let error = select("query A { hello } query B { hello }", None).expect_err("ambiguous");
-        assert!(error.message.contains("operation_name is required"), "unexpected: {}", error.message);
+        assert!(
+            error.message.contains("operation_name is required"),
+            "unexpected: {}",
+            error.message
+        );
         assert_eq!(error.extensions.code, ErrorCode::GraphqlValidationFailed);
     }
 
     #[test]
     fn an_unknown_operation_name_is_rejected() {
         let error = select("query A { hello }", Some("Nope")).expect_err("unknown name");
-        assert!(error.message.contains("no operation named 'Nope'"), "unexpected: {}", error.message);
+        assert!(
+            error.message.contains("no operation named 'Nope'"),
+            "unexpected: {}",
+            error.message
+        );
     }
 
     #[test]

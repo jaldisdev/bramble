@@ -107,8 +107,8 @@ mod tests {
 
     #[test]
     fn serializes_to_spec_shape() {
-        let error = GraphQLError::new("boom", ErrorCode::GraphqlParseFailed)
-            .with_locations(vec![Location { line: 1, column: 2 }]);
+        let error =
+            GraphQLError::new("boom", ErrorCode::GraphqlParseFailed).with_locations(vec![Location { line: 1, column: 2 }]);
 
         insta::assert_json_snapshot!(error, @r###"
         {
@@ -144,7 +144,11 @@ mod tests {
     fn serializes_multiple_locations_and_a_path() {
         let mut error = GraphQLError::new("field error", ErrorCode::FieldResolutionFailed)
             .with_locations(vec![Location { line: 1, column: 2 }, Location { line: 3, column: 4 }]);
-        error.path = Some(vec![serde_json::json!("items"), serde_json::json!(0), serde_json::json!("value")]);
+        error.path = Some(vec![
+            serde_json::json!("items"),
+            serde_json::json!(0),
+            serde_json::json!("value"),
+        ]);
 
         insta::assert_json_snapshot!(error, @r###"
         {

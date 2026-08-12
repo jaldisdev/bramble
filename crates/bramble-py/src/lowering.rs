@@ -19,9 +19,9 @@
 
 use std::collections::HashMap;
 
+use async_graphql_parser::types::ExecutableDocument;
 use async_graphql_value::Value;
 use bramble_core::error::{ErrorCode, GraphQLError as CoreGraphQLError};
-use async_graphql_parser::types::ExecutableDocument;
 use bramble_core::lowering::{LoweredArgument, LoweredDirective, LoweredField, lower_document};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
@@ -46,7 +46,11 @@ pub(crate) fn python_default_to_graphql_literal(value: &Bound<'_, PyAny>) -> PyR
         return Ok(Some("null".to_string()));
     }
     if let Ok(boolean) = value.cast::<PyBool>() {
-        return Ok(Some(if boolean.is_true() { "true".to_string() } else { "false".to_string() }));
+        return Ok(Some(if boolean.is_true() {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }));
     }
     if let Ok(integer) = value.extract::<i64>() {
         return Ok(Some(integer.to_string()));

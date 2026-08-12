@@ -351,7 +351,12 @@ mod tests {
     #[test]
     fn a_conforming_implementor_passes() {
         let node = type_def("Node", TypeKind::Interface, vec![], vec![field("id", non_null("ID"), vec![])]);
-        let user = type_def("User", TypeKind::Type, vec!["Node"], vec![field("id", non_null("ID"), vec![])]);
+        let user = type_def(
+            "User",
+            TypeKind::Type,
+            vec!["Node"],
+            vec![field("id", non_null("ID"), vec![])],
+        );
         check(vec![node, user], vec![]).expect("a conforming implementor is valid");
     }
 
@@ -370,7 +375,11 @@ mod tests {
             "User",
             TypeKind::Type,
             vec!["Node"],
-            vec![field("id", non_null("ID"), vec![argument("format", non_null("String"), false)])],
+            vec![field(
+                "id",
+                non_null("ID"),
+                vec![argument("format", non_null("String"), false)],
+            )],
         );
         let error = check(vec![node, user], vec![]).expect_err("a new required argument must be rejected");
         assert!(error.contains("adds required argument"), "unexpected: {error}");
@@ -389,7 +398,11 @@ mod tests {
             "B",
             TypeKind::Type,
             vec!["Node"],
-            vec![field("id", non_null("ID"), vec![argument("format", non_null("String"), true)])],
+            vec![field(
+                "id",
+                non_null("ID"),
+                vec![argument("format", non_null("String"), true)],
+            )],
         );
         check(vec![node, nullable_extra, defaulted_extra], vec![]).expect("optional additions are allowed");
     }
@@ -423,9 +436,9 @@ mod tests {
 
     #[test]
     fn inner_name_unwraps_every_wrapper_layer() {
-        let deep = GraphQLType::NonNull(Box::new(GraphQLType::List(Box::new(GraphQLType::NonNull(Box::new(
-            named("User"),
-        ))))));
+        let deep = GraphQLType::NonNull(Box::new(GraphQLType::List(Box::new(GraphQLType::NonNull(Box::new(named(
+            "User",
+        )))))));
         assert_eq!(deep.inner_name(), "User");
         assert_eq!(named("User").inner_name(), "User");
     }

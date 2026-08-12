@@ -165,10 +165,7 @@ fn resolve_int_argument(
     }
 }
 
-fn resolve_label_argument(
-    value: &Value,
-    directive_name: &str,
-) -> GraphQLResult<String> {
+fn resolve_label_argument(value: &Value, directive_name: &str) -> GraphQLResult<String> {
     match value {
         Value::String(label) => Ok(label.clone()),
         _ => Err(Box::new(GraphQLError::new(
@@ -192,8 +189,12 @@ fn defer_label(
             continue;
         }
 
-        let if_argument =
-            directive.node.arguments.iter().find(|(name, _)| name.node.as_str() == "if").map(|(_, value)| &value.node);
+        let if_argument = directive
+            .node
+            .arguments
+            .iter()
+            .find(|(name, _)| name.node.as_str() == "if")
+            .map(|(_, value)| &value.node);
         let active = match if_argument {
             Some(value) => resolve_boolean_argument(value, variable_values, "defer")?,
             None => true,
@@ -225,8 +226,12 @@ fn stream_marker(
             continue;
         }
 
-        let if_argument =
-            directive.node.arguments.iter().find(|(name, _)| name.node.as_str() == "if").map(|(_, value)| &value.node);
+        let if_argument = directive
+            .node
+            .arguments
+            .iter()
+            .find(|(name, _)| name.node.as_str() == "if")
+            .map(|(_, value)| &value.node);
         let active = match if_argument {
             Some(value) => resolve_boolean_argument(value, variable_values, "stream")?,
             None => true,
@@ -368,7 +373,11 @@ fn lower_selection_set(
                 if should_prune(&inline.node.directives, variable_values)? {
                     continue;
                 }
-                let nested_condition = inline.node.type_condition.as_ref().map(|condition| condition.node.on.node.as_str());
+                let nested_condition = inline
+                    .node
+                    .type_condition
+                    .as_ref()
+                    .map(|condition| condition.node.on.node.as_str());
                 let label = defer_label(&inline.node.directives, variable_values)?;
                 let nested = lower_selection_set(
                     &inline.node.selection_set.node,
@@ -465,8 +474,13 @@ pub fn lower_document(
     operation_name: Option<&str>,
 ) -> GraphQLResult<(OperationType, Vec<LoweredField>)> {
     let operation = select_operation(document, operation_name)?;
-    let fields =
-        lower_selection_set(&operation.selection_set.node, &document.fragments, variable_values, None, &mut Vec::new())?;
+    let fields = lower_selection_set(
+        &operation.selection_set.node,
+        &document.fragments,
+        variable_values,
+        None,
+        &mut Vec::new(),
+    )?;
     Ok((operation.ty, fields))
 }
 
@@ -482,12 +496,17 @@ mod tests {
     }
 
     fn field<'a>(fields: &'a [LoweredField], response_key: &str) -> &'a LoweredField {
-        fields.iter().find(|field| field.response_key == response_key).expect("field present")
+        fields
+            .iter()
+            .find(|field| field.response_key == response_key)
+            .expect("field present")
     }
 
     fn lowering_error(query: &str) -> String {
         let document = parse_document(query).expect("query parses");
-        lower_document(&document, &HashMap::new(), None).expect_err("expected a lowering error").message
+        lower_document(&document, &HashMap::new(), None)
+            .expect_err("expected a lowering error")
+            .message
     }
 
     // Lowering enforces the fragment-cycle rule on its own, independently of `validate_query` --
@@ -496,13 +515,15 @@ mod tests {
     #[test]
     fn a_self_referencing_fragment_is_rejected_rather_than_looping_forever() {
         let message = lowering_error("query { user { ...A } } fragment A on User { name ...A }");
-        assert!(message.contains("Fragment cycle detected involving 'A'"), "unexpected message: {message}");
+        assert!(
+            message.contains("Fragment cycle detected involving 'A'"),
+            "unexpected message: {message}"
+        );
     }
 
     #[test]
     fn a_mutually_recursive_fragment_pair_is_rejected_during_lowering() {
-        let message =
-            lowering_error("query { user { ...A } } fragment A on User { ...B } fragment B on User { ...A }");
+        let message = lowering_error("query { user { ...A } } fragment A on User { ...B } fragment B on User { ...A }");
         assert!(message.contains("Fragment cycle detected"), "unexpected message: {message}");
     }
 
@@ -541,7 +562,12 @@ mod tests {
 
         assert!(field(&fields, "id").deferred.is_none());
         let name = field(&fields, "name");
-        assert_eq!(name.deferred, Some(DeferMarker { label: Some("extra".to_string()) }));
+        assert_eq!(
+            name.deferred,
+            Some(DeferMarker {
+                label: Some("extra".to_string())
+            })
+        );
     }
 
     #[test]
@@ -604,7 +630,10 @@ mod tests {
 
         assert_eq!(
             field(&fields, "items").streamed,
-            Some(StreamMarker { initial_count: 2, label: Some("batch".to_string()) })
+            Some(StreamMarker {
+                initial_count: 2,
+                label: Some("batch".to_string())
+            })
         );
     }
 
@@ -612,6 +641,12 @@ mod tests {
     fn stream_initial_count_defaults_to_zero() {
         let fields = lower("query { items @stream }", &HashMap::new());
 
-        assert_eq!(field(&fields, "items").streamed, Some(StreamMarker { initial_count: 0, label: None }));
+        assert_eq!(
+            field(&fields, "items").streamed,
+            Some(StreamMarker {
+                initial_count: 0,
+                label: None
+            })
+        );
     }
 }

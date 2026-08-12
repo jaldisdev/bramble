@@ -73,9 +73,7 @@ fn parse_location(value: &str) -> PyResult<SchemaDirectiveLocation> {
         "ENUM_VALUE" => Ok(SchemaDirectiveLocation::EnumValue),
         "INPUT_OBJECT" => Ok(SchemaDirectiveLocation::InputObject),
         "INPUT_FIELD_DEFINITION" => Ok(SchemaDirectiveLocation::InputFieldDefinition),
-        other => Err(SchemaError::new_err(format!(
-            "unknown schema directive location '{other}'"
-        ))),
+        other => Err(SchemaError::new_err(format!("unknown schema directive location '{other}'"))),
     }
 }
 

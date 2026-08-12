@@ -21,7 +21,7 @@ use bramble_core::schema::{OperationDirectiveDefinition, OperationDirectiveLocat
 use pyo3::prelude::*;
 
 use crate::resolver_binding::classify_parameters;
-use crate::type_info::{convert_argument, PyArgumentInfo, SchemaError};
+use crate::type_info::{PyArgumentInfo, SchemaError, convert_argument};
 
 #[pyclass(name = "OperationDirectiveInfo", frozen, skip_from_py_object)]
 pub struct PyOperationDirectiveInfo {

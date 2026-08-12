@@ -145,9 +145,7 @@ pub fn unwrap_annotated<'py>(
     // could return an empty tuple. Erroring beats panicking: a panic across the PyO3 boundary
     // aborts the interpreter rather than raising something Python can catch.
     let Some(underlying) = args.next() else {
-        return Err(SchemaError::new_err(
-            "Annotated[...] annotation has no underlying type",
-        ));
+        return Err(SchemaError::new_err("Annotated[...] annotation has no underlying type"));
     };
 
     Ok((underlying, args.collect()))
@@ -186,22 +184,19 @@ pub fn resolve_graphql_type(
 
 /// Returns `(core_type, is_nullable_at_this_level)` -- the type as it would be if this level
 /// turns out nullable, without the `NonNull` wrapper `resolve_graphql_type` adds when it isn't.
-fn resolve_core(
-    py: Python<'_>,
-    typing: &Bound<'_, PyAny>,
-    annotation: &Bound<'_, PyAny>,
-) -> PyResult<(GraphQLType, bool)> {
+fn resolve_core(py: Python<'_>, typing: &Bound<'_, PyAny>, annotation: &Bound<'_, PyAny>) -> PyResult<(GraphQLType, bool)> {
     let origin = typing.call_method1("get_origin", (annotation,))?;
 
     let annotated = typing.getattr("Annotated")?;
     if origin.is(&annotated) {
-        let args: Vec<Bound<PyAny>> = typing.call_method1("get_args", (annotation,))?.try_iter()?.collect::<PyResult<_>>()?;
+        let args: Vec<Bound<PyAny>> = typing
+            .call_method1("get_args", (annotation,))?
+            .try_iter()?
+            .collect::<PyResult<_>>()?;
         // Same reasoning as `unwrap_annotated`'s own guard: indexing `[0]` here would panic (and so
         // abort the interpreter) rather than raise, for an `Annotated`-shaped object that isn't one.
         let Some(underlying) = args.first().cloned() else {
-            return Err(SchemaError::new_err(
-                "Annotated[...] annotation has no underlying type",
-            ));
+            return Err(SchemaError::new_err("Annotated[...] annotation has no underlying type"));
         };
         let metadata = &args[1..];
         let underlying_origin = typing.call_method1("get_origin", (&underlying,))?;
@@ -429,9 +424,7 @@ mod tests {
     /// functions under test are called directly, never through that module. Like `pytest`, these
     /// tests require `maturin develop` to have been run first.
     fn ensure_bramble_importable(py: Python<'_>) {
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..");
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
         let repo_root = repo_root.to_str().expect("repo path is valid UTF-8");
         let sys = py.import("sys").expect("sys is importable");
         let path = sys.getattr("path").expect("sys.path exists");
@@ -567,16 +560,14 @@ class FakeTyping:
 fake_typing = FakeTyping()
 fake = FakeAnnotated()
 ";
-            py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&globals), None).unwrap();
+            py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&globals), None)
+                .unwrap();
             let fake_typing = globals.get_item("fake_typing").unwrap().unwrap();
             let fake = globals.get_item("fake").unwrap().unwrap();
 
             let error = resolve_graphql_type(py, &fake_typing, &fake)
                 .expect_err("an Annotated with no arguments must error, not panic");
-            assert!(
-                error.to_string().contains("no underlying type"),
-                "unexpected error: {error}"
-            );
+            assert!(error.to_string().contains("no underlying type"), "unexpected error: {error}");
         });
     }
 
@@ -594,12 +585,13 @@ class FakeTyping:
 
 fake_typing = FakeTyping()
 ";
-            py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&globals), None).unwrap();
+            py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&globals), None)
+                .unwrap();
             let fake_typing = globals.get_item("fake_typing").unwrap().unwrap();
             let subject = py.None().into_bound(py);
 
-            let error = unwrap_annotated(&fake_typing, subject)
-                .expect_err("an Annotated with no arguments must error, not panic");
+            let error =
+                unwrap_annotated(&fake_typing, subject).expect_err("an Annotated with no arguments must error, not panic");
             assert!(error.to_string().contains("no underlying type"), "unexpected error: {error}");
         });
     }
@@ -651,11 +643,7 @@ fake_typing = FakeTyping()
                 let value = py
                     .eval(std::ffi::CString::new(expression).unwrap().as_c_str(), Some(&globals), None)
                     .unwrap();
-                assert_eq!(
-                    python_default_to_graphql_literal(&value).unwrap(),
-                    None,
-                    "for {expression}"
-                );
+                assert_eq!(python_default_to_graphql_literal(&value).unwrap(), None, "for {expression}");
             }
         });
     }
@@ -676,11 +664,11 @@ class Color(enum.Enum):
 
 value = Color.RED
 ";
-            py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&globals), None).unwrap();
+            py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&globals), None)
+                .unwrap();
             let value = globals.get_item("value").unwrap().unwrap();
 
             assert_eq!(python_default_to_graphql_literal(&value).unwrap().as_deref(), Some("RED"));
         });
     }
-
 }

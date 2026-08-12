@@ -43,9 +43,6 @@ mod tests {
         let error = parse_document("{ hello").unwrap_err();
 
         assert_eq!(error.extensions.code, ErrorCode::GraphqlParseFailed);
-        assert_eq!(
-            error.locations,
-            Some(vec![Location { line: 1, column: 8 }])
-        );
+        assert_eq!(error.locations, Some(vec![Location { line: 1, column: 8 }]));
     }
 }

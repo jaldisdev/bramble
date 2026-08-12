@@ -21,15 +21,16 @@ use std::collections::HashMap;
 
 use async_graphql_parser::Positioned;
 use async_graphql_parser::types::{
-    Directive, ExecutableDocument, Field, FragmentDefinition, OperationDefinition, OperationType, Selection,
-    SelectionSet,
+    Directive, ExecutableDocument, Field, FragmentDefinition, OperationDefinition, OperationType, Selection, SelectionSet,
 };
 use async_graphql_value::{Name, Value};
 
 use crate::document::select_operation;
 use crate::error::{ErrorCode, GraphQLError, GraphQLResult, Location};
 use crate::naming::to_camel_case;
-use crate::schema::{ArgumentDefinition, CompiledSchema, FieldDefinition, GraphQLType, OperationDirectiveLocation, TypeDefinition, TypeKind};
+use crate::schema::{
+    ArgumentDefinition, CompiledSchema, FieldDefinition, GraphQLType, OperationDirectiveLocation, TypeDefinition, TypeKind,
+};
 
 fn operation_directive_location_str(location: OperationDirectiveLocation) -> String {
     serde_json::to_value(location)
@@ -75,7 +76,10 @@ fn validate_incremental_directive_arguments(
 }
 
 fn defer_argument_shape() -> Vec<(&'static str, GraphQLType)> {
-    vec![("if", GraphQLType::Named("Boolean".to_string())), ("label", GraphQLType::Named("String".to_string()))]
+    vec![
+        ("if", GraphQLType::Named("Boolean".to_string())),
+        ("label", GraphQLType::Named("String".to_string())),
+    ]
 }
 
 fn stream_argument_shape() -> Vec<(&'static str, GraphQLType)> {
@@ -105,7 +109,10 @@ fn validate_directives(
         }
 
         if name == "defer" {
-            if !matches!(location, OperationDirectiveLocation::InlineFragment | OperationDirectiveLocation::FragmentSpread) {
+            if !matches!(
+                location,
+                OperationDirectiveLocation::InlineFragment | OperationDirectiveLocation::FragmentSpread
+            ) {
                 return Err(error_at(
                     format!(
                         "directive '@defer' is not allowed at this location ({})",
@@ -153,7 +160,13 @@ fn validate_directives(
             ));
         }
 
-        check_arguments(&directive.node.arguments, &directive_def.arguments, name, directive.pos, schema)?;
+        check_arguments(
+            &directive.node.arguments,
+            &directive_def.arguments,
+            name,
+            directive.pos,
+            schema,
+        )?;
     }
     Ok(())
 }
@@ -190,7 +203,9 @@ fn check_value_matches_type(value: &Value, expected: &GraphQLType, schema: &Comp
         }
         GraphQLType::List(inner) => match value {
             Value::Null => Ok(()),
-            Value::List(items) => items.iter().try_for_each(|item| check_value_matches_type(item, inner, schema)),
+            Value::List(items) => items
+                .iter()
+                .try_for_each(|item| check_value_matches_type(item, inner, schema)),
             _ => Err(format!("expected a list, got {}", describe_value_kind(value))),
         },
         GraphQLType::Named(name) => {
@@ -232,7 +247,10 @@ fn check_value_matches_type(value: &Value, expected: &GraphQLType, schema: &Comp
                                 None => Ok(()),
                             }
                         }),
-                        _ => Err(format!("expected an input object for '{name}', got {}", describe_value_kind(value))),
+                        _ => Err(format!(
+                            "expected an input object for '{name}', got {}",
+                            describe_value_kind(value)
+                        )),
                     },
                     Some(type_def) if type_def.kind == TypeKind::Enum => match value {
                         // A GraphQL enum literal is an unquoted name (`RED`), which the parser
@@ -270,17 +288,18 @@ fn argument_key(argument: &ArgumentDefinition, auto_camel_case: bool) -> String 
     if let Some(graphql_name) = &argument.graphql_name {
         return graphql_name.clone();
     }
-    if auto_camel_case { to_camel_case(&argument.name) } else { argument.name.clone() }
+    if auto_camel_case {
+        to_camel_case(&argument.name)
+    } else {
+        argument.name.clone()
+    }
 }
 
 /// The spec's "Argument Uniqueness" rule: one field or directive may not be given the same
 /// argument name twice. The parser keeps arguments in a `Vec`, so unlike duplicate operation or
 /// fragment *names* (which it collapses into a `HashMap` before validation ever sees them) this
 /// one is still detectable here.
-fn check_argument_uniqueness(
-    provided: &[(Positioned<Name>, Positioned<Value>)],
-    owner_name: &str,
-) -> GraphQLResult<()> {
+fn check_argument_uniqueness(provided: &[(Positioned<Name>, Positioned<Value>)], owner_name: &str) -> GraphQLResult<()> {
     let mut seen: Vec<&str> = Vec::with_capacity(provided.len());
     for (arg_name, _) in provided {
         let name = arg_name.node.as_str();
@@ -426,7 +445,11 @@ fn field_key(field: &FieldDefinition, auto_camel_case: bool) -> String {
     if let Some(graphql_name) = &field.graphql_name {
         return graphql_name.clone();
     }
-    if auto_camel_case { to_camel_case(&field.name) } else { field.name.clone() }
+    if auto_camel_case {
+        to_camel_case(&field.name)
+    } else {
+        field.name.clone()
+    }
 }
 
 fn find_field<'a>(type_def: &'a TypeDefinition, name: &str, auto_camel_case: bool) -> Option<&'a FieldDefinition> {
@@ -457,7 +480,11 @@ fn validate_field(
 
     check_arguments(&field.node.arguments, &field_def.arguments, field_name, field.pos, schema)?;
 
-    if let Some(stream_directive) = field.node.directives.iter().find(|directive| directive.node.name.node.as_str() == "stream")
+    if let Some(stream_directive) = field
+        .node
+        .directives
+        .iter()
+        .find(|directive| directive.node.name.node.as_str() == "stream")
         && !is_list_type(&field_def.graphql_type)
     {
         return Err(error_at(
@@ -494,9 +521,7 @@ fn validate_field(
         _ => {}
     }
 
-    if has_selections
-        && let Some(nested_type) = schema.types.get(inner_name)
-    {
+    if has_selections && let Some(nested_type) = schema.types.get(inner_name) {
         validate_selection_set(&field.node.selection_set.node, nested_type, schema, fragments, spread_chain)?;
     }
 
@@ -513,11 +538,7 @@ fn validate_field(
 /// Without this, a self-referencing (`fragment A on T { ...A }`) or mutually-recursive
 /// (`A -> B -> A`) document sends this recursion into an unbounded loop -- reachable from any
 /// unauthenticated request, since every HTTP adapter validates raw client input.
-fn check_fragment_cycle(
-    fragment_name: &Name,
-    spread_chain: &[String],
-    pos: async_graphql_parser::Pos,
-) -> GraphQLResult<()> {
+fn check_fragment_cycle(fragment_name: &Name, spread_chain: &[String], pos: async_graphql_parser::Pos) -> GraphQLResult<()> {
     if spread_chain.iter().any(|seen| seen == fragment_name.as_str()) {
         return Err(error_at(
             format!("Fragment cycle detected involving '{fragment_name}'"),
@@ -583,8 +604,13 @@ fn validate_selection_set(
                 check_fragment_is_possible(target_name, parent_type, spread.pos, schema)?;
 
                 spread_chain.push(fragment_name.to_string());
-                let result =
-                    validate_selection_set(&fragment.node.selection_set.node, target_type, schema, fragments, spread_chain);
+                let result = validate_selection_set(
+                    &fragment.node.selection_set.node,
+                    target_type,
+                    schema,
+                    fragments,
+                    spread_chain,
+                );
                 spread_chain.pop();
                 result?;
             }
@@ -673,8 +699,7 @@ fn root_response_key_count(
                 }
                 let fragment = fragments.get(&Name::new(name))?;
                 spread_chain.push(name.to_string());
-                let result =
-                    root_response_key_count(&fragment.node.selection_set.node, fragments, keys, spread_chain);
+                let result = root_response_key_count(&fragment.node.selection_set.node, fragments, keys, spread_chain);
                 spread_chain.pop();
                 result?;
             }
@@ -705,7 +730,10 @@ fn check_subscription_single_root_field(
 
     if keys.len() != 1 {
         return Err(error_at(
-            format!("a subscription operation must have exactly one root field, but this one selects {}", keys.len()),
+            format!(
+                "a subscription operation must have exactly one root field, but this one selects {}",
+                keys.len()
+            ),
             ErrorCode::GraphqlValidationFailed,
             operation.selection_set.pos,
         ));
@@ -728,7 +756,11 @@ fn check_subscription_single_root_field(
 /// - **Duplicate operation and fragment *names* are undetectable.** `async-graphql-parser` stores
 ///   both in a `HashMap` keyed by name, so a redefinition is silently collapsed before this
 ///   function ever sees the document.
-pub fn validate_query(document: &ExecutableDocument, schema: &CompiledSchema, operation_name: Option<&str>) -> GraphQLResult<()> {
+pub fn validate_query(
+    document: &ExecutableDocument,
+    schema: &CompiledSchema,
+    operation_name: Option<&str>,
+) -> GraphQLResult<()> {
     let operation = select_operation(document, operation_name)?;
     let root_name = root_type_name(operation.ty, schema)?;
 
@@ -741,7 +773,13 @@ pub fn validate_query(document: &ExecutableDocument, schema: &CompiledSchema, op
 
     check_variable_uniqueness(operation)?;
     check_subscription_single_root_field(operation, &document.fragments)?;
-    validate_selection_set(&operation.selection_set.node, root_type, schema, &document.fragments, &mut Vec::new())
+    validate_selection_set(
+        &operation.selection_set.node,
+        root_type,
+        schema,
+        &document.fragments,
+        &mut Vec::new(),
+    )
 }
 
 #[cfg(test)]
@@ -834,7 +872,13 @@ mod tests {
         );
         types.insert(
             "Post".to_string(),
-            object("Post", vec![field("id", named("ID"), Vec::new()), field("author", named("User"), Vec::new())]),
+            object(
+                "Post",
+                vec![
+                    field("id", named("ID"), Vec::new()),
+                    field("author", named("User"), Vec::new()),
+                ],
+            ),
         );
 
         CompiledSchema {
@@ -866,31 +910,35 @@ mod tests {
     #[test]
     fn a_self_referencing_fragment_is_rejected_rather_than_looping_forever() {
         let message = error_message("query { user(id: \"1\") { ...A } } fragment A on User { name ...A }");
-        assert!(message.contains("Fragment cycle detected involving 'A'"), "unexpected message: {message}");
+        assert!(
+            message.contains("Fragment cycle detected involving 'A'"),
+            "unexpected message: {message}"
+        );
     }
 
     #[test]
     fn a_mutually_recursive_fragment_pair_is_rejected() {
-        let message = error_message(
-            "query { user(id: \"1\") { ...A } } fragment A on User { ...B } fragment B on User { ...A }",
-        );
+        let message =
+            error_message("query { user(id: \"1\") { ...A } } fragment A on User { ...B } fragment B on User { ...A }");
         assert!(message.contains("Fragment cycle detected"), "unexpected message: {message}");
     }
 
     #[test]
     fn a_cycle_reached_through_a_nested_field_is_rejected() {
-        let message = error_message(
-            "query { user(id: \"1\") { ...A } } fragment A on User { posts { author { ...A } } }",
+        let message = error_message("query { user(id: \"1\") { ...A } } fragment A on User { posts { author { ...A } } }");
+        assert!(
+            message.contains("Fragment cycle detected involving 'A'"),
+            "unexpected message: {message}"
         );
-        assert!(message.contains("Fragment cycle detected involving 'A'"), "unexpected message: {message}");
     }
 
     #[test]
     fn a_cycle_reached_through_an_inline_fragment_is_rejected() {
-        let message = error_message(
-            "query { user(id: \"1\") { ...A } } fragment A on User { ... on User { ...A } }",
+        let message = error_message("query { user(id: \"1\") { ...A } } fragment A on User { ... on User { ...A } }");
+        assert!(
+            message.contains("Fragment cycle detected involving 'A'"),
+            "unexpected message: {message}"
         );
-        assert!(message.contains("Fragment cycle detected involving 'A'"), "unexpected message: {message}");
     }
 
     #[test]
@@ -913,7 +961,10 @@ mod tests {
     #[test]
     fn an_undefined_fragment_is_still_reported_as_undefined_not_as_a_cycle() {
         let message = error_message("query { user(id: \"1\") { ...Missing } }");
-        assert!(message.contains("undefined fragment 'Missing'"), "unexpected message: {message}");
+        assert!(
+            message.contains("undefined fragment 'Missing'"),
+            "unexpected message: {message}"
+        );
     }
 
     // --- Leaf / composite selection sets ------------------------------------------------------
@@ -979,7 +1030,10 @@ mod tests {
     #[test]
     fn a_repeated_variable_declaration_is_rejected() {
         let message = error_message("query Q($id: ID!, $id: ID!) { user(id: $id) { name } }");
-        assert!(message.contains("'$id' is declared more than once"), "unexpected message: {message}");
+        assert!(
+            message.contains("'$id' is declared more than once"),
+            "unexpected message: {message}"
+        );
     }
 
     #[test]
@@ -997,7 +1051,10 @@ mod tests {
             "Subscription".to_string(),
             object(
                 "Subscription",
-                vec![field("ticks", named("User"), Vec::new()), field("pings", named("User"), Vec::new())],
+                vec![
+                    field("ticks", named("User"), Vec::new()),
+                    field("pings", named("User"), Vec::new()),
+                ],
             ),
         );
         schema
@@ -1012,7 +1069,11 @@ mod tests {
     fn a_subscription_with_two_root_fields_is_rejected_at_validation_time() {
         let error = validate_subscription("subscription { ticks { name } pings { name } }")
             .expect_err("two root fields must be rejected");
-        assert!(error.message.contains("exactly one root field"), "unexpected message: {}", error.message);
+        assert!(
+            error.message.contains("exactly one root field"),
+            "unexpected message: {}",
+            error.message
+        );
     }
 
     #[test]
@@ -1026,7 +1087,11 @@ mod tests {
         let error =
             validate_subscription("subscription { ticks { name } ...S } fragment S on Subscription { pings { name } }")
                 .expect_err("two root fields must be rejected however they are spelled");
-        assert!(error.message.contains("exactly one root field"), "unexpected message: {}", error.message);
+        assert!(
+            error.message.contains("exactly one root field"),
+            "unexpected message: {}",
+            error.message
+        );
     }
 
     #[test]

@@ -42,17 +42,11 @@ fn _bramble(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<type_info::PyArgumentInfo>()?;
     module.add_class::<type_info::PyEnumValueInfo>()?;
     module.add_class::<type_info::PyGraphQLType>()?;
-    module.add(
-        "SchemaError",
-        module.py().get_type::<type_info::SchemaError>(),
-    )?;
+    module.add("SchemaError", module.py().get_type::<type_info::SchemaError>())?;
     module.add("GraphQLError", module.py().get_type::<error::GraphQLError>())?;
     module.add_function(wrap_pyfunction!(union_info::describe_union, module)?)?;
     module.add_class::<union_info::PyUnionInfo>()?;
-    module.add_function(wrap_pyfunction!(
-        schema_directive_info::describe_schema_directive,
-        module
-    )?)?;
+    module.add_function(wrap_pyfunction!(schema_directive_info::describe_schema_directive, module)?)?;
     module.add_class::<schema_directive_info::PySchemaDirectiveInfo>()?;
     module.add_class::<schema_directive_info::PyDirectiveFieldInfo>()?;
     module.add_function(wrap_pyfunction!(lowering::lower_query, module)?)?;

@@ -103,7 +103,10 @@ pub fn resolve_persisted_query(
             if schema.persisted_query_cache.get(sha256_hash).is_some() {
                 Ok(PersistedQueryOutcome::CacheHit)
             } else {
-                Err(Box::new(GraphQLError::new("PersistedQueryNotFound", ErrorCode::PersistedQueryNotFound)))
+                Err(Box::new(GraphQLError::new(
+                    "PersistedQueryNotFound",
+                    ErrorCode::PersistedQueryNotFound,
+                )))
             }
         }
         Some(query_text) => {
@@ -191,8 +194,8 @@ mod tests {
     fn a_hash_only_miss_reports_the_exact_apollo_message() {
         // Apollo Client's APQ link matches this literal string to trigger its resend-with-query
         // retry. Paraphrasing it breaks interop with every such client.
-        let error = resolve_persisted_query(&schema(), &sha256_hex(QUERY), None, None)
-            .expect_err("a hash-only miss must error");
+        let error =
+            resolve_persisted_query(&schema(), &sha256_hex(QUERY), None, None).expect_err("a hash-only miss must error");
         assert_eq!(error.message, "PersistedQueryNotFound");
         assert_eq!(error.extensions.code, ErrorCode::PersistedQueryNotFound);
     }
@@ -217,8 +220,8 @@ mod tests {
         let schema = schema();
         let wrong_hash = "0".repeat(64);
 
-        let error = resolve_persisted_query(&schema, &wrong_hash, Some(QUERY), None)
-            .expect_err("a mismatched hash must error");
+        let error =
+            resolve_persisted_query(&schema, &wrong_hash, Some(QUERY), None).expect_err("a mismatched hash must error");
         assert_eq!(error.extensions.code, ErrorCode::PersistedQueryMismatch);
         // The content-addressing guarantee: nothing was stored under the claimed hash.
         assert!(schema.persisted_query_cache.get(&wrong_hash).is_none());
@@ -287,7 +290,9 @@ mod tests {
         // can see it, and this is not behaviour worth exposing on the public wrapper.
         cache.cache.run_pending_tasks();
 
-        let surviving = (0..5_000).filter(|index| cache.get(&format!("hash-{index}")).is_some()).count();
+        let surviving = (0..5_000)
+            .filter(|index| cache.get(&format!("hash-{index}")).is_some())
+            .count();
         assert!(surviving > 0, "the cache should still hold recent entries");
         assert!(surviving <= 1000, "the cache must stay bounded, but held {surviving} entries");
     }

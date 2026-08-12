@@ -321,7 +321,9 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
             .and_then(|value| value.extract().ok());
         let graphql_type = resolve_graphql_type(py, &typing, &resolved_type)?;
 
-        let resolver = dataclass_field.getattr("resolver").unwrap_or_else(|_| py.None().into_bound(py));
+        let resolver = dataclass_field
+            .getattr("resolver")
+            .unwrap_or_else(|_| py.None().into_bound(py));
         let has_resolver = !resolver.is_none();
 
         let (parent_parameter, info_parameter, arguments) = if has_resolver {
@@ -412,7 +414,7 @@ pub fn process_type(
         fields,
         applied_directives,
         interfaces,
-        enum_values: Vec::new(),  // only ever populated by `process_enum`
+        enum_values: Vec::new(), // only ever populated by `process_enum`
     };
 
     let fields_info = definition

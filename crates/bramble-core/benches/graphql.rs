@@ -23,9 +23,7 @@ use std::hint::black_box;
 use bramble_core::lowering::lower_document;
 use bramble_core::parse_document;
 use bramble_core::persisted_query::{PersistedQueryCache, resolve_persisted_query, sha256_hex};
-use bramble_core::schema::{
-    ArgumentDefinition, CompiledSchema, FieldDefinition, GraphQLType, TypeDefinition, TypeKind,
-};
+use bramble_core::schema::{ArgumentDefinition, CompiledSchema, FieldDefinition, GraphQLType, TypeDefinition, TypeKind};
 use bramble_core::validation::validate_query;
 use criterion::{Criterion, criterion_group, criterion_main};
 

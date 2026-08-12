@@ -104,8 +104,7 @@ pub fn compile_schema(
     };
 
     let scalar_names: HashSet<String> = scalar_names.into_iter().collect();
-    bramble_core::schema::validate_schema_shape(&types, &unions, &scalar_names)
-        .map_err(SchemaError::new_err)?;
+    bramble_core::schema::validate_schema_shape(&types, &unions, &scalar_names).map_err(SchemaError::new_err)?;
 
     let schema = CompiledSchema {
         types,

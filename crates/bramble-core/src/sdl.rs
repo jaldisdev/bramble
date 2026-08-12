@@ -19,9 +19,9 @@
 
 use crate::naming::to_camel_case;
 use crate::schema::{
-    AppliedDirective, ArgumentDefinition, CompiledSchema, DirectiveFieldDefinition, EnumValueDefinition,
-    FieldDefinition, OperationDirectiveDefinition, OperationDirectiveLocation, SchemaDirectiveDefinition,
-    SchemaDirectiveLocation, TypeDefinition, TypeKind, UnionDefinition,
+    AppliedDirective, ArgumentDefinition, CompiledSchema, DirectiveFieldDefinition, EnumValueDefinition, FieldDefinition,
+    OperationDirectiveDefinition, OperationDirectiveLocation, SchemaDirectiveDefinition, SchemaDirectiveLocation,
+    TypeDefinition, TypeKind, UnionDefinition,
 };
 
 /// The GraphQL-facing name for a field/argument/directive-field with no explicit `name=`
@@ -31,7 +31,11 @@ fn effective_name(name: &str, graphql_name: &Option<String>, auto_camel_case: bo
     if let Some(graphql_name) = graphql_name {
         return graphql_name.clone();
     }
-    if auto_camel_case { to_camel_case(name) } else { name.to_string() }
+    if auto_camel_case {
+        to_camel_case(name)
+    } else {
+        name.to_string()
+    }
 }
 
 fn render_description(description: &Option<String>, indent: &str) -> String {
@@ -52,8 +56,10 @@ fn render_json_value(value: &serde_json::Value) -> String {
             format!("[{}]", rendered.join(", "))
         }
         serde_json::Value::Object(map) => {
-            let rendered: Vec<String> =
-                map.iter().map(|(key, value)| format!("{key}: {}", render_json_value(value))).collect();
+            let rendered: Vec<String> = map
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", render_json_value(value)))
+                .collect();
             format!("{{{}}}", rendered.join(", "))
         }
     }
@@ -63,13 +69,19 @@ fn render_applied_directive(directive: &AppliedDirective) -> String {
     if directive.arguments.is_empty() {
         return format!("@{}", directive.name);
     }
-    let rendered: Vec<String> =
-        directive.arguments.iter().map(|(name, value)| format!("{name}: {}", render_json_value(value))).collect();
+    let rendered: Vec<String> = directive
+        .arguments
+        .iter()
+        .map(|(name, value)| format!("{name}: {}", render_json_value(value)))
+        .collect();
     format!("@{}({})", directive.name, rendered.join(", "))
 }
 
 fn render_applied_directives(directives: &[AppliedDirective]) -> String {
-    directives.iter().map(|directive| format!(" {}", render_applied_directive(directive))).collect()
+    directives
+        .iter()
+        .map(|directive| format!(" {}", render_applied_directive(directive)))
+        .collect()
 }
 
 fn render_argument(argument: &ArgumentDefinition, auto_camel_case: bool) -> String {
@@ -99,7 +111,10 @@ fn render_arguments(arguments: &[ArgumentDefinition], auto_camel_case: bool) -> 
     if arguments.is_empty() {
         return String::new();
     }
-    let rendered: Vec<String> = arguments.iter().map(|argument| render_argument(argument, auto_camel_case)).collect();
+    let rendered: Vec<String> = arguments
+        .iter()
+        .map(|argument| render_argument(argument, auto_camel_case))
+        .collect();
     format!("({})", rendered.join(", "))
 }
 
@@ -212,8 +227,12 @@ fn render_operation_directive(directive: &OperationDirectiveDefinition, auto_cam
     out.push_str(&format!("directive @{}", directive.name));
     out.push_str(&render_arguments(&directive.arguments, auto_camel_case));
     out.push_str(" on ");
-    let locations: Vec<&str> =
-        directive.locations.iter().copied().map(operation_directive_location_str).collect();
+    let locations: Vec<&str> = directive
+        .locations
+        .iter()
+        .copied()
+        .map(operation_directive_location_str)
+        .collect();
     out.push_str(&locations.join(" | "));
     out
 }
@@ -244,15 +263,23 @@ fn render_schema_directive(directive: &SchemaDirectiveDefinition, auto_camel_cas
     out.push_str(&render_description(&directive.description, ""));
     out.push_str(&format!("directive @{}", directive.name));
     if !directive.fields.is_empty() {
-        let rendered: Vec<String> =
-            directive.fields.iter().map(|field| render_directive_field(field, auto_camel_case)).collect();
+        let rendered: Vec<String> = directive
+            .fields
+            .iter()
+            .map(|field| render_directive_field(field, auto_camel_case))
+            .collect();
         out.push_str(&format!("({})", rendered.join(", ")));
     }
     if directive.repeatable {
         out.push_str(" repeatable");
     }
     out.push_str(" on ");
-    let locations: Vec<&str> = directive.locations.iter().copied().map(schema_directive_location_str).collect();
+    let locations: Vec<&str> = directive
+        .locations
+        .iter()
+        .copied()
+        .map(schema_directive_location_str)
+        .collect();
     out.push_str(&locations.join(" | "));
     out
 }
@@ -310,13 +337,19 @@ pub fn render_sdl(schema: &CompiledSchema) -> String {
     let mut operation_directive_names: Vec<&String> = schema.operation_directives.keys().collect();
     operation_directive_names.sort();
     for name in operation_directive_names {
-        sections.push(render_operation_directive(&schema.operation_directives[name], schema.auto_camel_case));
+        sections.push(render_operation_directive(
+            &schema.operation_directives[name],
+            schema.auto_camel_case,
+        ));
     }
 
     let mut schema_directive_names: Vec<&String> = schema.schema_directives.keys().collect();
     schema_directive_names.sort();
     for name in schema_directive_names {
-        sections.push(render_schema_directive(&schema.schema_directives[name], schema.auto_camel_case));
+        sections.push(render_schema_directive(
+            &schema.schema_directives[name],
+            schema.auto_camel_case,
+        ));
     }
 
     sections.join("\n\n")
@@ -563,7 +596,10 @@ mod tests {
 
         let sdl = render_sdl(&schema);
         // `= 3` sits between the type and the directive, per the `InputValueDefinition` grammar.
-        assert!(sdl.contains("oldField(count: Int = 3 @deprecated(reason: \"no longer used\")): String!"), "{sdl}");
+        assert!(
+            sdl.contains("oldField(count: Int = 3 @deprecated(reason: \"no longer used\")): String!"),
+            "{sdl}"
+        );
     }
 
     #[test]
@@ -692,7 +728,10 @@ mod tests {
         let mut schema = empty_schema();
         schema.schema_applied_directives = vec![AppliedDirective {
             name: "link".to_string(),
-            arguments: vec![("url".to_string(), serde_json::json!("https://specs.apollo.dev/federation/v2.6"))],
+            arguments: vec![(
+                "url".to_string(),
+                serde_json::json!("https://specs.apollo.dev/federation/v2.6"),
+            )],
         }];
 
         let sdl = render_sdl(&schema);
