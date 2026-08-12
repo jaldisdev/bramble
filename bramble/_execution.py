@@ -505,7 +505,33 @@ def _serialize_scalar(type_name: str, value: Any, schema: "Schema") -> Any:
         return value.isoformat()
     if isinstance(value, (decimal.Decimal, uuid.UUID)):
         return str(value)
+    if type_name == "String" and not isinstance(value, str):
+        return _coerce_to_string(value)
     return value
+
+
+def _coerce_to_string(value: Any) -> str:
+    """Coerces a non-`str` resolved value for a `String` field.
+
+    A field declared `String!` has to serialize to a string; passing an arbitrary object straight
+    through puts something un-encodable into the response, which surfaces far away from the cause
+    as a `TypeError` from the JSON encoder rather than as a field error. That is what an ORM's own
+    enum value (gel's `DerivedEnumValue`, say) does when it reaches a plain `str`-annotated field.
+
+    The builtin/custom split mirrors graphql-core: a *custom* type is coerced through its own
+    `__str__`, which is almost always meaningful, while a builtin container is rejected -- stringing
+    a `dict` into `"{'a': 1}"` would hide a genuine resolver bug behind plausible-looking output.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if type(value).__module__ == "builtins":
+        raise GraphQLError(
+            f"String cannot represent value of type '{type(value).__name__}'",
+            code=ErrorCode.FIELD_RESOLUTION_FAILED,
+        )
+    return str(value)
 
 
 def _resolve_concrete_type(type_name: str, raw_value: Any, schema: "Schema", info: Info) -> type:

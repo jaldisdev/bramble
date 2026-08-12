@@ -453,7 +453,9 @@ def test_a_query_rejected_by_validation_reaches_execution_when_it_is_disabled() 
     loose = _schema(config=SchemaConfig(validate_queries=False))
     result = loose.execute("query { greet(name: 1) }")
 
-    assert result["data"] == {"greet": 1}
+    # The `1` reaches the resolver uncoerced and comes back out through `String`'s own
+    # serialization, so it lands as `"1"` rather than as an up-front validation error.
+    assert result["data"] == {"greet": "1"}
 
 
 def test_an_unknown_field_still_fails_with_validation_disabled() -> None:

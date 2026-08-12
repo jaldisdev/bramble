@@ -22,8 +22,11 @@ from __future__ import annotations
 import base64
 import datetime
 import decimal
+import json
 import uuid
 from typing import NewType
+
+import pytest
 
 import bramble
 from bramble.schema.config import SchemaConfig
@@ -285,3 +288,67 @@ def test_upload_as_mutation_argument() -> None:
         "mutation($f: Upload!) { uploadAvatar(file: $f) }", variable_values={"f": b"12345"}
     )
     assert result == {"data": {"uploadAvatar": "received 5 bytes"}}
+
+
+# --- String coercion ------------------------------------------------------------------------------
+
+
+class _OrmEnumValue:
+    """Stands in for an ORM's own enum value (gel's `DerivedEnumValue`, say): not a `str`, but with
+    a meaningful `__str__`.
+    """
+
+    def __str__(self) -> str:
+        return "EU"
+
+
+@bramble.type
+class _StringCoercionQuery:
+    @bramble.field
+    def custom() -> str:
+        return _OrmEnumValue()  # type: ignore[return-value]
+
+    @bramble.field
+    def number() -> str:
+        return 42  # type: ignore[return-value]
+
+    @bramble.field
+    def flag() -> str:
+        return True  # type: ignore[return-value]
+
+    @bramble.field
+    def already_a_string() -> str:
+        return "plain"
+
+    @bramble.field
+    def container() -> str:
+        return {"a": 1}  # type: ignore[return-value]
+
+
+def test_a_custom_type_is_coerced_through_its_own_str() -> None:
+    """A `String!` field has to serialize to a string. Passing an arbitrary object through puts
+    something un-encodable in the response, which surfaces as a `TypeError` from the JSON encoder
+    far from the cause -- exactly what an ORM enum value reaching a `str`-annotated field does.
+    """
+    result = bramble.Schema(query=_StringCoercionQuery).execute("{ custom }")
+
+    assert result["data"] == {"custom": "EU"}
+    json.dumps(result)  # the point of the coercion: the response is encodable
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [("number", "42"), ("flag", "true"), ("alreadyAString", "plain")],
+)
+def test_builtin_scalars_coerce_predictably(field: str, expected: str) -> None:
+    result = bramble.Schema(query=_StringCoercionQuery).execute(f"{{ {field} }}")
+    assert result["data"] == {field: expected}
+
+
+def test_a_builtin_container_is_rejected_rather_than_stringified() -> None:
+    """Mirrors graphql-core's own split: a custom type is trusted to `__str__` meaningfully, but
+    stringifying a `dict` into `"{'a': 1}"` would hide a genuine resolver bug behind output that
+    looks plausible.
+    """
+    with pytest.raises(Exception, match="String cannot represent value"):
+        bramble.Schema(query=_StringCoercionQuery).execute("{ container }")
