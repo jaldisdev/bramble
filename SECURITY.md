@@ -18,8 +18,7 @@ If you believe you've found a security issue in bramble — for example, a way
 to crash, hang, or gain unintended access via a malicious GraphQL request,
 schema, or configuration — please report it privately:
 
-* Email: **security@bramble.dev** (replace with your preferred contact
-  address before publishing)
+* Email: **oss@jaldis.com**
 * Alternatively, if the repository is hosted on GitHub, you can use
   [GitHub's private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability)
   feature under the Security tab.

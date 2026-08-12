@@ -60,9 +60,8 @@ an appointed representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the project maintainers at **conduct@bramble.dev** (replace with
-your preferred contact address before publishing). All complaints will be
-reviewed and investigated promptly and fairly.
+reported to the project maintainers at **oss@jaldis.com**. All complaints will
+be reviewed and investigated promptly and fairly.
 
 All project maintainers are obligated to respect the privacy and security of
 the reporter of any incident.
