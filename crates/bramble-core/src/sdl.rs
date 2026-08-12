@@ -219,7 +219,10 @@ fn render_scalar(
     // definition rather than being one of its applied directives, and a stable position keeps SDL
     // output reproducible.
     let specified_by = match specified_by_url {
-        Some(url) => format!(" @specifiedBy(url: {})", render_json_value(&serde_json::Value::String(url.clone()))),
+        Some(url) => format!(
+            " @specifiedBy(url: {})",
+            render_json_value(&serde_json::Value::String(url.clone()))
+        ),
         None => String::new(),
     };
     out.push_str(&format!(
@@ -397,6 +400,7 @@ mod tests {
             scalar_names: HashSet::new(),
             scalar_applied_directives: HashMap::new(),
             scalar_descriptions: HashMap::new(),
+            scalar_specified_by_urls: HashMap::new(),
             auto_camel_case: true,
             persisted_query_cache: PersistedQueryCache::new(),
         }

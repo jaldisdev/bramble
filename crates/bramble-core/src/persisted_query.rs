@@ -182,6 +182,7 @@ mod tests {
             scalar_names: HashSet::new(),
             scalar_applied_directives: HashMap::new(),
             scalar_descriptions: HashMap::new(),
+            scalar_specified_by_urls: HashMap::new(),
             auto_camel_case: true,
             persisted_query_cache: PersistedQueryCache::new(),
         }
