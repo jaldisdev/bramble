@@ -70,6 +70,8 @@ injection reference.
 - **`description`** -- rendered as a docstring above the field in SDL.
 - **`directives`** -- a list of applied [schema directive](schema-directives.md)
   instances.
+- **`extensions`** -- [`FieldExtension`](../guides/extensions.md) classes or
+  instances wrapping this field's resolver, composing in list order.
 - **`deprecation_reason`** -- marks the field deprecated, rendering
   `@deprecated(reason: "...")` in SDL and reporting
   `isDeprecated`/`deprecationReason` through introspection. The field keeps

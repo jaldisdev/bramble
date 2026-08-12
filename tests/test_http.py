@@ -285,14 +285,14 @@ def test_replaying_a_persisted_query_does_not_reparse_or_revalidate_it(monkeypat
 
     _post(view, _apq_body(sha256_hash, query=query))
 
-    calls: list[str] = []
-    real_validate = bramble._execution.validate_query
+    calls: list[object] = []
+    real_validate = bramble._execution.validate_document
 
-    def spy(query_text: str, compiled: object, operation_name: str | None) -> None:
-        calls.append(query_text)
-        return real_validate(query_text, compiled, operation_name)
+    def spy(document: object, compiled: object, operation_name: str | None) -> None:
+        calls.append(document)
+        return real_validate(document, compiled, operation_name)
 
-    monkeypatch.setattr(bramble._execution, "validate_query", spy)
+    monkeypatch.setattr(bramble._execution, "validate_document", spy)
 
     replay = _post(view, _apq_body(sha256_hash))
 
@@ -304,18 +304,18 @@ def test_a_non_persisted_request_still_validates_normally(monkeypatch: pytest.Mo
     # The counterpart to the test above: the fast path must not have disabled validation generally.
     view = _FakeView(bramble.Schema(query=_Query))
 
-    calls: list[str] = []
-    real_validate = bramble._execution.validate_query
+    calls: list[object] = []
+    real_validate = bramble._execution.validate_document
 
-    def spy(query_text: str, compiled: object, operation_name: str | None) -> None:
-        calls.append(query_text)
-        return real_validate(query_text, compiled, operation_name)
+    def spy(document: object, compiled: object, operation_name: str | None) -> None:
+        calls.append(document)
+        return real_validate(document, compiled, operation_name)
 
-    monkeypatch.setattr(bramble._execution, "validate_query", spy)
+    monkeypatch.setattr(bramble._execution, "validate_document", spy)
 
     _post(view, json.dumps({"query": "{ greet }"}).encode())
 
-    assert calls == ["{ greet }"]
+    assert len(calls) == 1, "an ordinary request must still be validated exactly once"
 
 
 def test_a_persisted_replay_still_binds_this_requests_variables() -> None:

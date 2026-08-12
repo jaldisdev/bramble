@@ -27,6 +27,9 @@ bramble.Schema(
   field's own return type or resolver argument (a common case: an
   interface's implementor that's never directly returned from a
   field typed as the interface itself).
+- **`extensions`** -- [`SchemaExtension`](../guides/extensions.md) classes or
+  instances wrapping the whole request: parse, validate, execute, and
+  optionally every field resolution.
 - **`config`** -- a [`SchemaConfig`](schema-configurations.md) controlling
   naming, custom scalar registration, and batching.
 - **`default_context_factory`** -- if given, called with no arguments to

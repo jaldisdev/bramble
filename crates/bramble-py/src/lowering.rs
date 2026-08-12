@@ -22,13 +22,13 @@ use std::collections::HashMap;
 use async_graphql_parser::types::ExecutableDocument;
 use async_graphql_value::Value;
 use bramble_core::error::{ErrorCode, GraphQLError as CoreGraphQLError};
-use bramble_core::lowering::{LoweredArgument, LoweredDirective, LoweredField, lower_document};
+use bramble_core::lowering::{LoweredArgument, LoweredDirective, LoweredField, lower_document as core_lower_document};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
 use serde_json::Value as JsonValue;
 
 use crate::error::raise;
-use crate::persisted_query::PyPersistedDocument;
+use crate::persisted_query::PyParsedDocument;
 
 /// Renders a Python default value as the GraphQL literal that should appear after `= ` in SDL and
 /// as introspection's `__InputValue.defaultValue`. Returns `None` for anything with no faithful
@@ -342,16 +342,17 @@ pub fn lower_query(
     lower_parsed_document(py, &document, variable_values, operation_name)
 }
 
-/// The same lowering as `lower_query`, but against a document that was parsed and schema-validated
-/// earlier and cached (`PersistedDocument`, from an APQ cache hit). This is what makes a persisted
-/// query genuinely cheaper on replay: parse and validate are both skipped, and only the
-/// variable-dependent work (`@skip`/`@include` evaluation, argument substitution) is redone -- which
-/// has to be redone, since it depends on *this* request's variable values.
+/// The same lowering as `lower_query`, but against an already-parsed `ParsedDocument`.
+///
+/// The normal path: parse once, validate the handle, then lower the same handle. Also what makes an
+/// APQ replay genuinely cheaper -- parse and validate are both skipped, and only the
+/// variable-dependent work (`@skip`/`@include` evaluation, argument substitution) is redone, which
+/// has to be redone since it depends on *this* request's variable values.
 #[pyfunction]
 #[pyo3(signature = (document, *, variable_values, operation_name=None))]
-pub fn lower_persisted_document(
+pub fn lower_document(
     py: Python<'_>,
-    document: &PyPersistedDocument,
+    document: &PyParsedDocument,
     variable_values: &Bound<'_, PyDict>,
     operation_name: Option<String>,
 ) -> PyResult<(&'static str, Vec<Py<PyLoweredField>>)> {
@@ -379,7 +380,7 @@ fn lower_parsed_document(
     }
 
     let (operation_type, lowered) =
-        lower_document(document, &variables, operation_name.as_deref()).map_err(|error| raise(py, error))?;
+        core_lower_document(document, &variables, operation_name.as_deref()).map_err(|error| raise(py, error))?;
 
     let fields = lowered
         .into_iter()

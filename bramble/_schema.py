@@ -27,7 +27,7 @@ from typing import Any
 
 from bramble import _resolver
 from bramble._bramble import (
-    PersistedDocument,
+    ParsedDocument,
     SchemaError,
     compile_schema,
     describe_union,
@@ -39,6 +39,7 @@ from bramble._execution import execute as _execute
 from bramble._execution import execute_async as _execute_async
 from bramble._execution import execute_incremental as _execute_incremental
 from bramble._execution import subscribe_async as _subscribe_async
+from bramble._extension import SchemaExtension
 from bramble._introspection import INTROSPECTION_TYPES
 from bramble._lazy import LazyType, namespace_for_callable, namespace_for_class
 from bramble._private import is_private
@@ -361,14 +362,13 @@ class Schema:
         if getattr(query, "__bramble_type_info__", None) is None:
             raise SchemaError("Schema(query=...) must be a @bramble.type-decorated class")
 
-        # Same reasoning as `bramble.field(extensions=...)`: there is no execution-lifecycle hook
-        # for schema extensions yet, so a supplied extension would build and run while doing
-        # nothing. Failing loudly at construction is the honest option until the hooks exist.
-        if extensions:
-            raise SchemaError(
-                "Schema(extensions=...) is not implemented yet -- schema extensions have no "
-                "execution lifecycle hooks, so any value here would be silently ignored"
-            )
+        for extension in extensions:
+            candidate = extension if isinstance(extension, _type) else _type(extension)
+            if not issubclass(candidate, SchemaExtension):
+                raise SchemaError(
+                    f"'{candidate.__name__}' passed to Schema(extensions=...) is not a "
+                    "bramble.SchemaExtension subclass"
+                )
 
         for directive_function in directives:
             if getattr(directive_function, "__bramble_directive_info__", None) is None:
@@ -547,7 +547,7 @@ class Schema:
         root_value: Any = None,
         operation_name: str | None = None,
         resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
-        document: PersistedDocument | None = None,
+        document: ParsedDocument | None = None,
     ) -> dict[str, Any]:
         """Executes `query` against this schema (§7a/§8/§11), returning a spec-shaped
         `{"data": ..., "errors": [...]}` response. See `bramble._execution.execute_async`.
@@ -576,7 +576,7 @@ class Schema:
         root_value: Any = None,
         operation_name: str | None = None,
         resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
-        document: PersistedDocument | None = None,
+        document: ParsedDocument | None = None,
     ) -> dict[str, Any]:
         """Synchronous convenience wrapper around `execute_async` -- see its own docstring for the
         caveat about not being callable from within an already-running event loop.
@@ -601,7 +601,7 @@ class Schema:
         root_value: Any = None,
         operation_name: str | None = None,
         resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
-        document: PersistedDocument | None = None,
+        document: ParsedDocument | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Executes a query/mutation operation using `@defer`/`@stream`, yielding the initial
         `{"data": ..., "hasNext": bool}` payload followed by zero or more `{"incremental": [...],
@@ -646,7 +646,7 @@ class Schema:
         root_value: Any = None,
         operation_name: str | None = None,
         resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
-        document: PersistedDocument | None = None,
+        document: ParsedDocument | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Executes a subscription operation, yielding one spec-shaped `{"data": ..., "errors":
         [...]}` response per event. See `bramble._execution.subscribe_async`. Async-only -- unlike

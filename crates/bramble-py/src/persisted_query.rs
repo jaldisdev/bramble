@@ -26,17 +26,33 @@ use pyo3::prelude::*;
 use crate::compiled_schema::PyCompiledSchema;
 use crate::error::raise;
 
-/// An opaque handle to a parsed **and already schema-validated** document sitting in a schema's
-/// persisted-query cache. Deliberately exposes no structure to Python: its only purpose is to be
-/// handed straight back to `lower_persisted_document`, which is what actually makes an APQ cache
-/// hit cheaper than a normal request. Before this existed the cache stored the parsed document but
-/// nothing could ever retrieve it, so every "hit" still re-parsed and re-validated from the raw
-/// query string -- the cache was a protocol gate with no performance benefit at all.
+/// Parses `query` into a reusable handle. The first step of the request pipeline: everything
+/// downstream (`validate_document`, `lower_document`) takes the handle, so the text is parsed once.
+#[pyfunction]
+pub fn parse_query(py: Python<'_>, query: &str) -> PyResult<PyParsedDocument> {
+    let document = bramble_core::parse_document(query).map_err(|error| raise(py, error))?;
+    Ok(PyParsedDocument {
+        document: Arc::new(document),
+        query_text: query.to_string(),
+    })
+}
+
+/// An opaque handle to a parsed GraphQL document.
+///
+/// Deliberately exposes no structure to Python: its only purpose is to be handed back to
+/// `validate_document` and `lower_document`, so a document is parsed exactly once per request
+/// rather than once per step. That separation is what lets `SchemaExtension.on_parse` and
+/// `on_validate` wrap genuinely distinct steps instead of two calls that each re-parse.
+///
+/// Also what an APQ cache hit returns, which is what makes a hit cheaper than a cold request:
+/// before this existed the cache stored the parsed document but nothing could retrieve it, so every
+/// "hit" re-parsed and re-validated from the raw string.
 ///
 /// `query_text` rides along because execution still needs the original source: `Info.query` exposes
-/// it to resolvers, and error locations are only meaningful against it.
-#[pyclass(name = "PersistedDocument", frozen)]
-pub struct PyPersistedDocument {
+/// it to resolvers, and error locations are only meaningful against it. It is empty for a hash-only
+/// APQ replay, where the client genuinely never sent the text.
+#[pyclass(name = "ParsedDocument", frozen)]
+pub struct PyParsedDocument {
     pub document: Arc<ExecutableDocument>,
     #[pyo3(get)]
     pub query_text: String,
@@ -51,7 +67,7 @@ pub struct PyPersistedQueryResult {
     #[pyo3(get)]
     pub cache_hit: bool,
     #[pyo3(get)]
-    pub document: Py<PyPersistedDocument>,
+    pub document: Py<PyParsedDocument>,
 }
 
 /// Implements the Automatic Persisted Queries protocol (§10) against `schema`'s cache. Raises
@@ -90,6 +106,6 @@ pub fn resolve_persisted_query(
 
     Ok(PyPersistedQueryResult {
         cache_hit: outcome == PersistedQueryOutcome::CacheHit,
-        document: Py::new(py, PyPersistedDocument { document, query_text })?,
+        document: Py::new(py, PyParsedDocument { document, query_text })?,
     })
 }

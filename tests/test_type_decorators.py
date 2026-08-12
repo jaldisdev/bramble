@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 from collections.abc import AsyncGenerator
 from typing import ClassVar
 
@@ -372,16 +373,15 @@ def test_repr_of_a_type_instance_shows_field_values() -> None:
     assert "y=2" in representation
 
 
-def test_field_extensions_are_rejected_rather_than_silently_ignored() -> None:
-    """`extensions=` has no execution hook point yet. Accepting a value and dropping it produced a
-    schema that built and ran while doing none of what the extension was for -- the worst outcome.
-    """
-
-    class _Extension:
+def test_field_extensions_must_be_field_extension_instances() -> None:
+    class NotAnExtension:
         pass
 
-    with pytest.raises(bramble.SchemaError, match="not implemented yet"):
-        bramble.field(extensions=[_Extension()])
+    with pytest.raises(bramble.SchemaError, match=re.escape("not a bramble.FieldExtension")):
+
+        @bramble.type
+        class Query:
+            greeting: str = bramble.field(default="hi", extensions=[NotAnExtension()])
 
 
 def test_field_without_extensions_is_unaffected() -> None:

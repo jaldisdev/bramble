@@ -21,6 +21,22 @@ use pyo3::prelude::*;
 
 use crate::compiled_schema::PyCompiledSchema;
 use crate::error::raise;
+use crate::persisted_query::PyParsedDocument;
+
+/// Validates an already-parsed document against `schema`. The counterpart to `parse_query`: taking
+/// the handle rather than the source is what keeps parsing and validation separate steps, so
+/// `SchemaExtension.on_parse`/`on_validate` can wrap one each.
+#[pyfunction]
+#[pyo3(signature = (document, schema, operation_name=None))]
+pub fn validate_document(
+    py: Python<'_>,
+    document: &PyParsedDocument,
+    schema: &PyCompiledSchema,
+    operation_name: Option<String>,
+) -> PyResult<()> {
+    bramble_core::validation::validate_query(&document.document, &schema.schema, operation_name.as_deref())
+        .map_err(|error| raise(py, error))
+}
 
 /// Parses `query` and validates its (optionally named) operation against `schema` per §7a:
 /// requested fields exist on their parent type, arguments are declared and type-check, directives

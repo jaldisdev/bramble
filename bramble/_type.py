@@ -26,6 +26,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from bramble._bramble import SchemaError, process_type
+from bramble._extension import FieldExtension
 from bramble.schema_directive import Location
 
 _type = type  # capture the builtin before `type` (below) shadows this module's name for it
@@ -68,16 +69,6 @@ class Field(dataclasses.Field):
             raise SchemaError("a field cannot specify both 'default' and 'default_factory'")
         if resolver is not None and (default is not dataclasses.MISSING or default_factory is not dataclasses.MISSING):
             raise SchemaError("a field with a resolver cannot also declare a default value")
-        # Field extensions have no hook point in the execution pipeline yet. The parameter exists so
-        # the eventual API is already shaped, but accepting values for it silently would be worse
-        # than rejecting them: a user porting a tracing/auth/caching extension would get a schema
-        # that builds, runs, and quietly does none of what the extension was for.
-        if extensions:
-            raise SchemaError(
-                "bramble.field(extensions=...) is not implemented yet -- field extensions have no "
-                "execution hook point, so any value here would be silently ignored"
-            )
-
         # A resolver-backed field is computed at execution time, not user-supplied, so it's
         # excluded from the generated __init__/__repr__/__eq__. This is also why Field needs to
         # subclass dataclasses.Field at all: dataclasses.dataclass() only recognizes a class
@@ -320,6 +311,36 @@ def _process_type(
         # Keyed by Python field name. Execution reaches a field through Rust's `FieldInfo`, which
         # deliberately carries no Python callables -- permissions are an execution-time concern, so
         # they ride here rather than being threaded through the schema IR.
+        # Composed once here, not per request: a field's chain depends only on its declared
+        # extensions. `apply()` runs now too, so an extension can inspect the field it is attached
+        # to while the schema is still being built.
+        field_extensions: dict[str, tuple[Any, ...]] = {}
+        for dataclass_field in dataclasses.fields(cls):
+            extensions = getattr(dataclass_field, "extensions", ())
+            if not extensions:
+                continue
+            instances = []
+            for extension in extensions:
+                # A bare class is accepted and instantiated: extensions that take constructor
+                # arguments must be passed as instances, but `extensions=[UpperCase]` is a natural
+                # thing to write and there is no reason to reject it.
+                instance = extension() if isinstance(extension, _type) and issubclass(extension, FieldExtension) else extension
+                if not isinstance(instance, FieldExtension):
+                    raise SchemaError(
+                        f"'{extension}' in bramble.field(extensions=...) on "
+                        f"'{cls.__name__}.{dataclass_field.name}' is not a bramble.FieldExtension"
+                    )
+                # `Schema()` re-decorates a *subclass* of the query root to inject
+                # `__schema`/`__type`, which walks these same inherited `Field` objects a second
+                # time. `apply()` is documented as build-time-once, so mark the field rather than
+                # calling it again.
+                if not getattr(dataclass_field, "__bramble_extensions_applied__", False):
+                    instance.apply(dataclass_field)
+                instances.append(instance)
+            dataclass_field.__bramble_extensions_applied__ = True
+            field_extensions[dataclass_field.name] = tuple(instances)
+        cls.__bramble_field_extensions__ = field_extensions
+
         cls.__bramble_permissions__ = {
             dataclass_field.name: permissions
             for dataclass_field in dataclasses.fields(cls)

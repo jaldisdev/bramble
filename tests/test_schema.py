@@ -371,16 +371,17 @@ def test_schema_directives_applied_to_an_interface_only_are_discovered() -> None
     assert "interfaceOnly" in schema.schema_directives_by_name
 
 
-def test_schema_extensions_are_rejected_rather_than_silently_ignored() -> None:
-    class _Extension:
+def test_schema_extensions_must_be_schema_extension_subclasses() -> None:
+    class NotAnExtension:
         pass
 
     @bramble.type
     class Query:
         hello: str = "hi"
 
-    with pytest.raises(bramble.SchemaError, match="not implemented yet"):
-        bramble.Schema(query=Query, extensions=[_Extension()])
+    with pytest.raises(bramble.SchemaError, match=re.escape("not a bramble.SchemaExtension")):
+        bramble.Schema(query=Query, extensions=[NotAnExtension])
+
 
 
 def test_default_context_factory_supplies_a_context_when_none_is_passed() -> None:

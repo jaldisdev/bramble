@@ -28,10 +28,11 @@ from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from bramble._bramble import lower_persisted_document, lower_query, validate_query
+from bramble._bramble import lower_document, parse_query, validate_document
 from bramble._dependency import DependencyScope, resolve_dependencies
 from bramble._error import ErrorCode, GraphQLError
 from bramble._error import error_to_dict as _error_to_dict
+from bramble._extension import ExecutionContext, ExtensionRunner, build_field_resolver
 from bramble._interface import resolve_interface_type
 from bramble._maybe import Some
 from bramble._permission import check_permissions
@@ -44,7 +45,7 @@ from bramble._union import resolve_union_type
 from bramble.directive import apply_directive
 
 if TYPE_CHECKING:
-    from bramble._bramble import ArgumentInfo, FieldInfo, GraphQLTypeInfo, LoweredField, PersistedDocument
+    from bramble._bramble import ArgumentInfo, FieldInfo, GraphQLTypeInfo, LoweredField, ParsedDocument
     from bramble._schema import Schema
 
 
@@ -82,6 +83,10 @@ class _ExecutionState:
     errors: list[GraphQLError]
     dependency_scope: DependencyScope
     operation: str = "query"
+    #: `SchemaExtension.resolve` implementations wrapping every field. Empty for the overwhelmingly
+    #: common case, which lets field execution skip the wrapping entirely rather than pay for a
+    #: no-op layer per field.
+    resolve_extensions: list[Any] = field(default_factory=list)
 
 
 def _build_info(
@@ -287,6 +292,47 @@ async def _check_field_permissions(
         await check_permissions(permissions, parent_value, info, arguments)
 
 
+def _field_chain(
+    concrete_type: type, field_info: "FieldInfo", resolver: Callable[..., Any], extensions: Sequence[Any]
+) -> Callable[..., Any]:
+    """The field's composed extension chain, built once per field and cached on the owning class.
+
+    Cached because composition depends only on the declared extensions, so rebuilding it per
+    resolution would be pure waste -- but it can only be built once the resolver is in hand, which
+    is here rather than at decoration time.
+    """
+    cache = concrete_type.__dict__.get("__bramble_field_chains__")
+    if cache is None:
+        cache = {}
+        concrete_type.__bramble_field_chains__ = cache
+    chain = cache.get(field_info.name)
+    if chain is None:
+
+        def call_resolver(source: Any, info: Info, **kwargs: Any) -> Any:
+            # Put `Parent`/`Info` back into the shape the resolver actually declares.
+            if field_info.parent_parameter:
+                kwargs[field_info.parent_parameter] = source
+            if field_info.info_parameter:
+                kwargs[field_info.info_parameter] = info
+            return resolver(**kwargs)
+
+        chain = build_field_resolver(call_resolver, extensions)
+        cache[field_info.name] = chain
+    return chain
+
+
+def _wrap_with_schema_extension(extension: Any, next_: Callable[..., Any]) -> Callable[..., Any]:
+    async def wrapped(
+        source: Any, info: Info, _extension: Any = extension, _next: Callable[..., Any] = next_, **kwargs: Any
+    ) -> Any:
+        result = _extension.resolve(_next, source, info, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    return wrapped
+
+
 async def _resolve_field_value(
     field_info: "FieldInfo",
     lowered_field: "LoweredField",
@@ -295,6 +341,7 @@ async def _resolve_field_value(
     concrete_type: type,
     schema: "Schema",
     scope: DependencyScope,
+    state_resolve_extensions: Sequence[Any] = (),
 ) -> Any:
     if not field_info.has_resolver:
         await _check_field_permissions(field_info, concrete_type, parent_value, info, {})
@@ -315,10 +362,27 @@ async def _resolve_field_value(
             if name not in (field_info.parent_parameter, field_info.info_parameter)
         },
     )
-    result = resolver(**kwargs)
-    if inspect.isawaitable(result):
-        result = await result
-    return result
+    extensions = getattr(concrete_type, "__bramble_field_extensions__", {}).get(field_info.name, ())
+    if not extensions and not state_resolve_extensions:
+        # The overwhelmingly common path: no wrapping at all, so no chain is built and no extra
+        # frames are pushed per field.
+        result = resolver(**kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    # `Parent`/`Info` are bramble's own injections; an extension's `(source, info, **kwargs)`
+    # signature carries them separately, so they are lifted out of the argument dict here and put
+    # back by the innermost call.
+    source = kwargs.pop(field_info.parent_parameter) if field_info.parent_parameter else parent_value
+    kwargs.pop(field_info.info_parameter, None)
+    for extension in extensions:
+        kwargs = extension.map_arguments(kwargs)
+
+    chain = _field_chain(concrete_type, field_info, resolver, extensions)
+    for extension in reversed(state_resolve_extensions):
+        chain = _wrap_with_schema_extension(extension, chain)
+    return await chain(source, info, **kwargs)
 
 
 async def _apply_custom_directives(
@@ -627,7 +691,14 @@ async def _execute_field(
 
     try:
         raw_value = await _resolve_field_value(
-            field_info, lowered_field, parent_value, info, concrete_type, state.schema, state.dependency_scope
+            field_info,
+            lowered_field,
+            parent_value,
+            info,
+            concrete_type,
+            state.schema,
+            state.dependency_scope,
+            state.resolve_extensions,
         )
     except _PropagateNull:
         raise
@@ -855,7 +926,14 @@ async def _execute_field_incremental(
 
     try:
         raw_value = await _resolve_field_value(
-            field_info, lowered_field, parent_value, info, concrete_type, state.schema, state.dependency_scope
+            field_info,
+            lowered_field,
+            parent_value,
+            info,
+            concrete_type,
+            state.schema,
+            state.dependency_scope,
+            state.resolve_extensions,
         )
     except _PropagateNull:
         raise
@@ -1473,13 +1551,14 @@ _ROOT_TYPE_ATTRIBUTE_BY_OPERATION = {
 }
 
 
-def _prepare_operation(
+async def _prepare_operation(
     schema: "Schema",
     query: str | None,
     *,
     variable_values: dict[str, Any],
     operation_name: str | None,
-    document: "PersistedDocument | None",
+    document: "ParsedDocument | None",
+    runner: "ExtensionRunner | None" = None,
 ) -> tuple[str, list["LoweredField"], str | None]:
     """Turns a request into `(operation_type, lowered_fields, query_source)`, taking the cheap path
     when the caller already holds a validated document.
@@ -1495,21 +1574,30 @@ def _prepare_operation(
     where the client never sent the query and reconstructing it from the AST would mean handing
     resolvers a string the client never wrote.
     """
-    if document is not None:
-        operation_type, fields = lower_persisted_document(
-            document, variable_values=variable_values, operation_name=operation_name
-        )
-        return operation_type, fields, document.query_text or None
-
-    if query is None:
+    if document is None and query is None:
         raise GraphQLError(
             "no query text and no persisted document supplied",
             code=ErrorCode.GRAPHQL_VALIDATION_FAILED,
         )
 
-    validate_query(query, schema._compiled, operation_name)
-    operation_type, fields = lower_query(query, variable_values=variable_values, operation_name=operation_name)
-    return operation_type, fields, query
+    # An already-parsed document (an APQ replay) skips both parse and validate -- it was validated
+    # when it was registered. `on_parse`/`on_validate` still fire around the steps that *do* run, so
+    # an extension sees an honest picture of what happened rather than a phantom span.
+    if document is None:
+        assert query is not None
+        if runner is not None:
+            async with runner.hook("on_parse"):
+                document = parse_query(query)
+            async with runner.hook("on_validate"):
+                validate_document(document, schema._compiled, operation_name)
+        else:
+            document = parse_query(query)
+            validate_document(document, schema._compiled, operation_name)
+
+    operation_type, fields = lower_document(
+        document, variable_values=variable_values, operation_name=operation_name
+    )
+    return operation_type, fields, document.query_text or None
 
 
 def _resolve_execution_context(schema: "Schema", context: Any) -> Any:
@@ -1527,7 +1615,65 @@ async def execute_async(
     root_value: Any = None,
     operation_name: str | None = None,
     resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
-    document: "PersistedDocument | None" = None,
+    document: "ParsedDocument | None" = None,
+) -> dict[str, Any]:
+    """Executes `query` against `schema` -- see `_execute_async` for the body.
+
+    This shell exists so `SchemaExtension.on_operation` wraps *everything*, including result
+    assembly, and so `get_results()` runs after that hook's own "after" half: an extension that
+    records its measurement after its `yield` (the usual shape for a timing extension) must still
+    have that value land in the response.
+    """
+    resolved_variable_values = variable_values or {}
+    execution_context = ExecutionContext(
+        schema=schema,
+        query=query,
+        operation_name=operation_name,
+        variable_values=resolved_variable_values,
+        context=context,
+        root_value=root_value,
+    )
+    runner = ExtensionRunner(schema.extensions, execution_context)
+
+    response: dict[str, Any] | None = None
+    async with runner.hook("on_operation"):
+        response = await _execute_async(
+            schema,
+            query,
+            variable_values=resolved_variable_values,
+            context=context,
+            root_value=root_value,
+            operation_name=operation_name,
+            resolved_dependencies=resolved_dependencies,
+            document=document,
+            runner=runner,
+            execution_context=execution_context,
+        )
+
+    if response is None:
+        # An `on_operation` hook caught the failure around its own `yield` and suppressed it -- legal
+        # for any context manager, and how an error-masking extension is written. There is no result
+        # to return, so produce the spec's minimal shape rather than an `UnboundLocalError`.
+        response = execution_context.result or {"data": None}
+
+    extensions_results = await runner.get_results()
+    if extensions_results:
+        response["extensions"] = extensions_results
+    return response
+
+
+async def _execute_async(
+    schema: "Schema",
+    query: str | None,
+    *,
+    variable_values: dict[str, Any] | None = None,
+    context: Any = None,
+    root_value: Any = None,
+    operation_name: str | None = None,
+    resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
+    document: "ParsedDocument | None" = None,
+    runner: ExtensionRunner,
+    execution_context: ExecutionContext,
 ) -> dict[str, Any]:
     """Executes `query` against `schema` (§7a/§8/§11): validates and lowers it, then walks the
     result with full null-bubbling. A malformed query, a schema-shape validation failure, or an
@@ -1542,12 +1688,13 @@ async def execute_async(
     """
     resolved_variable_values = variable_values or {}
 
-    operation_type, fields, query_source = _prepare_operation(
+    operation_type, fields, query_source = await _prepare_operation(
         schema,
         query,
         variable_values=resolved_variable_values,
         operation_name=operation_name,
         document=document,
+        runner=runner,
     )
 
     if operation_type == "subscription":
@@ -1583,16 +1730,21 @@ async def execute_async(
         operation=operation_type,
     )
 
+    execution_context.operation_type = operation_type
+    execution_context.errors = errors
+    state.resolve_extensions = runner.resolve_extensions
+
     try:
         try:
-            data: dict[str, Any] | None = await _execute_selection_set(
-                selections=fields,
-                concrete_type=root_type,
-                parent_value=root_value,
-                path=None,
-                state=state,
-                serial=operation_type == "mutation",
-            )
+            async with runner.hook("on_execute"):
+                data: dict[str, Any] | None = await _execute_selection_set(
+                    selections=fields,
+                    concrete_type=root_type,
+                    parent_value=root_value,
+                    path=None,
+                    state=state,
+                    serial=operation_type == "mutation",
+                )
         except _PropagateNull:
             data = None
     finally:
@@ -1601,6 +1753,7 @@ async def execute_async(
     response: dict[str, Any] = {"data": data}
     if errors:
         response["errors"] = [_error_to_dict(error) for error in errors]
+    execution_context.result = response
     return response
 
 
@@ -1613,7 +1766,7 @@ def execute(
     root_value: Any = None,
     operation_name: str | None = None,
     resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
-    document: "PersistedDocument | None" = None,
+    document: "ParsedDocument | None" = None,
 ) -> dict[str, Any]:
     """Synchronous convenience wrapper around `execute_async` for schemas whose resolvers are all
     synchronous. Uses `asyncio.run`, so (like that function) it cannot be called from within an
@@ -1642,7 +1795,7 @@ async def execute_incremental(
     root_value: Any = None,
     operation_name: str | None = None,
     resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
-    document: "PersistedDocument | None" = None,
+    document: "ParsedDocument | None" = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Executes a query/mutation operation using `@defer`/`@stream`, yielding one spec-shaped
     payload at a time: the initial `{"data": ..., "hasNext": bool}` (deferred subtrees omitted,
@@ -1662,13 +1815,23 @@ async def execute_incremental(
     not just the initial payload.
     """
     resolved_variable_values = variable_values or {}
+    execution_context = ExecutionContext(
+        schema=schema,
+        query=query,
+        operation_name=operation_name,
+        variable_values=resolved_variable_values,
+        context=context,
+        root_value=root_value,
+    )
+    runner = ExtensionRunner(schema.extensions, execution_context)
 
-    operation_type, fields, query_source = _prepare_operation(
+    operation_type, fields, query_source = await _prepare_operation(
         schema,
         query,
         variable_values=resolved_variable_values,
         operation_name=operation_name,
         document=document,
+        runner=runner,
     )
 
     if operation_type not in ("query", "mutation"):
@@ -1697,40 +1860,47 @@ async def execute_incremental(
         operation=operation_type,
     )
     incremental = _IncrementalContext(patch_queue=asyncio.Queue(), tracker=_JobTracker())
+    execution_context.operation_type = operation_type
+    execution_context.errors = errors
+    state.resolve_extensions = runner.resolve_extensions
 
     try:
-        try:
-            data: dict[str, Any] | None = await _execute_selection_set_incremental(
-                selections=fields,
-                concrete_type=root_type,
-                parent_value=root_value,
-                path=None,
-                state=state,
-                incremental=incremental,
-                serial=operation_type == "mutation",
-            )
-        except _PropagateNull:
-            data = None
+        async with runner.hook("on_operation"):
+            try:
+                async with runner.hook("on_execute"):
+                    data: dict[str, Any] | None = await _execute_selection_set_incremental(
+                        selections=fields,
+                        concrete_type=root_type,
+                        parent_value=root_value,
+                        path=None,
+                        state=state,
+                        incremental=incremental,
+                        serial=operation_type == "mutation",
+                    )
+            except _PropagateNull:
+                data = None
 
-        # `any_spawned` (not `tracker.outstanding`, which may have already raced back down to `0`
-        # -- see `_JobTracker`'s own docstring) is what correctly answers "does more data follow".
-        initial: dict[str, Any] = {"data": data, "hasNext": incremental.tracker.any_spawned}
-        if errors:
-            initial["errors"] = [_error_to_dict(error) for error in errors]
-        yield initial
+            # `any_spawned` (not `tracker.outstanding`, which may have already raced back down to
+            # `0` -- see `_JobTracker`'s own docstring) correctly answers "does more data follow".
+            initial: dict[str, Any] = {"data": data, "hasNext": incremental.tracker.any_spawned}
+            if errors:
+                initial["errors"] = [_error_to_dict(error) for error in errors]
+            async with runner.hook("on_stream_result", initial):
+                yield initial
 
-        if not incremental.tracker.any_spawned:
-            return
-
-        # Each patch's own `hasNext` (computed by the job that produced it, at the exact
-        # synchronous moment its own completion was decided) is the authoritative "is this the
-        # last one" signal -- not another read of `tracker.outstanding` here, for the same
-        # race-avoidance reason as above.
-        while True:
-            patch = await incremental.patch_queue.get()
-            yield patch
-            if not patch.get("hasNext", False):
+            if not incremental.tracker.any_spawned:
                 return
+
+            # Each patch's own `hasNext` (computed by the job that produced it, at the exact
+            # synchronous moment its own completion was decided) is the authoritative "is this the
+            # last one" signal -- not another read of `tracker.outstanding` here, for the same
+            # race-avoidance reason as above.
+            while True:
+                patch = await incremental.patch_queue.get()
+                async with runner.hook("on_stream_result", patch):
+                    yield patch
+                if not patch.get("hasNext", False):
+                    return
     finally:
         await scope.aclose()
 
@@ -1744,7 +1914,7 @@ async def subscribe_async(
     root_value: Any = None,
     operation_name: str | None = None,
     resolved_dependencies: dict[Callable[..., Any], Any] | None = None,
-    document: "PersistedDocument | None" = None,
+    document: "ParsedDocument | None" = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Executes a subscription operation, yielding one spec-shaped `{"data": ..., "errors": [...]}`
     response per event. Per the GraphQL spec's two-phase model: `CreateSourceEventStream` (the
@@ -1772,13 +1942,23 @@ async def subscribe_async(
     every single message).
     """
     resolved_variable_values = variable_values or {}
+    execution_context = ExecutionContext(
+        schema=schema,
+        query=query,
+        operation_name=operation_name,
+        variable_values=resolved_variable_values,
+        context=context,
+        root_value=root_value,
+    )
+    runner = ExtensionRunner(schema.extensions, execution_context)
 
-    operation_type, fields, query_source = _prepare_operation(
+    operation_type, fields, query_source = await _prepare_operation(
         schema,
         query,
         variable_values=resolved_variable_values,
         operation_name=operation_name,
         document=document,
+        runner=runner,
     )
 
     if operation_type != "subscription":
@@ -1793,6 +1973,7 @@ async def subscribe_async(
 
     context = _resolve_execution_context(schema, context)
 
+    execution_context.operation_type = operation_type
     grouped = _group_by_response_key(_applicable_selections(fields, root_type, schema))
     if len(grouped) != 1:
         raise GraphQLError(
@@ -1885,7 +2066,8 @@ async def subscribe_async(
                 response: dict[str, Any] = {"data": data}
                 if event_state.errors:
                     response["errors"] = [_error_to_dict(error) for error in event_state.errors]
-                yield response
+                async with runner.hook("on_stream_result", response):
+                    yield response
         finally:
             # `async for` alone never closes the generator it iterates. On an early consumer
             # disconnect (`GeneratorExit` thrown in at the `yield` above) the source stream would

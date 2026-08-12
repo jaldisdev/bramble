@@ -158,12 +158,15 @@ def test_executing_a_prepared_document_skips_validation(monkeypatch: pytest.Monk
     sha256_hash = _hash(query_text)
     schema.prepare_persisted_query(sha256_hash, query=query_text)
 
-    calls: list[str] = []
-    real_validate = bramble._execution.validate_query
+    calls: list[object] = []
+    real_validate = bramble._execution.validate_document
     monkeypatch.setattr(
         bramble._execution,
-        "validate_query",
-        lambda query, compiled, operation_name: (calls.append(query), real_validate(query, compiled, operation_name))[1],
+        "validate_document",
+        lambda document, compiled, operation_name: (
+            calls.append(document),
+            real_validate(document, compiled, operation_name),
+        )[1],
     )
 
     prepared = schema.prepare_persisted_query(sha256_hash)

@@ -23,7 +23,7 @@ import asyncio
 from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeGuard, TypeVar
 
-from bramble._bramble import lower_persisted_document, lower_query
+from bramble._bramble import lower_document, lower_query
 from bramble._error import GraphQLError, error_to_dict
 from bramble._execution import _has_incremental_markers
 from bramble.http.base import BaseRequestProtocol, BaseView, persisted_query_hash
@@ -34,7 +34,7 @@ from bramble.http.types import GraphQLRequestData
 from bramble.subscriptions.graphql_transport_ws import GRAPHQL_TRANSPORT_WS_PROTOCOL, GraphQLTransportWSHandler
 
 if TYPE_CHECKING:
-    from bramble._bramble import PersistedDocument
+    from bramble._bramble import ParsedDocument
     from bramble._schema import Schema
 
 Request = TypeVar("Request")
@@ -140,7 +140,7 @@ class AsyncBaseHTTPView(
             return self.parse_batch(parsed, max_operations=self._max_batch_operations())
         return [self.request_data_from_dict(parsed)]
 
-    def _prepare_persisted_document(self, request_data: GraphQLRequestData) -> "PersistedDocument | None":
+    def _prepare_persisted_document(self, request_data: GraphQLRequestData) -> "ParsedDocument | None":
         """Resolves an Automatic Persisted Queries request against the schema's cache, returning the
         parsed-and-already-validated document to execute. `None` for an ordinary request carrying
         its own query text, which takes the normal parse/validate path.
@@ -164,7 +164,7 @@ class AsyncBaseHTTPView(
         request_data: GraphQLRequestData,
         context: Any,
         root_value: Any,
-        document: "PersistedDocument | None" = None,
+        document: "ParsedDocument | None" = None,
     ) -> dict[str, Any]:
         try:
             # Already resolved by `run()` on the single-operation path (which needs it to decide on
@@ -189,7 +189,7 @@ class AsyncBaseHTTPView(
             return {"data": None, "errors": [error_to_dict(error)]}
 
     def _needs_incremental_delivery(
-        self, request_data: GraphQLRequestData, document: "PersistedDocument | None" = None
+        self, request_data: GraphQLRequestData, document: "ParsedDocument | None" = None
     ) -> bool:
         """A cheap lowering peek to decide whether this single operation uses `@defer`/`@stream`
         at all -- mirrors `GraphQLTransportWSHandler._run_operation`'s identical "peek, then let
@@ -204,7 +204,7 @@ class AsyncBaseHTTPView(
         """
         try:
             if document is not None:
-                _, fields = lower_persisted_document(
+                _, fields = lower_document(
                     document,
                     variable_values=request_data.variables or {},
                     operation_name=request_data.operation_name,
@@ -226,7 +226,7 @@ class AsyncBaseHTTPView(
         request_data: GraphQLRequestData,
         context: Any,
         root_value: Any,
-        document: "PersistedDocument | None" = None,
+        document: "ParsedDocument | None" = None,
     ) -> AsyncIterator[dict[str, Any]]:
         assert request_data.query is not None or document is not None
         async for payload in self.schema.execute_incremental(
