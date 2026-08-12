@@ -38,6 +38,17 @@ _LOCATION_BY_KIND: dict[str, Location] = {
 
 
 class Field(dataclasses.Field):
+    """What `bramble.field(...)` produces: a real `dataclasses.Field` carrying bramble's extra
+    GraphQL metadata, plus an optional resolver.
+
+    Subclassing `dataclasses.Field` is load-bearing rather than stylistic -- `dataclasses.dataclass()`
+    only treats a class attribute as a field descriptor (rather than a literal default value) when
+    it passes `isinstance(attribute, dataclasses.Field)`. That is what lets a bramble type be an
+    ordinary dataclass, with `dataclasses.fields()`, `__init__`, and `__eq__` all behaving normally.
+
+    Rarely constructed directly; use `bramble.field(...)`.
+    """
+
     def __init__(
         self,
         resolver: Callable[..., Any] | None = None,
@@ -127,6 +138,41 @@ def field(
     default: Any = dataclasses.MISSING,
     default_factory: Any = dataclasses.MISSING,
 ) -> Any:
+    """Declares a field on a `@bramble.type`/`@bramble.interface`/`@bramble.input` class.
+
+    Usable three ways:
+
+        @bramble.type
+        class Query:
+            # 1. As a decorator on a resolver.
+            @bramble.field
+            def greet(name: str) -> str:
+                return f"Hello, {name}!"
+
+            # 2. As a decorator with configuration.
+            @bramble.field(description="The current user", deprecation_reason="use viewer")
+            def me() -> "User": ...
+
+            # 3. As a plain data field's descriptor, to attach metadata or a default.
+            title: str = bramble.field(default="untitled", description="The post title")
+
+    Arguments:
+        resolver: the function backing this field. A resolver's parameters are classified by
+            annotation: `Parent[T]` receives the parent value, `Info` the execution context,
+            `Annotated[T, bramble.Depends(...)]` an injected dependency, and everything else
+            becomes a GraphQL argument. See `docs/types/resolvers.md`.
+        name: the GraphQL-facing field name, overriding the camelCased Python identifier.
+        description: rendered as the field's SDL description and reported by introspection.
+        deprecation_reason: marks the field `@deprecated`. It keeps working; introspection hides
+            it unless a client passes `fields(includeDeprecated: true)`.
+        directives: applied schema-directive instances, checked against `FIELD_DEFINITION`.
+        extensions: reserved; currently rejected (there is no execution hook point for it yet).
+        default / default_factory: a default for a data field, as on any dataclass. Mutually
+            exclusive with each other, and with `resolver`.
+
+    Returns `Any` rather than `Field` so a type checker accepts it as the annotated field's own
+    declared type.
+    """
     return Field(
         resolver,
         name=name,
@@ -140,6 +186,11 @@ def field(
 
 
 def mutation(*args: Any, **kwargs: Any) -> Any:
+    """An alias for `bramble.field`, for declaring a field on the mutation root type.
+
+    Purely for readability at the declaration site -- nothing downstream distinguishes a field
+    declared this way from one declared with `bramble.field`.
+    """
     return field(*args, **kwargs)
 
 
@@ -263,6 +314,30 @@ def type(
     description: str | None = None,
     directives: Sequence[object] = (),
 ) -> Callable[[_type], _type] | _type:
+    """Declares a class as a GraphQL object type.
+
+        @bramble.type
+        class User:
+            id: bramble.ID
+            name: str
+
+            @bramble.field
+            def display_name(parent: bramble.Parent["User"]) -> str:
+                return parent.name.title()
+
+    The class becomes a real dataclass (kw-only), so `User(id=..., name=...)`, `dataclasses.fields`,
+    `__eq__`, and `__repr__` all work as usual. Each annotated attribute becomes a GraphQL field,
+    named by camelCasing the Python identifier unless `SchemaConfig(auto_camel_case=False)` or an
+    explicit `bramble.field(name=...)` says otherwise. Annotate an attribute `bramble.Private[T]` to
+    keep it off the schema entirely.
+
+    Usable bare (`@bramble.type`) or with arguments (`@bramble.type(name=...)`).
+
+    Arguments:
+        name: the GraphQL type name, overriding the Python class name.
+        description: rendered as the type's SDL description.
+        directives: applied schema-directive instances, checked against `OBJECT`.
+    """
     return _process_type(cls, kind="type", name=name, description=description, directives=directives)
 
 
@@ -273,6 +348,28 @@ def interface(
     description: str | None = None,
     directives: Sequence[object] = (),
 ) -> Callable[[_type], _type] | _type:
+    """Declares a class as a GraphQL interface.
+
+        @bramble.interface
+        class Node:
+            id: bramble.ID
+
+        @bramble.type
+        class User(Node):        # implements Node by inheriting from it
+            name: str
+
+    A type implements an interface by **inheriting** from it -- there is no `implements=[...]` list
+    to keep in sync, and dataclass field inheritance means an implementor structurally cannot omit
+    an interface field. Conformance (nullability and argument covariance) is checked when the
+    `Schema` is built.
+
+    At execution time, an interface-typed field routes to the right concrete class via each
+    implementor's optional `is_type_of(obj, info)` classmethod, falling back to `isinstance`.
+    Exactly one implementor must match.
+
+    Otherwise identical to `bramble.type`; see it for the shared arguments (`directives` is checked
+    against `INTERFACE` here).
+    """
     return _process_type(cls, kind="interface", name=name, description=description, directives=directives)
 
 
@@ -284,6 +381,22 @@ def input(
     directives: Sequence[object] = (),
     one_of: bool = False,
 ) -> Callable[[_type], _type] | _type:
+    """Declares a class as a GraphQL input object, for use as a resolver argument type.
+
+        @bramble.input
+        class PostFilter:
+            author_id: bramble.ID | None = None
+            limit: int = 10
+
+    Input types carry data only: a field with a resolver is rejected. An incoming argument literal
+    is coerced into a real instance of this class before the resolver sees it, so a resolver
+    annotated `filter: PostFilter` receives an instance, never a bare dict.
+
+    Arguments:
+        one_of: renders `@oneOf`, declaring that exactly one field may be supplied.
+
+    See `bramble.type` for the remaining arguments (`directives` is checked against `INPUT_OBJECT`).
+    """
     return _process_type(
         cls,
         kind="input",

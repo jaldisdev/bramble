@@ -145,7 +145,7 @@ def test_untyped_parameter_raises_schema_error() -> None:
     with pytest.raises(bramble.SchemaError):
 
         @bramble.directive(locations=[DirectiveLocation.FIELD])
-        def broken(value):  # noqa: ANN001
+        def broken(value):
             return value
 
 

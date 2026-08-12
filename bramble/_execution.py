@@ -24,8 +24,8 @@ import datetime
 import decimal
 import inspect
 import uuid
-from collections.abc import AsyncGenerator, Callable, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from bramble._bramble import lower_persisted_document, lower_query, validate_query
@@ -569,7 +569,7 @@ async def _finish_field(
         )
     except _PropagateNull:
         raise
-    except Exception as error:  # noqa: BLE001 -- deliberately broad: any directive failure becomes a field error, per §8.
+    except Exception as error:  # deliberately broad: any directive failure becomes a field error, per §8.
         state.errors.append(_error_from_exception(error, path, lowered_field))
         if is_non_null:
             raise _PropagateNull from error
@@ -616,7 +616,7 @@ async def _execute_field(
         )
     except _PropagateNull:
         raise
-    except Exception as error:  # noqa: BLE001 -- deliberately broad: any resolver failure becomes a field error, per §8.
+    except Exception as error:  # deliberately broad: any resolver failure becomes a field error, per §8.
         state.errors.append(_error_from_exception(error, path, lowered_field))
         if is_non_null:
             raise _PropagateNull from error
@@ -770,6 +770,18 @@ class _JobTracker:
 
     outstanding: int = 0
     any_spawned: bool = False
+    # Strong references to every job task. `asyncio` itself only holds a *weak* reference to a
+    # running task, so a task whose only reference was the discarded return of
+    # `asyncio.create_task(...)` can be garbage-collected mid-flight and simply stop -- its patch
+    # never arrives, and `execute_incremental`'s consumer loop waits forever for it. Holding them
+    # here for the life of the request removes that entirely.
+    tasks: set["asyncio.Task[None]"] = field(default_factory=set)
+
+    def spawn(self, coroutine: "Coroutine[Any, Any, None]") -> None:
+        """Starts a background job and keeps it referenced until it finishes."""
+        task = asyncio.create_task(coroutine)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
 
 
 @dataclass(frozen=True, slots=True)
@@ -830,7 +842,7 @@ async def _execute_field_incremental(
         )
     except _PropagateNull:
         raise
-    except Exception as error:  # noqa: BLE001 -- deliberately broad: any resolver failure becomes a field error, per §8.
+    except Exception as error:  # deliberately broad: any resolver failure becomes a field error, per §8.
         state.errors.append(_error_from_exception(error, path, lowered_field))
         if is_non_null:
             raise _PropagateNull from error
@@ -867,7 +879,7 @@ async def _finish_field_incremental(
         )
     except _PropagateNull:
         raise
-    except Exception as error:  # noqa: BLE001 -- deliberately broad: any directive failure becomes a field error, per §8.
+    except Exception as error:  # deliberately broad: any directive failure becomes a field error, per §8.
         state.errors.append(_error_from_exception(error, path, lowered_field))
         if is_non_null:
             raise _PropagateNull from error
@@ -1085,7 +1097,7 @@ async def _start_streamed_field(
         incremental.tracker.outstanding -= 1  # undo the pessimistic reservation above -- no job needed
     else:
         incremental.tracker.any_spawned = True  # genuinely confirmed now -- see this function's own note above
-        asyncio.create_task(
+        incremental.tracker.spawn(
             _run_streamed_job(
                 label=lowered_field.stream_label,
                 path=path,
@@ -1155,7 +1167,7 @@ async def _run_streamed_job(
             current = await generator.__anext__()
         except StopAsyncIteration:
             return
-        except Exception as error:  # noqa: BLE001 -- the generator failed before yielding anything; still needs its own terminal patch, not a hang.
+        except Exception as error:  # noqa: BLE001 -- generator failed before yielding; still needs a terminal patch, not a hang.
             await _send_final_error(error)
             return
 
@@ -1167,7 +1179,7 @@ async def _run_streamed_job(
             except StopAsyncIteration:
                 next_item = None
                 is_last = True
-            except Exception as error:  # noqa: BLE001 -- surfaced as a separate terminal patch right after this item's own, below.
+            except Exception as error:  # noqa: BLE001 -- surfaced as its own terminal patch right after this item's, below.
                 next_item = None
                 is_last = True
                 next_item_error = error
@@ -1225,7 +1237,7 @@ def _spawn_deferred_jobs(
     for label, group_fields in deferred_groups.items():
         incremental.tracker.outstanding += 1
         incremental.tracker.any_spawned = True
-        asyncio.create_task(
+        incremental.tracker.spawn(
             _run_deferred_job(
                 label=label,
                 path=path,
@@ -1362,7 +1374,12 @@ async def _execute_selection_set_incremental(
         resolvable.append((response_key, field_info, primary, merged_selections))
 
     _spawn_deferred_jobs(
-        deferred_groups, path=path, parent_value=parent_value, concrete_type=concrete_type, state=state, incremental=incremental
+        deferred_groups,
+        path=path,
+        parent_value=parent_value,
+        concrete_type=concrete_type,
+        state=state,
+        incremental=incremental,
     )
 
     async def _resolve_group(
@@ -1407,7 +1424,10 @@ async def _execute_selection_set_incremental(
         return result
 
     outcomes = await asyncio.gather(
-        *(_resolve_group(response_key, field_info, primary, merged_selections) for response_key, field_info, primary, merged_selections in resolvable),
+        *(
+            _resolve_group(response_key, field_info, primary, merged_selections)
+            for response_key, field_info, primary, merged_selections in resolvable
+        ),
         return_exceptions=True,
     )
     result = {}
@@ -1538,7 +1558,7 @@ async def execute_async(
         context=context,
         root_value=root_value,
         variable_values=resolved_variable_values,
-        query=query,
+        query=query_source,
         errors=errors,
         dependency_scope=scope,
     )
@@ -1651,7 +1671,7 @@ async def execute_incremental(
         context=context,
         root_value=root_value,
         variable_values=resolved_variable_values,
-        query=query,
+        query=query_source,
         errors=errors,
         dependency_scope=scope,
     )

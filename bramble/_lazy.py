@@ -210,7 +210,10 @@ def namespace_for_class(cls: type) -> dict[str, Any]:
     for base in reversed(cls.__mro__):
         if base is object:
             continue
-        raw_annotations = base.__dict__.get("__annotations__", {})
+        # `base.__dict__` on purpose, not `inspect.get_annotations(base)`: this needs each base's
+        # *own* annotations, and the helper returns the MRO-merged view, which would re-walk
+        # inherited entries once per base.
+        raw_annotations = base.__dict__.get("__annotations__", {})  # noqa: RUF063
         if not raw_annotations:
             continue
         module = sys.modules.get(getattr(base, "__module__", None))

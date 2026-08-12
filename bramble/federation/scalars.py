@@ -55,4 +55,4 @@ FieldSetDefinition = scalar(
     parse_value=lambda value: value,
 )
 
-__all__ = ["AnyDefinition", "FieldSetDefinition", "FieldSet", "_Any"]
+__all__ = ["AnyDefinition", "FieldSet", "FieldSetDefinition", "_Any"]

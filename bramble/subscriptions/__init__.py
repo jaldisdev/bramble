@@ -17,4 +17,7 @@
 # limitations under the License.
 #
 
-from bramble.subscriptions.graphql_transport_ws import GRAPHQL_TRANSPORT_WS_PROTOCOL, GraphQLTransportWSHandler  # noqa: F401,E501
+from bramble.subscriptions.graphql_transport_ws import (  # noqa: F401
+    GRAPHQL_TRANSPORT_WS_PROTOCOL,
+    GraphQLTransportWSHandler,
+)

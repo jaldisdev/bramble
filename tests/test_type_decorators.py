@@ -19,9 +19,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-
 import dataclasses
+from collections.abc import AsyncGenerator
 
 import pytest
 
@@ -299,17 +298,17 @@ def test_field_resolver_and_default_are_mutually_exclusive() -> None:
 
 
 def test_type_decorator_on_a_non_class_raises() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises((TypeError, AttributeError, bramble.SchemaError)):
         bramble.type(lambda: None)
 
 
 def test_interface_decorator_on_a_non_class_raises() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises((TypeError, AttributeError, bramble.SchemaError)):
         bramble.interface(lambda: None)
 
 
 def test_input_decorator_on_a_non_class_raises() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises((TypeError, AttributeError, bramble.SchemaError)):
         bramble.input(lambda: None)
 
 

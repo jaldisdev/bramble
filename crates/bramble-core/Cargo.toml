@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Core GraphQL parsing, validation, lowering, and SDL rendering for bramble. No Python dependency."
+readme = "README.md"
+keywords = ["graphql", "parser", "validation", "sdl"]
+categories = ["parser-implementations", "web-programming"]
 
 [lib]
 path = "src/bramble_core.rs"

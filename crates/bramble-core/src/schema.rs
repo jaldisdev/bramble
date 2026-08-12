@@ -266,6 +266,83 @@ pub struct CompiledSchema {
     pub persisted_query_cache: crate::persisted_query::PersistedQueryCache,
 }
 
+/// Validates every type's interface conformance against the interfaces it declares, plus that each
+/// name a type or union refers to actually resolves (§4/§8b). Runs once, when the schema is
+/// compiled -- this is the "Rust owns schema-shape validation" boundary; it used to live in Python
+/// (`bramble._schema._validate_interface_implementations`), which meant the compiled schema was
+/// assembled without anything checking its shape.
+///
+/// The conformance checks are deliberately the covariance ones an implementor can still violate by
+/// *re-annotating* an inherited field: bramble has implementing types inherit from the interface
+/// directly (there is no `implements=[...]` list to get out of sync), so dataclass field
+/// inheritance already makes outright omission structurally impossible. This matches the checks
+/// graphql-core's own `validate_type_implements_interface` actually performs.
+pub fn validate_schema_shape(
+    types: &HashMap<String, TypeDefinition>,
+    unions: &HashMap<String, UnionDefinition>,
+    scalar_names: &HashSet<String>,
+) -> Result<(), String> {
+    for type_def in types.values() {
+        for interface_name in &type_def.interfaces {
+            let Some(interface) = types.get(interface_name) else {
+                return Err(format!(
+                    "'{}' implements interface '{interface_name}', which is not a registered type",
+                    type_def.name
+                ));
+            };
+            check_implements(type_def, interface)?;
+        }
+    }
+
+    for union_def in unions.values() {
+        for member_name in &union_def.member_names {
+            // A union member must be a real object type. Tolerating a scalar name here would let a
+            // union silently include something no `... on Member` selection could ever match.
+            if !types.contains_key(member_name) && !scalar_names.contains(member_name) {
+                return Err(format!(
+                    "union '{}' has member '{member_name}', which is not a registered type",
+                    union_def.name
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn check_implements(implementor: &TypeDefinition, interface: &TypeDefinition) -> Result<(), String> {
+    for interface_field in &interface.fields {
+        let Some(implementor_field) = implementor.fields.iter().find(|field| field.name == interface_field.name) else {
+            return Err(format!(
+                "'{}' does not implement field '{}' declared by interface '{}'",
+                implementor.name, interface_field.name, interface.name
+            ));
+        };
+
+        // Widening a non-null interface field to nullable breaks every client that trusted the
+        // interface's own contract.
+        if !interface_field.graphql_type.is_nullable() && implementor_field.graphql_type.is_nullable() {
+            return Err(format!(
+                "'{}.{}' is nullable, but interface '{}' declares it as non-null",
+                implementor.name, interface_field.name, interface.name
+            ));
+        }
+
+        for argument in &implementor_field.arguments {
+            let declared_by_interface = interface_field.arguments.iter().any(|other| other.name == argument.name);
+            // A *newly required* argument is the violation: a client selecting the field through
+            // the interface has no way to know it must supply one.
+            if !declared_by_interface && !argument.graphql_type.is_nullable() && !argument.has_default {
+                return Err(format!(
+                    "'{}.{}' adds required argument '{}' not declared by interface '{}'",
+                    implementor.name, interface_field.name, argument.name, interface.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,81 +519,4 @@ mod tests {
         assert_eq!(deep.inner_name(), "User");
         assert_eq!(named("User").inner_name(), "User");
     }
-}
-
-/// Validates every type's interface conformance against the interfaces it declares, plus that each
-/// name a type or union refers to actually resolves (§4/§8b). Runs once, when the schema is
-/// compiled -- this is the "Rust owns schema-shape validation" boundary; it used to live in Python
-/// (`bramble._schema._validate_interface_implementations`), which meant the compiled schema was
-/// assembled without anything checking its shape.
-///
-/// The conformance checks are deliberately the covariance ones an implementor can still violate by
-/// *re-annotating* an inherited field: bramble has implementing types inherit from the interface
-/// directly (there is no `implements=[...]` list to get out of sync), so dataclass field
-/// inheritance already makes outright omission structurally impossible. This matches the checks
-/// graphql-core's own `validate_type_implements_interface` actually performs.
-pub fn validate_schema_shape(
-    types: &HashMap<String, TypeDefinition>,
-    unions: &HashMap<String, UnionDefinition>,
-    scalar_names: &HashSet<String>,
-) -> Result<(), String> {
-    for type_def in types.values() {
-        for interface_name in &type_def.interfaces {
-            let Some(interface) = types.get(interface_name) else {
-                return Err(format!(
-                    "'{}' implements interface '{interface_name}', which is not a registered type",
-                    type_def.name
-                ));
-            };
-            check_implements(type_def, interface)?;
-        }
-    }
-
-    for union_def in unions.values() {
-        for member_name in &union_def.member_names {
-            // A union member must be a real object type. Tolerating a scalar name here would let a
-            // union silently include something no `... on Member` selection could ever match.
-            if !types.contains_key(member_name) && !scalar_names.contains(member_name) {
-                return Err(format!(
-                    "union '{}' has member '{member_name}', which is not a registered type",
-                    union_def.name
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn check_implements(implementor: &TypeDefinition, interface: &TypeDefinition) -> Result<(), String> {
-    for interface_field in &interface.fields {
-        let Some(implementor_field) = implementor.fields.iter().find(|field| field.name == interface_field.name) else {
-            return Err(format!(
-                "'{}' does not implement field '{}' declared by interface '{}'",
-                implementor.name, interface_field.name, interface.name
-            ));
-        };
-
-        // Widening a non-null interface field to nullable breaks every client that trusted the
-        // interface's own contract.
-        if !interface_field.graphql_type.is_nullable() && implementor_field.graphql_type.is_nullable() {
-            return Err(format!(
-                "'{}.{}' is nullable, but interface '{}' declares it as non-null",
-                implementor.name, interface_field.name, interface.name
-            ));
-        }
-
-        for argument in &implementor_field.arguments {
-            let declared_by_interface = interface_field.arguments.iter().any(|other| other.name == argument.name);
-            // A *newly required* argument is the violation: a client selecting the field through
-            // the interface has no way to know it must supply one.
-            if !declared_by_interface && !argument.graphql_type.is_nullable() && !argument.has_default {
-                return Err(format!(
-                    "'{}.{}' adds required argument '{}' not declared by interface '{}'",
-                    implementor.name, interface_field.name, argument.name, interface.name
-                ));
-            }
-        }
-    }
-    Ok(())
 }

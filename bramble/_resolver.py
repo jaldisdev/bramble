@@ -20,7 +20,15 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
-from typing import Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
+
+if TYPE_CHECKING:
+    # `Info`'s annotations below name these purely for documentation and type-checker benefit --
+    # nothing at runtime resolves them (the attributes are assigned by the executor, never read
+    # off `__annotations__`). Importing them here anyway keeps the names real, so a reader or a
+    # tool following `Info.path` lands somewhere instead of on an unresolvable string.
+    from bramble._execution import Path, SelectedField
+    from bramble._schema import Schema
 
 ParentType = TypeVar("ParentType")
 ContextType = TypeVar("ContextType")
@@ -112,6 +120,10 @@ class Depends(Generic[ProvidedType]):
 
 
 class Argument:
+    """What `bramble.argument(...)` produces -- metadata for one resolver argument, attached to its
+    annotation via `typing.Annotated`.
+    """
+
     def __init__(
         self,
         name: str | None = None,
@@ -134,6 +146,23 @@ def argument(
     graphql_type: Any | None = None,
     directives: Sequence[object] = (),
 ) -> Argument:
+    """Customises one resolver argument, independently of its Python parameter name.
+
+        @bramble.field
+        def greet(
+            name: Annotated[str, bramble.argument(name="who", description="Who to greet")] = "world",
+        ) -> str:
+            return f"Hello, {name}!"
+
+    Works on any resolver argument, and on a custom operation directive's arguments too.
+
+    Arguments:
+        name: the GraphQL argument name, overriding the camelCased parameter name.
+        description: rendered inline in SDL and reported by introspection.
+        deprecation_reason: marks the argument `@deprecated`.
+        graphql_type: overrides the GraphQL type derived from the annotation.
+        directives: applied schema-directive instances, checked against `ARGUMENT_DEFINITION`.
+    """
     return Argument(
         name=name,
         description=description,

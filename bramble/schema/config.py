@@ -38,6 +38,23 @@ class BatchingConfig(TypedDict):
 
 @dataclasses.dataclass(kw_only=True)
 class SchemaConfig:
+    """Schema-wide settings, passed as `bramble.Schema(config=...)`.
+
+        SchemaConfig(
+            scalar_map={Base64: bramble.scalar(name="Base64", ...)},
+            auto_camel_case=True,
+            batching_config={"max_operations": 10},
+        )
+
+    Attributes:
+        scalar_map: maps a Python type to the `ScalarDefinition` describing it. Required only to
+            declare a custom scalar in SDL/introspection, not for it to work at execution.
+        auto_camel_case: whether a field/argument with no explicit `name=` is exposed as a
+            camelCase rendering of its Python identifier (`post_id` -> `postId`). Default `True`.
+        batching_config: opt in to executing a JSON array of operations in one HTTP request.
+            `None` (the default) rejects batched requests.
+    """
+
     scalar_map: dict[Any, ScalarDefinition] = dataclasses.field(default_factory=dict)
     # Default: a field/argument with no explicit `name=` override is queried by a camelCase
     # rendering of its Python identifier (`post_id` -> `postId`), not the raw identifier. Set

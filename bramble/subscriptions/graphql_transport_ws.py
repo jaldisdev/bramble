@@ -104,7 +104,7 @@ class GraphQLTransportWSHandler:
             await self._shutdown_operations()
             try:
                 await self.websocket.close()
-            except Exception:  # noqa: BLE001 -- already closing; nothing meaningful to do with this.
+            except Exception:  # already closing; nothing meaningful to do with this.
                 logger.debug("failed to close the websocket cleanly", exc_info=True)
 
     async def _shutdown_operations(self) -> None:

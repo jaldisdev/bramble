@@ -61,7 +61,7 @@ def load_schema(schema: str, *, app_dir: str) -> Schema:
     if callable(symbol):
         try:
             symbol = symbol()
-        except Exception as error:  # noqa: BLE001 -- any failure building the schema is the user's to fix, not ours to hide.
+        except Exception as error:  # any failure building the schema is the user's to fix, not ours to hide.
             raise click.ClickException(f"Error invoking schema symbol: {error}") from error
 
     if not isinstance(symbol, Schema):

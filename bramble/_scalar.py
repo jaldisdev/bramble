@@ -28,6 +28,13 @@ ID = NewType("ID", str)
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class ScalarDefinition:
+    """What `bramble.scalar(...)` produces -- how a Python type is represented on the wire.
+
+    Registered by mapping the Python type to it in `SchemaConfig(scalar_map={...})`, rather than by
+    wrapping the type itself, so the Python type stays an ordinary type that type checkers
+    understand.
+    """
+
     name: str | None
     description: str | None
     specified_by_url: str | None
@@ -47,6 +54,31 @@ def scalar(
     parse_literal: Callable[[Any], Any] | None = None,
     directives: Sequence[object] = (),
 ) -> ScalarDefinition:
+    """Defines a custom GraphQL scalar for an existing Python type.
+
+        Base64 = NewType("Base64", bytes)
+
+        schema = bramble.Schema(
+            query=Query,
+            config=SchemaConfig(scalar_map={Base64: bramble.scalar(
+                name="Base64",
+                serialize=lambda value: base64.b64encode(value).decode(),
+                parse_value=base64.b64decode,
+            )}),
+        )
+
+    Arguments:
+        name: the GraphQL scalar name. Defaults to the Python type's own `__name__`.
+        description: rendered as the scalar's SDL description.
+        specified_by_url: rendered as `@specifiedBy(url: ...)` and reported by introspection.
+        serialize: converts a resolved Python value to what goes in the response.
+        parse_value: converts an incoming argument/variable value to what the resolver receives.
+        parse_literal: converts a literal written inline in the query document.
+        directives: applied schema-directive instances, checked against `SCALAR`.
+
+    Registration is only required to *declare* the scalar in SDL and introspection -- an
+    unregistered custom type already round-trips through execution unchanged.
+    """
     return ScalarDefinition(
         name=name,
         description=description,

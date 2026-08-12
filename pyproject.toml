@@ -9,9 +9,33 @@ authors = [
     { name = "Mario Ritzerfeld" }
 ]
 description = "A GraphQL library for Python with a Rust-based parser/validator"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
+# Without this the license *texts* are omitted from the built wheel and sdist -- the one real
+# compliance gap for a dual-licensed project, since `license` above is only an SPDX expression.
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+keywords = ["graphql", "api", "async", "rust", "schema"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dynamic = []
+
+[project.urls]
+Homepage = "https://github.com/jaldisdev/bramble"
+Repository = "https://github.com/jaldisdev/bramble"
+Issues = "https://github.com/jaldisdev/bramble/issues"
 
 [project.optional-dependencies]
 asgi = ["python-multipart>=0.0.9"]
@@ -22,6 +46,7 @@ django = ["django>=4.2", "channels>=4.0", "python-multipart>=0.0.9"]
 cli = ["click>=8.1", "uvicorn>=0.30", "bramble[starlette]"]
 dev = [
     "pytest",
+    "ruff",
     "bramble[cli,asgi,starlette,fastapi,flask,django]",
     "httpx>=0.27",
     "httpx2>=2.0",
@@ -36,3 +61,50 @@ manifest-path = "crates/bramble-py/Cargo.toml"
 module-name = "bramble._bramble"
 # Not a default Cargo feature: it would break `cargo test`, which has to link libpython.
 features = ["extension-module"]
+
+[tool.ruff]
+# Matches the width the codebase was already written to.
+line-length = 127
+target-version = "py310"
+
+[tool.ruff.lint]
+# Chosen to match conventions this codebase already follows, rather than to force a mass rewrite:
+# a linter that reports 200 stylistic disagreements on first run gets muted, not obeyed. `BLE` in
+# particular has to stay on -- the `# noqa: BLE001` suppressions throughout only mean something
+# with it enabled, which was the point of finding 19.
+select = ["E", "F", "W", "I", "B", "C4", "BLE", "S", "A", "RUF"]
+ignore = [
+    # Quoted forward references are used deliberately and consistently, including where
+    # `from __future__ import annotations` makes them technically redundant -- they mark
+    # "this name is only available under TYPE_CHECKING" at a glance.
+    "UP037",
+    # `bramble.type`/`input`/`field` shadow builtins on purpose -- that *is* the public API, and
+    # matching what a GraphQL user expects to write is worth more than the shadowing.
+    "A001",
+    "A002",
+    "A003",
+    "A004",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# `assert` states an internal invariant here, not an input check -- the values are already
+# guaranteed by the branch above each one, and the message documents why.
+"bramble/*" = ["S101"]
+# These emit generated Python as string templates; wrapping them would obscure the output shape.
+"bramble/codegen/*" = ["E501", "S101"]
+"tests/*" = [
+    "E501",
+    "B008",
+    # `assert` is the point of a test file.
+    "S101",
+    # Tests spawn subprocesses deliberately (the fragment-cycle timeout guards).
+    "S603",
+    # Hardcoded sample values in fixtures are not credentials.
+    "S105",
+    "S106",
+]
+
+[tool.ruff.format]
+# Not enforced in CI: the codebase is hand-formatted and `ruff format` would rewrite most of it.
+# Listed so anyone who runs it locally at least gets the right width.
+line-ending = "lf"

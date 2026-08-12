@@ -155,7 +155,9 @@ async def _resolve_entities(representations: list[_Any], info: Info) -> list[Any
             continue
 
         graphql_to_python = {
-            _effective_name(field_info.name, field_info.graphql_name, auto_camel_case=info.schema.config.auto_camel_case): field_info.name
+            _effective_name(
+                field_info.name, field_info.graphql_name, auto_camel_case=info.schema.config.auto_camel_case
+            ): field_info.name
             for field_info in entity_type.__bramble_type_info__.fields
         }
         kwargs = {

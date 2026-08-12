@@ -303,6 +303,27 @@ def _build_introspective_query(query: _type) -> _type:
 
 
 class Schema:
+    """A compiled, executable GraphQL schema.
+
+        @bramble.type
+        class Query:
+            @bramble.field
+            def greet(name: str) -> str:
+                return f"Hello, {name}!"
+
+        schema = bramble.Schema(query=Query)
+        schema.execute('{ greet(name: "Ada") }')
+
+    Construction walks the whole type graph reachable from the root types, validates its shape
+    (interface conformance, directive locations, name resolution), and compiles it once. Every
+    subsequent request validates and executes against that compiled form rather than re-deriving
+    anything, so building a `Schema` is the expensive step and should happen once at startup, not
+    per request.
+
+    The result is immutable in practice: mutating a decorated class after the fact will not be
+    picked up.
+    """
+
     def __init__(
         self,
         query: _type,
@@ -315,6 +336,27 @@ class Schema:
         default_context_factory: Callable[[], Any] | None = None,
         schema_directives: Sequence[object] = (),
     ) -> None:
+        """Builds and validates the schema.
+
+        Arguments:
+            query: the query root type; required, and must be `@bramble.type`-decorated.
+            mutation: the mutation root type, if the schema has one.
+            subscription: the subscription root type, if the schema has one.
+            directives: custom operation directive functions (`@bramble.directive`-decorated) that
+                queries may then use, e.g. `@shout`.
+            types: extra types to include even when no field's return type or resolver argument
+                reaches them -- most often an interface implementor that is only ever returned as
+                the interface.
+            extensions: reserved; currently rejected (there are no lifecycle hooks for it yet).
+            config: a `SchemaConfig` controlling naming, custom scalars, and batching.
+            default_context_factory: called with no arguments to produce `info.context` for any
+                execution that doesn't pass `context=` explicitly. (Deliberately *not* named
+                `execution_context_class`, which means something different in Strawberry.)
+            schema_directives: applied schema-directive instances attached to the `schema { ... }`
+                block itself, e.g. federation's `@link`.
+
+        Raises `bramble.SchemaError` for any schema-shape problem found during the build.
+        """
         if getattr(query, "__bramble_type_info__", None) is None:
             raise SchemaError("Schema(query=...) must be a @bramble.type-decorated class")
 
@@ -640,4 +682,5 @@ class Schema:
         return render_sdl(self._compiled)
 
     def __str__(self) -> str:
+        """The schema's SDL -- so `print(schema)` renders it. See `to_sdl`."""
         return self.to_sdl()

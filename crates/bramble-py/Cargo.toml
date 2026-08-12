@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "PyO3 bindings exposing bramble-core to Python. Not useful standalone; see the `bramble` package on PyPI."
+readme = "README.md"
+keywords = ["graphql", "pyo3", "python", "bindings"]
+categories = ["api-bindings", "web-programming"]
 
 [lib]
 name = "_bramble"

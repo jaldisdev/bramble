@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import enum
+import re
 from typing import Annotated, NewType, Union
 
 import pytest
@@ -166,7 +167,7 @@ def test_schema_directives_rejects_a_non_directive_instance() -> None:
     class Query:
         greet: str
 
-    with pytest.raises(bramble.SchemaError, match="not a @bramble.schema_directive instance"):
+    with pytest.raises(bramble.SchemaError, match=re.escape("not a @bramble.schema_directive instance")):
         bramble.Schema(query=Query, schema_directives=[object()])
 
 

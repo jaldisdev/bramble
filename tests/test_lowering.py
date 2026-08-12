@@ -20,9 +20,9 @@
 from __future__ import annotations
 
 import pytest
+from bramble._bramble import lower_query
 
 import bramble
-from bramble._bramble import lower_query
 
 
 def field_names(fields) -> list[str]:

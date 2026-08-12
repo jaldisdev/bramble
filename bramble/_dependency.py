@@ -149,7 +149,7 @@ class DependencyScope:
         for agen in reversed(self.generators):
             try:
                 await agen.aclose()
-            except BaseException as error:  # noqa: BLE001 -- every generator must still get a chance to close; re-raised below, not swallowed.
+            except BaseException as error:  # noqa: BLE001 -- every generator must still get a chance to close; re-raised below.
                 if first_error is None:
                     first_error = error
         if first_error is not None:

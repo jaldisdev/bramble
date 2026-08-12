@@ -56,6 +56,33 @@ def directive(
     name: str | None = None,
     description: str | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Declares a custom *operation* directive -- one a client writes in a query document, which
+    transforms a field's resolved value.
+
+        @bramble.directive(locations=[DirectiveLocation.FIELD])
+        def shout(value: DirectiveValue[str]) -> str:
+            return value.upper()
+
+        schema = bramble.Schema(query=Query, directives=[shout])
+        schema.execute('{ greet(name: "Ada") @shout }')
+
+    The function's parameters are classified by annotation, like a resolver's: `DirectiveValue[T]`
+    receives the field's already-resolved value, `Info` the execution context,
+    `Annotated[T, bramble.Depends(...)]` an injected dependency, and everything else becomes a
+    directive argument the query supplies. Chaining several directives on one field just applies
+    them in order, each receiving the previous one's result.
+
+    Distinct from `bramble.schema_directive`, which declares purely-declarative SDL metadata with
+    no execution behaviour.
+
+    Arguments:
+        locations: where in a query document the directive may appear.
+        name: the GraphQL directive name, overriding the camelCased function name.
+        description: rendered as the directive's SDL description.
+
+    The decorated function must also be passed to `Schema(directives=[...])` to be usable.
+    """
+
     def wrap(func: Callable[..., Any]) -> Callable[..., Any]:
         func.__bramble_directive_info__ = describe_operation_directive(
             func,

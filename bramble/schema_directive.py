@@ -45,6 +45,11 @@ class Location(enum.Enum):
 
 
 class DirectiveField(dataclasses.Field):
+    """What `bramble.directive_field(...)` produces -- a schema-directive field with an explicit
+    GraphQL name, for when the Python identifier can't be spelled the same way (a reserved word,
+    say, or a name that must not be camelCased).
+    """
+
     def __init__(self, name: str, *, default: Any = dataclasses.MISSING) -> None:
         kwargs: dict[str, Any] = {"kw_only": True}
         if sys.version_info >= (3, 14):
@@ -64,6 +69,13 @@ class DirectiveField(dataclasses.Field):
 
 
 def directive_field(name: str, *, default: Any = dataclasses.MISSING) -> Any:
+    """Overrides the GraphQL name of one `@bramble.schema_directive` field.
+
+        @bramble.schema_directive(locations=[Location.OBJECT])
+        class Key:
+            fields: str
+            resolvable: bool = bramble.directive_field("resolvable", default=True)
+    """
     return DirectiveField(name, default=default)
 
 
@@ -74,6 +86,29 @@ def schema_directive(
     description: str | None = None,
     repeatable: bool = False,
 ) -> Any:
+    """Declares a *schema* directive -- declarative metadata applied to a type, field, argument,
+    enum, scalar, or the schema block itself, and rendered into SDL.
+
+        @bramble.schema_directive(locations=[Location.OBJECT, Location.INTERFACE])
+        class Key:
+            fields: str
+
+        @bramble.type(directives=[Key(fields="id")])
+        class User:
+            id: bramble.ID
+
+    Renders `type User @key(fields: "id")`, plus the matching `directive @key(...) on OBJECT`
+    declaration. Purely declarative: schema directives have no execution behaviour, which is what
+    distinguishes them from `bramble.directive` (operation directives). Applying one at a location
+    it doesn't declare is a build-time error.
+
+    Arguments:
+        locations: the SDL locations this directive may be applied to.
+        name: the GraphQL directive name, overriding the camelCased class name.
+        description: rendered as the directive's SDL description.
+        repeatable: renders the `repeatable` keyword, allowing multiple applications at one site.
+    """
+
     def wrap(cls: _type) -> _type:
         cls = dataclasses.dataclass(cls, kw_only=True)
         cls.__bramble_directive_info__ = describe_schema_directive(

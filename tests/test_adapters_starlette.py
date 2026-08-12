@@ -215,7 +215,8 @@ def test_websocket_rejects_operations_before_connection_init() -> None:
 
     with client.websocket_connect("/graphql", subprotocols=["graphql-transport-ws"]) as websocket:
         websocket.send_json({"type": "subscribe", "id": "1", "payload": {"query": "{ greet }"}})
-        with pytest.raises(Exception):  # noqa: PT011 -- Starlette raises its own WebSocketDisconnect here.
+        # Starlette's own disconnect exception, raised because the server closed the socket.
+        with pytest.raises(WebSocketDisconnect):
             websocket.receive_json()
 
 

@@ -26,6 +26,13 @@ from bramble._bramble import GraphQLError as _GraphQLError
 
 
 class ErrorCode(enum.Enum):
+    """The `extensions.code` values bramble reports, so a client can branch on the kind of failure
+    without matching on message text.
+
+    Shared verbatim with the Rust core (`bramble_core::error::ErrorCode`), so a parse, validation,
+    or execution failure is reported under the same name wherever it originated.
+    """
+
     GRAPHQL_PARSE_FAILED = "GRAPHQL_PARSE_FAILED"
     GRAPHQL_VALIDATION_FAILED = "GRAPHQL_VALIDATION_FAILED"
     INTERFACE_TYPE_RESOLUTION_FAILED = "INTERFACE_TYPE_RESOLUTION_FAILED"
@@ -41,6 +48,26 @@ class ErrorCode(enum.Enum):
 
 
 class GraphQLError(_GraphQLError):
+    """A GraphQL error, carrying the structured detail the spec's error shape allows.
+
+    Raise one from a resolver to produce a field-level error with a code and extensions of your
+    choosing:
+
+        raise bramble.GraphQLError(
+            f"no such user \'{user_id}\'",
+            code=bramble.ErrorCode.FIELD_RESOLUTION_FAILED,
+            extensions={"userId": user_id},
+        )
+
+    bramble fills in `path` and `locations` -- a resolver has no way to know its own position in
+    the response. Any other exception a resolver raises is wrapped as a generic field error
+    instead, so raising this is how you keep control of the message, code, and extensions.
+
+    Also raised directly by `validate_query`, `execute*`, and `resolve_persisted_query` for
+    request-level failures (a malformed query, an unknown operation, an APQ miss), which are
+    reported as the whole response rather than one field's error.
+    """
+
     def __init__(
         self,
         message: str,
@@ -50,6 +77,13 @@ class GraphQLError(_GraphQLError):
         path: list[str | int] | None = None,
         extensions: dict[str, Any] | None = None,
     ) -> None:
+        """Arguments:
+        message: the human-readable error message.
+        code: an `ErrorCode`, reported under `extensions.code`.
+        locations: source positions in the query. Overwritten by the executor for a field error.
+        path: the response path this error belongs to. Overwritten by the executor.
+        extensions: extra keys merged alongside `code` in the response's `extensions` object.
+        """
         super().__init__(message)
         self.message = message
         self.code = code

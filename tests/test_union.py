@@ -22,9 +22,9 @@ from __future__ import annotations
 from typing import Annotated, Union
 
 import pytest
+from bramble._bramble import SchemaError, describe_union
 
 import bramble
-from bramble._bramble import SchemaError, describe_union
 from bramble._union import resolve_union_type
 
 

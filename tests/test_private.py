@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 
 import pytest
 
@@ -107,7 +108,7 @@ def test_private_field_remains_a_normal_dataclass_attribute() -> None:
 
 
 def test_private_plus_bramble_field_raises_schema_error() -> None:
-    with pytest.raises(bramble.SchemaError, match="cannot be both Private and a bramble.field"):
+    with pytest.raises(bramble.SchemaError, match=re.escape("cannot be both Private and a bramble.field")):
 
         @bramble.type
         class Bad:

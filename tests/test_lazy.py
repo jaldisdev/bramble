@@ -21,11 +21,12 @@ from __future__ import annotations
 
 from typing import Annotated, ForwardRef
 
+from lazy_fixtures.authors import Author, AuthorSearch
+from lazy_fixtures.posts import Post
+
 import bramble
 from bramble._lazy import LazyReference, LazyType
 from bramble.directive import DirectiveLocation, DirectiveValue
-from lazy_fixtures.authors import Author, AuthorSearch
-from lazy_fixtures.posts import Post
 
 
 def test_lazy_returns_a_lazy_reference() -> None:
