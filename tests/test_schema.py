@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import base64
+import re
 from typing import Annotated, NewType, Union
 
 import pytest
@@ -415,3 +416,48 @@ def test_a_union_member_that_is_not_a_registered_type_is_rejected_at_build_time(
     # Schema-shape validation now happens in Rust inside `compile_schema`; previously nothing
     # checked that a union's members or a type's interfaces actually resolved.
     assert hasattr(bramble, "SchemaError")
+
+
+def test_default_resolver_supports_dict_backed_parent_values() -> None:
+    """A resolver-less field read `getattr` unconditionally, so a dict-shaped parent (the common
+    case when a resolver returns rows straight from a driver) could not be used at all.
+    """
+    from bramble.schema.config import SchemaConfig
+
+    @bramble.type
+    class Query:
+        name: str
+
+    schema = bramble.Schema(
+        query=Query,
+        config=SchemaConfig(default_resolver=lambda parent, name: parent[name]),
+    )
+
+    assert schema.execute("{ name }", root_value={"name": "Ada"}) == {"data": {"name": "Ada"}}
+
+
+def test_info_class_can_be_subclassed() -> None:
+    from bramble.schema.config import SchemaConfig
+
+    class MyInfo(bramble.Info):
+        @property
+        def tenant(self) -> str:
+            return self.context["tenant"]
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def whoami(info: bramble.Info) -> str:
+            assert isinstance(info, MyInfo)
+            return info.tenant
+
+    schema = bramble.Schema(query=Query, config=SchemaConfig(info_class=MyInfo))
+
+    assert schema.execute("{ whoami }", context={"tenant": "acme"}) == {"data": {"whoami": "acme"}}
+
+
+def test_info_class_must_be_an_info_subclass() -> None:
+    from bramble.schema.config import SchemaConfig
+
+    with pytest.raises(TypeError, match=re.escape("must be bramble.Info or a subclass")):
+        SchemaConfig(info_class=str)

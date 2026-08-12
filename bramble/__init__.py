@@ -22,6 +22,7 @@ from bramble._enum import enum, enum_value  # noqa: F401
 from bramble._error import ErrorCode, GraphQLError  # noqa: F401
 from bramble._execution import Path, SelectedField  # noqa: F401
 from bramble._lazy import LazyType, lazy  # noqa: F401
+from bramble._permission import BasePermission  # noqa: F401
 from bramble._private import Private  # noqa: F401
 from bramble._resolver import Argument, Depends, Info, Parent, Streamable, argument  # noqa: F401
 from bramble._scalar import ID, ScalarDefinition, Upload, UploadDefinition, scalar  # noqa: F401

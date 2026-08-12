@@ -20,8 +20,10 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from typing import Any, TypedDict
 
+from bramble._resolver import Info
 from bramble._scalar import ScalarDefinition
 
 
@@ -49,6 +51,10 @@ class SchemaConfig:
     Attributes:
         scalar_map: maps a Python type to the `ScalarDefinition` describing it. Required only to
             declare a custom scalar in SDL/introspection, not for it to work at execution.
+        default_resolver: how a resolver-less field reads its value off the parent object.
+            Defaults to `getattr`; pass `lambda parent, name: parent[name]` for dict-backed parents.
+        info_class: the class used for the `Info` handed to resolvers. Must be `bramble.Info` or a
+            subclass.
         auto_camel_case: whether a field/argument with no explicit `name=` is exposed as a
             camelCase rendering of its Python identifier (`post_id` -> `postId`). Default `True`.
         batching_config: opt in to executing a JSON array of operations in one HTTP request.
@@ -56,8 +62,19 @@ class SchemaConfig:
     """
 
     scalar_map: dict[Any, ScalarDefinition] = dataclasses.field(default_factory=dict)
+    # How a field with no resolver reads its value off the parent. `getattr` suits the ordinary
+    # case (a bramble type is a dataclass); override with `lambda parent, name: parent[name]` for
+    # dict-backed parents, or anything else with the same `(parent, name) -> value` shape.
+    default_resolver: Callable[[Any, str], Any] = getattr
+    # The class instantiated for the `Info` passed to resolvers. Must be `bramble.Info` or a
+    # subclass -- useful for attaching your own helpers/properties to it.
+    info_class: type = Info
     # Default: a field/argument with no explicit `name=` override is queried by a camelCase
     # rendering of its Python identifier (`post_id` -> `postId`), not the raw identifier. Set
     # `False` to keep the raw identifier as the GraphQL-facing name instead.
     auto_camel_case: bool = True
     batching_config: BatchingConfig | None = None
+
+    def __post_init__(self) -> None:
+        if not issubclass(self.info_class, Info):
+            raise TypeError("`info_class` must be bramble.Info or a subclass")

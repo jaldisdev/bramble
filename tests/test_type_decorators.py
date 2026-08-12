@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import AsyncGenerator
+from typing import ClassVar
 
 import pytest
 
@@ -526,3 +527,143 @@ def test_unset_is_a_falsy_singleton() -> None:
     assert not bramble.UNSET
     assert repr(bramble.UNSET) == "UNSET"
     assert str(bramble.UNSET) == ""
+
+
+class _IsAuthenticated(bramble.BasePermission):
+    message = "Not authenticated"
+    error_extensions: ClassVar[dict] = {"reason": "auth"}
+
+    def has_permission(self, source: object, info: bramble.Info, **kwargs: object) -> bool:
+        return bool(info.context and info.context.get("user"))
+
+
+class _AlwaysDenyAsync(bramble.BasePermission):
+    message = "Async denied"
+
+    async def has_permission(self, source: object, info: bramble.Info, **kwargs: object) -> bool:
+        return False
+
+
+class _RecordsArguments(bramble.BasePermission):
+    seen: ClassVar[list[dict]] = []
+
+    def has_permission(self, source: object, info: bramble.Info, **kwargs: object) -> bool:
+        _RecordsArguments.seen.append(dict(kwargs))
+        return True
+
+
+def test_permission_denial_becomes_a_field_error_and_bubbles_like_one() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field(permission_classes=[_IsAuthenticated])
+        def secret() -> str:
+            raise AssertionError("a denied field must never run its resolver")
+
+    result = bramble.Schema(query=Query).execute("{ secret }", context={})
+
+    # Non-null field, so the denial propagates `data` to null rather than leaving a hole.
+    assert result["data"] is None
+    assert result["errors"][0]["message"] == "Not authenticated"
+    assert result["errors"][0]["extensions"]["reason"] == "auth"
+
+
+def test_permission_denial_on_a_nullable_field_only_nulls_that_field() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field(permission_classes=[_IsAuthenticated])
+        def secret() -> str | None:
+            return "shh"
+
+    result = bramble.Schema(query=Query).execute("{ secret }", context={})
+
+    assert result["data"] == {"secret": None}
+    assert result["errors"][0]["message"] == "Not authenticated"
+
+
+def test_permission_granted_lets_the_resolver_run() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field(permission_classes=[_IsAuthenticated])
+        def secret() -> str:
+            return "shh"
+
+    assert bramble.Schema(query=Query).execute("{ secret }", context={"user": "ada"}) == {
+        "data": {"secret": "shh"}
+    }
+
+
+def test_an_async_permission_is_awaited() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field(permission_classes=[_AlwaysDenyAsync])
+        def secret() -> str | None:
+            return "shh"
+
+    result = bramble.Schema(query=Query).execute("{ secret }")
+
+    assert result["errors"][0]["message"] == "Async denied"
+
+
+def test_permissions_receive_the_fields_coerced_arguments() -> None:
+    _RecordsArguments.seen.clear()
+
+    @bramble.type
+    class Query:
+        @bramble.field(permission_classes=[_RecordsArguments])
+        def greet(name: str, info: bramble.Info) -> str:
+            return name
+
+    bramble.Schema(query=Query).execute('{ greet(name: "Ada") }')
+
+    # Arguments only -- `Info`/`Parent` are bramble's own injections, not the field's arguments.
+    assert _RecordsArguments.seen == [{"name": "Ada"}]
+
+
+def test_permissions_short_circuit_on_the_first_denial() -> None:
+    ran: list[str] = []
+
+    class First(bramble.BasePermission):
+        message = "denied by first"
+
+        def has_permission(self, source: object, info: bramble.Info, **kwargs: object) -> bool:
+            ran.append("first")
+            return False
+
+    class Second(bramble.BasePermission):
+        def has_permission(self, source: object, info: bramble.Info, **kwargs: object) -> bool:
+            ran.append("second")
+            return True
+
+    @bramble.type
+    class Query:
+        @bramble.field(permission_classes=[First, Second])
+        def secret() -> str | None:
+            return "shh"
+
+    result = bramble.Schema(query=Query).execute("{ secret }")
+
+    assert ran == ["first"], "a cheap check must be able to guard an expensive one"
+    assert result["errors"][0]["message"] == "denied by first"
+
+
+def test_permissions_also_guard_a_field_with_no_resolver() -> None:
+    @bramble.type
+    class Query:
+        secret: str = bramble.field(default="shh", permission_classes=[_IsAuthenticated])
+
+    schema = bramble.Schema(query=Query)
+    result = schema.execute("{ secret }", context={}, root_value=Query())
+
+    assert result["data"] is None
+    assert result["errors"][0]["message"] == "Not authenticated"
+
+
+def test_field_metadata_is_stored_on_the_dataclass_field() -> None:
+    import dataclasses
+
+    @bramble.type
+    class Query:
+        greeting: str = bramble.field(default="hi", metadata={"owner": "team-a"})
+
+    (field,) = [f for f in dataclasses.fields(Query) if f.name == "greeting"]
+    assert field.metadata["owner"] == "team-a"

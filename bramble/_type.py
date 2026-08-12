@@ -22,7 +22,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from bramble._bramble import SchemaError, process_type
@@ -56,8 +56,10 @@ class Field(dataclasses.Field):
         name: str | None = None,
         description: str | None = None,
         deprecation_reason: str | None = None,
+        permission_classes: Sequence[_type] = (),
         directives: Sequence[object] = (),
         extensions: Sequence[object] = (),
+        metadata: Mapping[Any, Any] | None = None,
         default: Any = dataclasses.MISSING,
         default_factory: Any = dataclasses.MISSING,
     ) -> None:
@@ -93,7 +95,7 @@ class Field(dataclasses.Field):
             repr=is_basic_field,
             compare=is_basic_field,
             hash=None,
-            metadata=None,
+            metadata=metadata,
             **kwargs,
         )
 
@@ -103,6 +105,7 @@ class Field(dataclasses.Field):
         self.graphql_name = name
         self.description = description
         self.deprecation_reason = deprecation_reason
+        self.permission_classes = tuple(permission_classes)
         self.directives = tuple(directives)
         self.extensions = tuple(extensions)
         self._resolver: Callable[..., Any] | None = None
@@ -133,8 +136,10 @@ def field(
     name: str | None = None,
     description: str | None = None,
     deprecation_reason: str | None = None,
+    permission_classes: Sequence[_type] = (),
     directives: Sequence[object] = (),
     extensions: Sequence[object] = (),
+    metadata: Mapping[Any, Any] | None = None,
     default: Any = dataclasses.MISSING,
     default_factory: Any = dataclasses.MISSING,
 ) -> Any:
@@ -165,6 +170,10 @@ def field(
         description: rendered as the field's SDL description and reported by introspection.
         deprecation_reason: marks the field `@deprecated`. It keeps working; introspection hides
             it unless a client passes `fields(includeDeprecated: true)`.
+        permission_classes: `bramble.BasePermission` subclasses checked before the resolver runs,
+            in order, short-circuiting on the first denial.
+        metadata: an arbitrary mapping stored on the underlying `dataclasses.Field`, for your own
+            tooling. bramble never reads it.
         directives: applied schema-directive instances, checked against `FIELD_DEFINITION`.
         extensions: reserved; currently rejected (there is no execution hook point for it yet).
         default / default_factory: a default for a data field, as on any dataclass. Mutually
@@ -178,8 +187,10 @@ def field(
         name=name,
         description=description,
         deprecation_reason=deprecation_reason,
+        permission_classes=permission_classes,
         directives=directives,
         extensions=extensions,
+        metadata=metadata,
         default=default,
         default_factory=default_factory,
     )
@@ -300,6 +311,14 @@ def _process_type(
         # actually in use (locations/field defs, for its own `directive @name(...) on ...`
         # declaration), which the already-extracted values alone can't reconstruct.
         cls.__bramble_applied_directives__ = tuple(directives)
+        # Keyed by Python field name. Execution reaches a field through Rust's `FieldInfo`, which
+        # deliberately carries no Python callables -- permissions are an execution-time concern, so
+        # they ride here rather than being threaded through the schema IR.
+        cls.__bramble_permissions__ = {
+            dataclass_field.name: permissions
+            for dataclass_field in dataclasses.fields(cls)
+            if (permissions := getattr(dataclass_field, "permission_classes", ()))
+        }
         return cls
 
     if cls is None:

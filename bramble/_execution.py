@@ -33,6 +33,7 @@ from bramble._dependency import DependencyScope, resolve_dependencies
 from bramble._error import ErrorCode, GraphQLError
 from bramble._error import error_to_dict as _error_to_dict
 from bramble._interface import resolve_interface_type
+from bramble._permission import check_permissions
 
 # `Path`/`SelectedField` are defined in `_resolver` (they are resolver-facing types) and
 # re-exported here, where they are actually constructed, so the original import path keeps
@@ -98,7 +99,7 @@ def _build_info(
     caller must supply both -- passing the query name for each is what made `info.python_name`
     report camelCase.
     """
-    info = Info()
+    info = state.schema.config.info_class()
     info.field_name = field_name
     info.python_name = python_name
     info.parent_type = parent_type
@@ -265,6 +266,19 @@ async def _bind_resolver_kwargs(
     return kwargs
 
 
+async def _check_field_permissions(
+    field_info: "FieldInfo", concrete_type: type, parent_value: Any, info: Info, arguments: dict[str, Any]
+) -> None:
+    """Runs any `bramble.field(permission_classes=[...])` for this field before it resolves.
+
+    Looked up off the owning class rather than `field_info`: permissions are live Python classes,
+    which the (deliberately Python-free) Rust schema IR doesn't carry.
+    """
+    permissions = getattr(concrete_type, "__bramble_permissions__", {}).get(field_info.name, ())
+    if permissions:
+        await check_permissions(permissions, parent_value, info, arguments)
+
+
 async def _resolve_field_value(
     field_info: "FieldInfo",
     lowered_field: "LoweredField",
@@ -275,10 +289,24 @@ async def _resolve_field_value(
     scope: DependencyScope,
 ) -> Any:
     if not field_info.has_resolver:
-        return getattr(parent_value, field_info.name)
+        await _check_field_permissions(field_info, concrete_type, parent_value, info, {})
+        return schema.config.default_resolver(parent_value, field_info.name)
 
     resolver = getattr(concrete_type, field_info.name)
     kwargs = await _bind_resolver_kwargs(field_info, lowered_field, parent_value, info, schema, resolver, concrete_type, scope)
+    # After binding so a permission sees the same coerced arguments the resolver would, but before
+    # calling it -- a denied field must never run its resolver.
+    await _check_field_permissions(
+        field_info,
+        concrete_type,
+        parent_value,
+        info,
+        {
+            name: value
+            for name, value in kwargs.items()
+            if name not in (field_info.parent_parameter, field_info.info_parameter)
+        },
+    )
     result = resolver(**kwargs)
     if inspect.isawaitable(result):
         result = await result
