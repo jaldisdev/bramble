@@ -40,7 +40,7 @@ from bramble._permission import check_permissions
 # `Path`/`SelectedField` are defined in `_resolver` (they are resolver-facing types) and
 # re-exported here, where they are actually constructed, so the original import path keeps
 # working for anything that used it.
-from bramble._resolver import Info, Path, SelectedField
+from bramble._resolver import FieldDirective, Info, Path, SelectedField
 from bramble._union import resolve_union_type
 from bramble.directive import apply_directive
 
@@ -96,6 +96,7 @@ def _build_info(
     path: Path,
     selections: Sequence["LoweredField"],
     state: _ExecutionState,
+    lowered_field: "LoweredField | None" = None,
     parent_type: type | None = None,
     return_type: "GraphQLTypeInfo | None" = None,
 ) -> Info:
@@ -104,6 +105,11 @@ def _build_info(
     different values whenever `auto_camel_case` or an explicit `name=` override is in play, so a
     caller must supply both -- passing the query name for each is what made `info.python_name`
     report camelCase.
+
+    `lowered_field` is this field's *first* occurrence (the same one that supplies `field_name`),
+    read only for the operation directives written on it -- per §8's `CollectFields`, a merged
+    response key takes its identity from that first occurrence, so this matches what
+    `_apply_custom_directives` already applies after the resolver returns.
     """
     info = state.schema.config.info_class()
     info.field_name = field_name
@@ -117,8 +123,43 @@ def _build_info(
     info.query = state.query
     info.path = path
     info.selected_fields = _selected_fields(selections)
+    info.field_directives = _field_directives(lowered_field, state.schema)
     info.schema = state.schema
     return info
+
+
+def _field_directives(lowered_field: "LoweredField | None", schema: "Schema") -> tuple[FieldDirective, ...]:
+    """The custom operation directives on `lowered_field`, coerced for `Info.field_directives` --
+    see that attribute's own note for what is and isn't in here.
+
+    Computed eagerly rather than lazily because the overwhelmingly common field carries no
+    directives at all and exits on the first line; a field that does carry one pays for the same
+    mapping and coercion `_apply_custom_directives` would do anyway, which is deliberate -- it
+    consumes exactly this result, so a directive function and a resolver reading `Info` can never
+    disagree about what the query asked for.
+    """
+    if lowered_field is None or not lowered_field.directives:
+        return ()
+
+    directives = []
+    for directive in lowered_field.directives:
+        directive_function = schema.directive_functions_by_name.get(directive.name)
+        if directive_function is None:
+            # Only reachable with validation off (`SchemaConfig(validate_queries=False)`), which is
+            # also why this doesn't raise here: `_apply_custom_directives` is the one that has to
+            # fail on a directive it cannot apply, and it reports the same undeclared name with the
+            # context of having actually tried.
+            directives.append(FieldDirective(name=directive.name, arguments=dict(directive.arguments)))
+            continue
+        directive_info = directive_function.__bramble_directive_info__
+        arguments = _map_arguments(
+            directive_info.arguments, directive.arguments, auto_camel_case=schema.config.auto_camel_case
+        )
+        for argument in directive_info.arguments:
+            if argument.name in arguments:
+                arguments[argument.name] = _coerce_value(argument.type_info, arguments[argument.name], schema)
+        directives.append(FieldDirective(name=directive.name, arguments=arguments))
+    return tuple(directives)
 
 
 def _to_camel_case(name: str) -> str:
@@ -385,30 +426,25 @@ async def _resolve_field_value(
     return await chain(source, info, **kwargs)
 
 
-async def _apply_custom_directives(
-    directives: Sequence[Any], value: Any, schema: "Schema", *, info: Info, scope: DependencyScope
-) -> Any:
+async def _apply_custom_directives(value: Any, schema: "Schema", *, info: Info, scope: DependencyScope) -> Any:
     """Applies a field's custom operation directives in order (§7), each receiving the previous
     one's output -- `@skip`/`@include` never appear here, since `lower_query` already applied them
     structurally rather than carrying them through to execution. `info`/`scope` support a directive
     function's own `Info`/`Depends[T]` parameters (§3c) -- injectable in a custom operation
     directive the same way they are in a resolver.
+
+    The directives themselves come from `info.field_directives` (built for this same field, before
+    the resolver ran) rather than being re-read off the lowered field here, so there is exactly one
+    place that decides what a query's directive arguments mean.
     """
-    for directive in directives:
+    for directive in info.field_directives:
         directive_function = schema.directive_functions_by_name.get(directive.name)
         if directive_function is None:
             raise GraphQLError(
                 f"unknown operation directive '@{directive.name}'",
                 code=ErrorCode.INVALID_DIRECTIVE_LOCATION,
             )
-        directive_info = directive_function.__bramble_directive_info__
-        mapped_arguments = _map_arguments(
-            directive_info.arguments, directive.arguments, auto_camel_case=schema.config.auto_camel_case
-        )
-        for argument in directive_info.arguments:
-            if argument.name in mapped_arguments:
-                mapped_arguments[argument.name] = _coerce_value(argument.type_info, mapped_arguments[argument.name], schema)
-        value = await apply_directive(directive_function, value, mapped_arguments, info=info, scope=scope)
+        value = await apply_directive(directive_function, value, dict(directive.arguments), info=info, scope=scope)
     return value
 
 
@@ -604,6 +640,7 @@ async def _complete_value(
             path=path,
             selections=selections,
             state=state,
+            lowered_field=lowered_field,
         )
         concrete_type = _resolve_concrete_type(type_name, raw_value, state.schema, info)
         return await _execute_selection_set(
@@ -642,7 +679,7 @@ async def _finish_field(
 
     try:
         raw_value = await _apply_custom_directives(
-            lowered_field.directives, raw_value, state.schema, info=info, scope=state.dependency_scope
+            raw_value, state.schema, info=info, scope=state.dependency_scope
         )
     except _PropagateNull:
         raise
@@ -685,6 +722,7 @@ async def _execute_field(
         path=path,
         selections=selections,
         state=state,
+        lowered_field=lowered_field,
         parent_type=concrete_type,
         return_type=field_info.type_info,
     )
@@ -920,6 +958,7 @@ async def _execute_field_incremental(
         path=path,
         selections=selections,
         state=state,
+        lowered_field=lowered_field,
         parent_type=concrete_type,
         return_type=field_info.type_info,
     )
@@ -970,7 +1009,7 @@ async def _finish_field_incremental(
 
     try:
         raw_value = await _apply_custom_directives(
-            lowered_field.directives, raw_value, state.schema, info=info, scope=state.dependency_scope
+            raw_value, state.schema, info=info, scope=state.dependency_scope
         )
     except _PropagateNull:
         raise
@@ -1082,6 +1121,7 @@ async def _complete_value_incremental(
             path=path,
             selections=selections,
             state=state,
+            lowered_field=lowered_field,
         )
         concrete_type = _resolve_concrete_type(type_name, raw_value, state.schema, info)
         return await _execute_selection_set_incremental(
@@ -1135,6 +1175,7 @@ async def _start_streamed_field(
         path=path,
         selections=selections,
         state=state,
+        lowered_field=lowered_field,
         parent_type=concrete_type,
         return_type=field_info.type_info,
     )
@@ -1582,17 +1623,22 @@ async def _prepare_operation(
 
     # An already-parsed document (an APQ replay) skips both parse and validate -- it was validated
     # when it was registered. `on_parse`/`on_validate` still fire around the steps that *do* run, so
-    # an extension sees an honest picture of what happened rather than a phantom span.
+    # an extension sees an honest picture of what happened rather than a phantom span -- which is
+    # also why `on_validate` is skipped outright, rather than wrapped around nothing, when
+    # `SchemaConfig(validate_queries=False)` has turned validation off.
     if document is None:
         assert query is not None
+        validate = schema.config.validate_queries
         if runner is not None:
             async with runner.hook("on_parse"):
                 document = parse_query(query)
-            async with runner.hook("on_validate"):
-                validate_document(document, schema._compiled, operation_name)
+            if validate:
+                async with runner.hook("on_validate"):
+                    validate_document(document, schema._compiled, operation_name)
         else:
             document = parse_query(query)
-            validate_document(document, schema._compiled, operation_name)
+            if validate:
+                validate_document(document, schema._compiled, operation_name)
 
     operation_type, fields = lower_document(
         document, variable_values=variable_values, operation_name=operation_name
@@ -2015,6 +2061,7 @@ async def subscribe_async(
             path=field_path,
             selections=merged_selections,
             state=setup_state,
+            lowered_field=primary,
             parent_type=root_type,
             return_type=field_info.type_info,
         )

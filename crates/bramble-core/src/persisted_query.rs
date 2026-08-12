@@ -92,11 +92,17 @@ pub fn sha256_hex(text: &str) -> String {
 /// retry, so client interop depends on it being exact, not paraphrased). A hash-plus-query
 /// request is verified against the claimed hash (guards the cache's content-addressing guarantee
 /// against a mismatched/corrupted hash), then parsed, validated, and cached.
+///
+/// `validate` is the schema-wide `SchemaConfig(validate_queries=...)` switch, threaded down to here
+/// so the opt-out means the same thing on both request paths: registering a persisted query is the
+/// one place validation would otherwise still run for a schema that has turned it off, leaving APQ
+/// clients rejected for queries the plain HTTP path accepts.
 pub fn resolve_persisted_query(
     schema: &CompiledSchema,
     sha256_hash: &str,
     query: Option<&str>,
     operation_name: Option<&str>,
+    validate: bool,
 ) -> GraphQLResult<PersistedQueryOutcome> {
     match query {
         None => {
@@ -119,7 +125,9 @@ pub fn resolve_persisted_query(
             }
 
             let document = crate::parse_document(query_text)?;
-            validate_query(&document, schema, operation_name)?;
+            if validate {
+                validate_query(&document, schema, operation_name)?;
+            }
 
             schema.persisted_query_cache.insert(sha256_hash.to_string(), document);
             Ok(PersistedQueryOutcome::Registered)
@@ -197,7 +205,7 @@ mod tests {
         // Apollo Client's APQ link matches this literal string to trigger its resend-with-query
         // retry. Paraphrasing it breaks interop with every such client.
         let error =
-            resolve_persisted_query(&schema(), &sha256_hex(QUERY), None, None).expect_err("a hash-only miss must error");
+            resolve_persisted_query(&schema(), &sha256_hex(QUERY), None, None, true).expect_err("a hash-only miss must error");
         assert_eq!(error.message, "PersistedQueryNotFound");
         assert_eq!(error.extensions.code, ErrorCode::PersistedQueryNotFound);
     }
@@ -208,11 +216,11 @@ mod tests {
         let hash = sha256_hex(QUERY);
 
         assert_eq!(
-            resolve_persisted_query(&schema, &hash, Some(QUERY), None).unwrap(),
+            resolve_persisted_query(&schema, &hash, Some(QUERY), None, true).unwrap(),
             PersistedQueryOutcome::Registered
         );
         assert_eq!(
-            resolve_persisted_query(&schema, &hash, None, None).unwrap(),
+            resolve_persisted_query(&schema, &hash, None, None, true).unwrap(),
             PersistedQueryOutcome::CacheHit
         );
     }
@@ -223,7 +231,7 @@ mod tests {
         let wrong_hash = "0".repeat(64);
 
         let error =
-            resolve_persisted_query(&schema, &wrong_hash, Some(QUERY), None).expect_err("a mismatched hash must error");
+            resolve_persisted_query(&schema, &wrong_hash, Some(QUERY), None, true).expect_err("a mismatched hash must error");
         assert_eq!(error.extensions.code, ErrorCode::PersistedQueryMismatch);
         // The content-addressing guarantee: nothing was stored under the claimed hash.
         assert!(schema.persisted_query_cache.get(&wrong_hash).is_none());
@@ -235,7 +243,7 @@ mod tests {
         let bad = "query { doesNotExist }";
         let hash = sha256_hex(bad);
 
-        assert!(resolve_persisted_query(&schema, &hash, Some(bad), None).is_err());
+        assert!(resolve_persisted_query(&schema, &hash, Some(bad), None, true).is_err());
         assert!(
             schema.persisted_query_cache.get(&hash).is_none(),
             "a document that failed validation must never become replayable by hash"
@@ -248,7 +256,7 @@ mod tests {
         let bad = "query { greet";
         let hash = sha256_hex(bad);
 
-        assert!(resolve_persisted_query(&schema, &hash, Some(bad), None).is_err());
+        assert!(resolve_persisted_query(&schema, &hash, Some(bad), None, true).is_err());
         assert!(schema.persisted_query_cache.get(&hash).is_none());
     }
 
@@ -256,11 +264,11 @@ mod tests {
     fn each_schema_gets_its_own_cache() {
         let first = schema();
         let hash = sha256_hex(QUERY);
-        resolve_persisted_query(&first, &hash, Some(QUERY), None).unwrap();
+        resolve_persisted_query(&first, &hash, Some(QUERY), None, true).unwrap();
 
         let second = schema();
         assert!(
-            resolve_persisted_query(&second, &hash, None, None).is_err(),
+            resolve_persisted_query(&second, &hash, None, None, true).is_err(),
             "a fresh schema must start with an empty cache"
         );
     }
@@ -269,11 +277,11 @@ mod tests {
     fn flush_empties_the_cache() {
         let schema = schema();
         let hash = sha256_hex(QUERY);
-        resolve_persisted_query(&schema, &hash, Some(QUERY), None).unwrap();
+        resolve_persisted_query(&schema, &hash, Some(QUERY), None, true).unwrap();
 
         schema.persisted_query_cache.flush();
 
-        assert!(resolve_persisted_query(&schema, &hash, None, None).is_err());
+        assert!(resolve_persisted_query(&schema, &hash, None, None, true).is_err());
     }
 
     #[test]

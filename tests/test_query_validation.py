@@ -19,14 +19,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import re
 import subprocess
 import sys
+from collections.abc import AsyncGenerator
 
 import pytest
 
 import bramble
 from bramble.directive import DirectiveLocation, DirectiveValue
+from bramble.schema.config import SchemaConfig
 
 
 @bramble.type
@@ -426,3 +430,77 @@ def test_duplicate_fragment_names_are_rejected_by_the_parser() -> None:
         schema.validate_query("query { ...F } fragment F on Query { tags } fragment F on Query { tags }")
 
     assert excinfo.value.code is bramble.ErrorCode.GRAPHQL_PARSE_FAILED
+
+
+# `SchemaConfig(validate_queries=False)` -- the transitional opt-out. Deliberately tested here,
+# next to what validation itself rejects, so the two stay legible as one behaviour and its switch.
+
+
+def test_validation_can_be_disabled_schema_wide() -> None:
+    schema = _schema(config=SchemaConfig(validate_queries=False))
+
+    assert schema.execute('query { greet(name: "Ada") }') == {"data": {"greet": "Ada"}}
+
+
+def test_a_query_rejected_by_validation_reaches_execution_when_it_is_disabled() -> None:
+    strict = _schema()
+    with pytest.raises(bramble.GraphQLError):
+        strict.execute("query { greet(name: 1) }")
+
+    # Not "it now succeeds": an argument of the wrong type still fails, just as a field error out of
+    # the resolver rather than up front. What the switch buys is *when* and *how* the failure lands,
+    # which is the whole point of turning it on as its own step.
+    loose = _schema(config=SchemaConfig(validate_queries=False))
+    result = loose.execute("query { greet(name: 1) }")
+
+    assert result["data"] == {"greet": 1}
+
+
+def test_an_unknown_field_still_fails_with_validation_disabled() -> None:
+    schema = _schema(config=SchemaConfig(validate_queries=False))
+
+    with pytest.raises(bramble.GraphQLError, match="does not exist"):
+        schema.execute("query { doesNotExist }")
+
+
+def test_validate_query_is_unaffected_by_the_switch() -> None:
+    schema = _schema(config=SchemaConfig(validate_queries=False))
+
+    with pytest.raises(bramble.GraphQLError, match="does not exist"):
+        schema.validate_query("query { doesNotExist }")
+
+
+def test_registering_a_persisted_query_skips_validation_when_it_is_disabled() -> None:
+    query = "query { doesNotExist }"
+    sha256_hash = hashlib.sha256(query.encode()).hexdigest()
+
+    strict = _schema()
+    with pytest.raises(bramble.GraphQLError, match="does not exist"):
+        strict.prepare_persisted_query(sha256_hash, query=query)
+
+    loose = _schema(config=SchemaConfig(validate_queries=False))
+    result = loose.prepare_persisted_query(sha256_hash, query=query)
+
+    assert result.cache_hit is False
+    assert loose.prepare_persisted_query(sha256_hash).cache_hit is True
+
+
+def test_a_subscription_operation_runs_with_validation_disabled() -> None:
+    @bramble.type
+    class Subscription:
+        @bramble.subscription
+        async def counter() -> AsyncGenerator[int, None]:
+            yield 1
+            yield 2
+
+    schema = bramble.Schema(
+        query=Query,
+        subscription=Subscription,
+        types=[Author],
+        config=SchemaConfig(validate_queries=False),
+    )
+
+    async def scenario() -> list[dict[str, object]]:
+        return [response async for response in schema.subscribe_async("subscription { counter }")]
+
+    assert asyncio.run(scenario()) == [{"data": {"counter": 1}}, {"data": {"counter": 2}}]

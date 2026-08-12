@@ -201,14 +201,14 @@ fn bench_end_to_end_without_cache(c: &mut Criterion) {
 fn bench_end_to_end_with_persisted_query_cache_hit(c: &mut Criterion) {
     let schema = sample_schema();
     let sha256_hash = sha256_hex(SAMPLE_QUERY);
-    resolve_persisted_query(&schema, &sha256_hash, Some(SAMPLE_QUERY), None).unwrap();
+    resolve_persisted_query(&schema, &sha256_hash, Some(SAMPLE_QUERY), None, true).unwrap();
 
     let mut variable_values = HashMap::new();
     variable_values.insert("id".to_string(), serde_json::json!("1"));
 
     c.bench_function("end_to_end_with_persisted_query_cache_hit", |b| {
         b.iter(|| {
-            resolve_persisted_query(black_box(&schema), black_box(&sha256_hash), None, None).unwrap();
+            resolve_persisted_query(black_box(&schema), black_box(&sha256_hash), None, None, true).unwrap();
             let document = schema.persisted_query_cache.get(&sha256_hash).unwrap();
             lower_document(&document, black_box(&variable_values), None).unwrap();
         });

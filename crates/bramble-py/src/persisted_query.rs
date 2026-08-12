@@ -77,16 +77,20 @@ pub struct PyPersistedQueryResult {
 ///
 /// On success the cached document is returned alongside the hit/miss flag, so an APQ request can
 /// skip straight to lowering rather than re-parsing text it has already parsed once.
+///
+/// `validate=False` mirrors `SchemaConfig(validate_queries=False)` -- see the core function's own
+/// doc comment for why the switch has to reach this path too.
 #[pyfunction]
-#[pyo3(signature = (sha256_hash, schema, *, query=None, operation_name=None))]
+#[pyo3(signature = (sha256_hash, schema, *, query=None, operation_name=None, validate=true))]
 pub fn resolve_persisted_query(
     py: Python<'_>,
     sha256_hash: &str,
     schema: &PyCompiledSchema,
     query: Option<&str>,
     operation_name: Option<String>,
+    validate: bool,
 ) -> PyResult<PyPersistedQueryResult> {
-    let outcome = core_resolve_persisted_query(&schema.schema, sha256_hash, query, operation_name.as_deref())
+    let outcome = core_resolve_persisted_query(&schema.schema, sha256_hash, query, operation_name.as_deref(), validate)
         .map_err(|error| raise(py, error))?;
 
     // `resolve_persisted_query` has just guaranteed the entry exists (it either hit, or inserted

@@ -27,6 +27,7 @@ from typing import Any
 
 from bramble import _resolver
 from bramble._bramble import (
+    GraphQLTypeInfo,
     ParsedDocument,
     SchemaError,
     compile_schema,
@@ -494,8 +495,71 @@ class Schema:
     def validate_query(self, query: str, *, operation_name: str | None = None) -> None:
         """Validates `query`'s (optionally named) operation against this compiled schema (§7a),
         raising a `bramble.GraphQLError` on the first violation found. Returns `None` if valid.
+
+        Deliberately unaffected by `SchemaConfig(validate_queries=False)`: that switch says "don't
+        validate on the way to executing", whereas calling this *is* the request to validate --
+        which is what makes it the tool for finding what a schema running unvalidated would break
+        on before turning validation back on.
         """
         validate_query(query, self._compiled, operation_name)
+
+    def type_for(self, graphql_type: "GraphQLTypeInfo | str") -> _type | None:
+        """The `@bramble.type`/`interface`/`input`/`enum`-decorated class behind a GraphQL type,
+        named either by a plain type name or by a `GraphQLTypeInfo` -- which is what `Info` carries
+        for the field currently being resolved:
+
+            @bramble.field
+            def something(info: bramble.Info) -> str:
+                returned = info.schema.type_for(info.return_type)
+
+        `NonNull`/`List` wrapping is unwrapped first, so `[Post!]!` resolves to `Post`. Returns
+        `None` for a type this schema has no Python class for: a scalar (whose class is registered
+        via `SchemaConfig(scalar_map=...)`, not walked into the type graph), a union (which is an
+        annotation over member classes rather than a class of its own -- see `union_members_by_name`),
+        or a name this schema doesn't know at all.
+        """
+        if isinstance(graphql_type, str):
+            return self.types_by_name.get(graphql_type)
+
+        type_info: Any = graphql_type
+        while type_info.kind in ("NON_NULL", "LIST"):
+            type_info = type_info.of_type
+        return self.types_by_name.get(type_info.name) if type_info.name is not None else None
+
+    def applied_directives_for_type(self, graphql_type: "_type | GraphQLTypeInfo | str") -> tuple[object, ...]:
+        """The schema-directive instances applied to a type -- `@bramble.type(directives=[...])`'s
+        own arguments, as the live instances, in declaration order.
+
+        Accepts the decorated class itself, a type name, or the `GraphQLTypeInfo` a field's
+        `Info.return_type` carries (resolved through `type_for`). Empty for a type with no applied
+        directives, and for anything `type_for` can't resolve to a class.
+
+        Schema directives carry no execution behaviour of their own (that's what separates them from
+        `bramble.directive`) -- this is the supported way to build that behaviour yourself, in a
+        `SchemaExtension`, without reaching into bramble's internals.
+        """
+        resolved = graphql_type if isinstance(graphql_type, _type) else self.type_for(graphql_type)
+        if resolved is None:
+            return ()
+        return tuple(getattr(resolved, "__bramble_applied_directives__", ()))
+
+    def applied_directives_for_field(self, parent_type: "_type | str", python_name: str) -> tuple[object, ...]:
+        """The schema-directive instances applied to one field -- `bramble.field(directives=[...])`'s
+        own arguments, as the live instances, in declaration order.
+
+        `parent_type` is the class the field is declared on (`Info.parent_type`) or its GraphQL name;
+        `python_name` is the field's Python identifier (`Info.python_name`), not its camelCased
+        GraphQL name -- `Info` carries both, and matching on the Python one keeps this independent of
+        `auto_camel_case`. Inherited fields count: a field an interface declares is readable through
+        any implementor. Empty for an unknown type or field, or one with no applied directives.
+        """
+        resolved = parent_type if isinstance(parent_type, _type) else self.types_by_name.get(parent_type)
+        if resolved is None or not dataclasses.is_dataclass(resolved):
+            return ()
+        for dataclass_field in dataclasses.fields(resolved):
+            if dataclass_field.name == python_name:
+                return tuple(getattr(dataclass_field, "directives", ()))
+        return ()
 
     def resolve_persisted_query(
         self,
@@ -536,7 +600,13 @@ class Schema:
         `execute_incremental`/`subscribe_async` to execute it without parsing or validating the
         query text a second time -- which is the entire point of persisting it.
         """
-        return resolve_persisted_query(sha256_hash, self._compiled, query=query, operation_name=operation_name)
+        return resolve_persisted_query(
+            sha256_hash,
+            self._compiled,
+            query=query,
+            operation_name=operation_name,
+            validate=self.config.validate_queries,
+        )
 
     async def execute_async(
         self,

@@ -61,6 +61,25 @@ class Path:
 
 
 @dataclass(frozen=True, slots=True)
+class FieldDirective:
+    """One custom operation directive written on the field currently being resolved
+    (`Info.field_directives`), with its arguments already coerced -- `@auth(token: $token)` reaches
+    a resolver here as `FieldDirective(name="auth", arguments={"token": "..."})`.
+
+    `arguments` is keyed by the *directive function's own parameter names* (the same names
+    `apply_directive` would bind), not the GraphQL argument names, and each value is coerced through
+    that argument's declared type -- so a custom scalar, enum, or input object arrives as the real
+    Python object rather than the raw literal. The one exception is a directive the schema doesn't
+    declare at all, which can only be reached with `SchemaConfig(validate_queries=False)`: there is
+    no declaration to map or coerce against, so its arguments stay keyed by GraphQL name, exactly as
+    the query wrote them.
+    """
+
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class SelectedField:
     """A read-only view of one of the current field's own sub-selections (`Info.selected_fields`),
     for a resolver that wants to inspect what's being asked of it (e.g. to avoid fetching a column
@@ -124,6 +143,14 @@ class Info(Generic[ContextType, RootValueType]):
     query: str | None
     path: "Path"
     selected_fields: list["SelectedField"]
+    #: The custom operation directives written on this field in the query, in source order, with
+    #: their arguments coerced -- populated *before* the resolver runs, unlike the directives'
+    #: own functions, which only ever see the value the resolver already returned (§7). That
+    #: ordering is the point: a directive carrying request context (`@auth(token: ...)`) has to be
+    #: readable while there is still a fetch to influence. `@skip`/`@include` never appear (they
+    #: are applied structurally during lowering, so a skipped field is simply absent), and neither
+    #: do `@defer`/`@stream` (see `Info.path`/the incremental-delivery docs for those).
+    field_directives: tuple["FieldDirective", ...]
     schema: "Schema"
 
 

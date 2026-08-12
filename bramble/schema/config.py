@@ -59,6 +59,9 @@ class SchemaConfig:
             camelCase rendering of its Python identifier (`post_id` -> `postId`). Default `True`.
         batching_config: opt in to executing a JSON array of operations in one HTTP request.
             `None` (the default) rejects batched requests.
+        validate_queries: whether every incoming query is validated against the schema before it
+            executes. Default `True`, and it should stay that way -- see the attribute's own note
+            below for what turning it off actually costs.
     """
 
     scalar_map: dict[Any, ScalarDefinition] = dataclasses.field(default_factory=dict)
@@ -74,6 +77,16 @@ class SchemaConfig:
     # `False` to keep the raw identifier as the GraphQL-facing name instead.
     auto_camel_case: bool = True
     batching_config: BatchingConfig | None = None
+    # Transitional escape hatch, not a performance knob: validation is what turns a malformed or
+    # schema-violating query into one clear error before any resolver runs. With it off, the same
+    # query still fails -- just later, deeper, and as whatever the executor happens to raise when it
+    # reaches an unknown field, a missing required argument, or an argument of the wrong type. Its
+    # one legitimate use is porting a schema that ran unvalidated elsewhere (Strawberry's
+    # `DisableValidation`, say): keep the existing behavior on cutover day, then turn validation on
+    # as its own change, with its own way to find what it surfaces. Applies to `execute_async`/
+    # `execute_incremental`/`subscribe_async` and to registering an Automatic Persisted Query;
+    # `Schema.validate_query()` always validates, since asking for it *is* the point of that call.
+    validate_queries: bool = True
 
     def __post_init__(self) -> None:
         if not issubclass(self.info_class, Info):

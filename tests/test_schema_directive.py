@@ -282,3 +282,111 @@ def test_non_directive_objects_in_scalar_directives_are_ignored() -> None:
     schema = bramble.Schema(query=Query, config=config)
 
     assert schema.execute("query { data }") == {"data": {"data": b"hi"}}
+
+
+# Reading applied directives back at execution time. A schema directive carries no behaviour of its
+# own, so anything that wants one to *do* something (an authorisation marker consulted per field,
+# say) has to look it up while a request is running -- these three accessors are what make that a
+# supported thing to do rather than a reach into `__bramble_applied_directives__`.
+
+
+@bramble.schema_directive(locations=[Location.OBJECT, Location.INTERFACE, Location.FIELD_DEFINITION])
+class Perspective:
+    scope: str
+
+
+@bramble.interface(directives=[Perspective(scope="node")])
+class _Node:
+    id: str
+
+
+@bramble.type(directives=[Perspective(scope="account")])
+class _Account(_Node):
+    name: str = bramble.field(directives=[Perspective(scope="account-name")])
+
+
+@bramble.type
+class _DirectiveReadingQuery:
+    @bramble.field(directives=[Perspective(scope="query-account")])
+    def account() -> _Account:
+        return _Account(id="1", name="Ada")
+
+    @bramble.field
+    def accounts() -> list[_Account]:
+        return [_Account(id="1", name="Ada")]
+
+    undecorated: str = "plain"
+
+
+def _directive_reading_schema() -> bramble.Schema:
+    return bramble.Schema(query=_DirectiveReadingQuery, types=[_Account, _Node])
+
+
+def test_applied_directives_for_type_reads_a_types_own_directives() -> None:
+    schema = _directive_reading_schema()
+
+    assert schema.applied_directives_for_type(_Account) == (Perspective(scope="account"),)
+    assert schema.applied_directives_for_type("_Account") == (Perspective(scope="account"),)
+    assert schema.applied_directives_for_type("_Node") == (Perspective(scope="node"),)
+
+
+def test_applied_directives_for_field_reads_one_fields_directives() -> None:
+    schema = _directive_reading_schema()
+
+    assert schema.applied_directives_for_field(_Account, "name") == (Perspective(scope="account-name"),)
+    assert schema.applied_directives_for_field("_DirectiveReadingQuery", "account") == (
+        Perspective(scope="query-account"),
+    )
+    assert schema.applied_directives_for_field(_DirectiveReadingQuery, "undecorated") == ()
+
+
+def test_type_for_unwraps_non_null_and_list_wrappers() -> None:
+    schema = _directive_reading_schema()
+    field_types = {
+        field_info.name: field_info.type_info
+        for field_info in _DirectiveReadingQuery.__bramble_type_info__.fields
+    }
+
+    assert schema.type_for(field_types["account"]) is _Account  # _Account!
+    assert schema.type_for(field_types["accounts"]) is _Account  # [_Account!]!
+    assert schema.type_for(field_types["undecorated"]) is None  # String!, a scalar
+    assert schema.type_for("_Account") is _Account
+
+
+def test_unknown_types_and_fields_read_back_as_empty() -> None:
+    schema = _directive_reading_schema()
+
+    assert schema.type_for("NoSuchType") is None
+    assert schema.applied_directives_for_type("NoSuchType") == ()
+    assert schema.applied_directives_for_field("NoSuchType", "whatever") == ()
+    assert schema.applied_directives_for_field(_Account, "noSuchField") == ()
+
+
+def test_a_resolver_can_read_its_own_and_its_return_types_directives() -> None:
+    """The lookup jaldis' `SchemaDirectivesExtension` is built on: from `Info` alone, reach both the
+    directives on the field being resolved and those on the type it returns.
+    """
+    seen: dict[str, tuple[object, ...]] = {}
+
+    @bramble.type
+    class Query:
+        @bramble.field(directives=[Perspective(scope="query-account")])
+        def account(info: bramble.Info) -> _Account:
+            seen["field"] = info.schema.applied_directives_for_field(info.parent_type, info.python_name)
+            seen["return_type"] = info.schema.applied_directives_for_type(info.return_type)
+            return _Account(id="1", name="Ada")
+
+    schema = bramble.Schema(query=Query, types=[_Account, _Node])
+
+    assert schema.execute("{ account { id } }") == {"data": {"account": {"id": "1"}}}
+    assert seen == {
+        "field": (Perspective(scope="query-account"),),
+        "return_type": (Perspective(scope="account"),),
+    }
+
+
+def test_an_inherited_interface_field_is_readable_through_its_implementor() -> None:
+    schema = _directive_reading_schema()
+
+    assert schema.applied_directives_for_field(_Account, "id") == ()
+    assert schema.applied_directives_for_type(_Node) == (Perspective(scope="node"),)

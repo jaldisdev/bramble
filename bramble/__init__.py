@@ -26,7 +26,7 @@ from bramble._lazy import LazyType, lazy  # noqa: F401
 from bramble._maybe import Maybe, Some  # noqa: F401
 from bramble._permission import BasePermission  # noqa: F401
 from bramble._private import Private  # noqa: F401
-from bramble._resolver import Argument, Depends, Info, Parent, Streamable, argument  # noqa: F401
+from bramble._resolver import Argument, Depends, FieldDirective, Info, Parent, Streamable, argument  # noqa: F401
 from bramble._scalar import ID, ScalarDefinition, Upload, UploadDefinition, scalar  # noqa: F401
 from bramble._schema import Schema  # noqa: F401
 from bramble._type import Field, asdict, cast, field, input, interface, mutation, subscription, type  # noqa: F401
