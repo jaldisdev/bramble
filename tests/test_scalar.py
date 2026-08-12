@@ -30,6 +30,7 @@ import pytest
 
 import bramble
 from bramble.schema.config import SchemaConfig
+from bramble.schema_directive import Location
 
 Base64 = NewType("Base64", bytes)
 
@@ -461,3 +462,73 @@ def test_registering_one_explicitly_still_wins() -> None:
 
     assert '"""Our own wording"""\nscalar DateTime' in sdl
     assert "Date with time (isoformat)" not in sdl
+
+
+# --- `specified_by_url` reaches the SDL -----------------------------------------------------------
+#
+# The value was stored on `ScalarDefinition` and reported by introspection, but nothing threaded it
+# into SDL rendering -- so a client codegenning from the SDL and one introspecting the live server
+# saw different schemas.
+
+_Spec = NewType("_Spec", str)
+
+_SPEC_URL = "https://ecma-international.org/wp-content/uploads/ECMA-404.pdf"
+
+
+def _spec_schema(**kwargs: object) -> bramble.Schema:
+    definition = bramble.scalar(
+        name="SpecScalar",
+        serialize=str,
+        parse_value=str,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def value() -> _Spec: ...
+
+    return bramble.Schema(query=Query, config=SchemaConfig(scalar_map={_Spec: definition}))
+
+
+def test_specified_by_url_renders_as_a_directive() -> None:
+    sdl = str(_spec_schema(specified_by_url=_SPEC_URL))
+
+    assert f'scalar SpecScalar @specifiedBy(url: "{_SPEC_URL}")' in sdl
+
+
+def test_a_scalar_without_one_renders_no_directive() -> None:
+    sdl = str(_spec_schema())
+
+    assert "scalar SpecScalar\n" in sdl or sdl.rstrip().endswith("scalar SpecScalar")
+    assert "@specifiedBy" not in sdl
+
+
+def test_the_sdl_and_introspection_agree() -> None:
+    """The disagreement was the reason this counted as a bug rather than a gap."""
+    schema = _spec_schema(specified_by_url=_SPEC_URL)
+
+    result = schema.execute(
+        '{ __type(name: "SpecScalar") { specifiedByURL } }'
+    )
+
+    assert result["data"]["__type"]["specifiedByURL"] == _SPEC_URL
+    assert _SPEC_URL in str(schema)
+
+
+def test_it_leads_any_applied_directives() -> None:
+    """A stable position keeps SDL output reproducible."""
+
+    @bramble.schema_directive(locations=[Location.SCALAR])
+    class Marker:
+        pass
+
+    sdl = str(_spec_schema(specified_by_url=_SPEC_URL, directives=[Marker()]))
+
+    assert f'scalar SpecScalar @specifiedBy(url: "{_SPEC_URL}") @marker' in sdl
+
+
+def test_a_url_needing_escaping_is_rendered_as_a_valid_literal() -> None:
+    sdl = str(_spec_schema(specified_by_url='https://example.test/a"b'))
+
+    assert r'@specifiedBy(url: "https://example.test/a\"b")' in sdl

@@ -268,6 +268,12 @@ pub struct CompiledSchema {
     /// `scalar_applied_directives` (no other Rust-side IR to carry it on). Absent for a scalar
     /// with no description, not an empty string.
     pub scalar_descriptions: HashMap<String, String>,
+    /// A registered scalar's own `specified_by_url=`, keyed by its GraphQL name -- rendered as
+    /// `@specifiedBy(url: "...")`. Carried separately from `scalar_applied_directives` because it
+    /// is not an *applied* directive the caller wrote: it is a scalar attribute the spec gives a
+    /// directive spelling to, and introspection reports it through `__Type.specifiedByURL` rather
+    /// than through the applied-directive list.
+    pub scalar_specified_by_urls: HashMap<String, String>,
     /// `SchemaConfig(auto_camel_case=...)` (default `true`): whether a field/argument with no
     /// explicit `name=` override defaults to a camelCase rendering of its Python identifier
     /// (`post_id` -> `postId`) or the identifier as-is.

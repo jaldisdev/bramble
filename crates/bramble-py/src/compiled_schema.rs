@@ -45,7 +45,7 @@ pub struct PyCompiledSchema {
 /// `definition` fields), so this is just re-keying already-computed data by name, not re-deriving
 /// anything from the Python classes themselves.
 #[pyfunction]
-#[pyo3(signature = (*, query_type_name, mutation_type_name=None, subscription_type_name=None, types, unions, directives, schema_directives, scalar_names, scalar_directives=Vec::new(), scalar_descriptions=Vec::new(), auto_camel_case=true, schema_applied_directives=None))]
+#[pyo3(signature = (*, query_type_name, mutation_type_name=None, subscription_type_name=None, types, unions, directives, schema_directives, scalar_names, scalar_directives=Vec::new(), scalar_descriptions=Vec::new(), scalar_specified_by_urls=Vec::new(), auto_camel_case=true, schema_applied_directives=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn compile_schema(
     query_type_name: String,
@@ -58,6 +58,7 @@ pub fn compile_schema(
     scalar_names: Vec<String>,
     scalar_directives: Vec<(String, Bound<'_, PyAny>)>,
     scalar_descriptions: Vec<(String, Option<String>)>,
+    scalar_specified_by_urls: Vec<(String, Option<String>)>,
     auto_camel_case: bool,
     schema_applied_directives: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyCompiledSchema> {
@@ -93,6 +94,11 @@ pub fn compile_schema(
     let scalar_descriptions = scalar_descriptions
         .into_iter()
         .filter_map(|(name, description)| description.map(|description| (name, description)))
+        .collect::<HashMap<_, _>>();
+
+    let scalar_specified_by_urls = scalar_specified_by_urls
+        .into_iter()
+        .filter_map(|(name, url)| url.map(|url| (name, url)))
         .collect::<HashMap<_, _>>();
 
     let schema_applied_directives = match &schema_applied_directives {
@@ -135,6 +141,7 @@ pub fn compile_schema(
         scalar_names,
         scalar_applied_directives,
         scalar_descriptions,
+        scalar_specified_by_urls,
         auto_camel_case,
         persisted_query_cache: PersistedQueryCache::new(),
     };

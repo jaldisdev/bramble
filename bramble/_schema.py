@@ -511,6 +511,10 @@ class Schema:
             (_scalar_name(python_type, scalar_definition), scalar_definition.description)
             for python_type, scalar_definition in self.scalars_by_python_type.items()
         ]
+        scalar_specified_by_urls = [
+            (_scalar_name(python_type, scalar_definition), scalar_definition.specified_by_url)
+            for python_type, scalar_definition in self.scalars_by_python_type.items()
+        ]
 
         self._compiled = compile_schema(
             query_type_name=query.__bramble_type_info__.name,
@@ -525,6 +529,7 @@ class Schema:
             scalar_names=scalar_names,
             scalar_directives=scalar_directives,
             scalar_descriptions=scalar_descriptions,
+            scalar_specified_by_urls=scalar_specified_by_urls,
             auto_camel_case=self.config.auto_camel_case,
             schema_applied_directives=list(self.schema_directives),
         )

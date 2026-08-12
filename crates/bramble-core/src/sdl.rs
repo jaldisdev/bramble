@@ -207,10 +207,25 @@ fn render_union(union_def: &UnionDefinition) -> String {
     format!("union {} = {}", union_def.name, union_def.member_names.join(" | "))
 }
 
-fn render_scalar(name: &str, description: Option<&String>, applied_directives: &[AppliedDirective]) -> String {
+fn render_scalar(
+    name: &str,
+    description: Option<&String>,
+    specified_by_url: Option<&String>,
+    applied_directives: &[AppliedDirective],
+) -> String {
     let description = description.cloned();
     let mut out = render_description(&description, "");
-    out.push_str(&format!("scalar {name}{}", render_applied_directives(applied_directives)));
+    // `@specifiedBy` leads, ahead of anything the caller applied: it belongs to the scalar's own
+    // definition rather than being one of its applied directives, and a stable position keeps SDL
+    // output reproducible.
+    let specified_by = match specified_by_url {
+        Some(url) => format!(" @specifiedBy(url: {})", render_json_value(&serde_json::Value::String(url.clone()))),
+        None => String::new(),
+    };
+    out.push_str(&format!(
+        "scalar {name}{specified_by}{}",
+        render_applied_directives(applied_directives)
+    ));
     out
 }
 
@@ -336,7 +351,8 @@ pub fn render_sdl(schema: &CompiledSchema) -> String {
     for name in scalar_names {
         let applied_directives = schema.scalar_applied_directives.get(name).map(Vec::as_slice).unwrap_or(&[]);
         let description = schema.scalar_descriptions.get(name);
-        sections.push(render_scalar(name, description, applied_directives));
+        let specified_by_url = schema.scalar_specified_by_urls.get(name);
+        sections.push(render_scalar(name, description, specified_by_url, applied_directives));
     }
 
     let mut operation_directive_names: Vec<&String> = schema.operation_directives.keys().collect();
