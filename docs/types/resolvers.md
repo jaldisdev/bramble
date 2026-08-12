@@ -62,8 +62,14 @@ class Info:
     query: str | None                     # the raw query source text
     path: Path                            # this field's position in the response
     selected_fields: list[SelectedField]  # this field's own child selection
+    field_directives: tuple[FieldDirective, ...]  # operation directives written on this field
     schema: Schema                        # the schema currently executing
 ```
+
+`parent_type`, `return_type`, and `operation` describe the field being
+resolved; `field_directives` carries the operation directives the query
+wrote on it, readable *before* the resolver runs -- see
+[Operation directives](operation-directives.md#reading-a-fields-directives-before-it-resolves).
 
 `info.context` is the usual place to reach request-scoped state -- a
 database connection, the authenticated user, and so on:

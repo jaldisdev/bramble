@@ -72,3 +72,49 @@ doesn't include is a validation error.
 
 Multiple directives on the same field (`@repeat(times: 2) @shout`) apply in
 sequence -- each one's result feeds into the next.
+
+## Reading a field's directives before it resolves
+
+A directive function transforms a value the resolver has already produced.
+That is the wrong moment for a directive whose job is to *influence* the
+fetch -- one carrying an auth token, a content language, a tenant. For
+those, read `Info.field_directives` instead: the directives written on the
+field currently being resolved, available before the resolver runs.
+
+```python
+@bramble.directive(locations=[DirectiveLocation.FIELD])
+def in_context(value: DirectiveValue[Page], language: str) -> Page:
+    return value  # nothing to do after the fact; the work happens below
+
+@bramble.field
+def page(info: bramble.Info, slug: str) -> Page:
+    language = "en"
+    for directive in info.field_directives:
+        if directive.name == "inContext":
+            language = directive.arguments["language"]
+    return load_page(slug, language=language)
+```
+
+Each entry is a `bramble.FieldDirective` with `.name` (the GraphQL
+directive name) and `.arguments`, keyed by the directive function's own
+parameter names and coerced through their declared types -- so an enum
+arrives as the Python member, an input object as a real instance. The
+tuple is in the order the query wrote them, and it is empty for a field
+with no directives.
+
+`@skip`/`@include` never appear: they are applied structurally while the
+query is lowered, so a skipped field is simply absent. Neither do
+`@defer`/`@stream`.
+
+The same attribute is available from a
+[schema extension](../guides/extensions.md)'s `resolve` hook, which is
+where this belongs when several fields need the same treatment:
+
+```python
+class LanguageExtension(bramble.SchemaExtension):
+    def resolve(self, next_, source, info, **kwargs):
+        for directive in info.field_directives:
+            if directive.name == "inContext":
+                info.context.language = directive.arguments["language"]
+        return next_(source, info, **kwargs)
+```

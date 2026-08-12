@@ -20,7 +20,7 @@ app = Flask(__name__)
 app.register_blueprint(graphql_view(schema, path="/graphql"))
 ```
 
-`graphql_view(schema, *, path="/graphql", multipart_uploads_enabled=True)`
+`graphql_view(schema, *, path="/graphql", multipart_uploads_enabled=True, graphql_ide=True)`
 returns a `Blueprint` registering both `GET` and `POST` at `path`. Flask
 2.0+ runs an `async def` view function itself (via `asgiref`, pulled in by
 bramble's own `flask` extra), so resolvers can be async even though Flask

@@ -18,7 +18,7 @@ app = FastAPI()
 app.include_router(GraphQLRouter(schema, path="/graphql"))
 ```
 
-`GraphQLRouter(schema, *, path="/", multipart_uploads_enabled=True)`
+`GraphQLRouter(schema, *, path="/", multipart_uploads_enabled=True, graphql_ide=True)`
 registers both the HTTP route (`GET`/`POST`) and the WebSocket route at
 `path`.
 

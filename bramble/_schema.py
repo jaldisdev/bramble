@@ -350,7 +350,9 @@ class Schema:
             types: extra types to include even when no field's return type or resolver argument
                 reaches them -- most often an interface implementor that is only ever returned as
                 the interface.
-            extensions: reserved; currently rejected (there are no lifecycle hooks for it yet).
+            extensions: `bramble.SchemaExtension` subclasses (or instances) with lifecycle hooks
+                around parsing, validation, execution, and each field's resolution -- see
+                `docs/guides/extensions.md`.
             config: a `SchemaConfig` controlling naming, custom scalars, and batching.
             default_context_factory: called with no arguments to produce `info.context` for any
                 execution that doesn't pass `context=` explicitly. (Deliberately *not* named

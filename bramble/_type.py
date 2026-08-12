@@ -171,7 +171,8 @@ def field(
         metadata: an arbitrary mapping stored on the underlying `dataclasses.Field`, for your own
             tooling. bramble never reads it.
         directives: applied schema-directive instances, checked against `FIELD_DEFINITION`.
-        extensions: reserved; currently rejected (there is no execution hook point for it yet).
+        extensions: `bramble.FieldExtension` instances (or classes, instantiated for you) wrapping
+            this field's resolution -- see `docs/guides/extensions.md`.
         default / default_factory: a default for a data field, as on any dataclass. Mutually
             exclusive with each other, and with `resolver`.
 

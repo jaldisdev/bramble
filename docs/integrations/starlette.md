@@ -21,7 +21,7 @@ app = Starlette(routes=[
 ])
 ```
 
-`GraphQL(schema, *, multipart_uploads_enabled=True)` serves:
+`GraphQL(schema, *, multipart_uploads_enabled=True, graphql_ide=True)` serves:
 
 - `GET /graphql` -- executes a query from `?query=...` (and `?variables=`/
   `?operationName=`), or serves the GraphiQL IDE if `query` is absent and

@@ -23,8 +23,9 @@ pip install "bramble[fastapi]"
 
 Every integration accepts a `multipart_uploads_enabled: bool = True`
 constructor option (see [File upload](../guides/file-upload.md)), serves a
-GraphiQL IDE on a plain browser `GET` request with no `query` parameter,
-and supports [query batching](../guides/query-batching.md) when
+GraphiQL IDE on a plain browser `GET` request with no `query` parameter
+unless you pass `graphql_ide=False`, and supports
+[query batching](../guides/query-batching.md) when
 `SchemaConfig.batching_config` is set.
 
 ## Which one to pick

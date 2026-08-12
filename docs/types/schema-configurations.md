@@ -56,3 +56,31 @@ response = client.post(
 A batch request exceeding `max_operations`, or any batch request at all
 when `batching_config` is unset, is rejected with an HTTP 400. See
 [Query batching](../guides/query-batching.md).
+
+## `validate_queries`
+
+Default `True`: every incoming query is validated against the schema before
+it executes. **Leave it that way.** Validation is what turns a malformed or
+schema-violating query into one clear error before any resolver runs.
+
+`validate_queries=False` is a transitional escape hatch, not a performance
+knob. It exists for one situation: porting a schema that ran unvalidated
+somewhere else (Strawberry's `DisableValidation`, say), where turning
+validation on at the same moment as the port would mean two behavior
+changes landing together with no way to tell which one broke a client.
+
+```python
+# Temporary. Turn this back on as its own change, with its own rollout.
+schema = bramble.Schema(query=Query, config=SchemaConfig(validate_queries=False))
+```
+
+With it off, an invalid query does not become a valid one -- it fails
+later, deeper, and less clearly, as whatever the executor raises when it
+reaches an unknown field, a missing required argument, or an argument of
+the wrong type. The switch covers `execute_async`, `execute_incremental`,
+`subscribe_async`, and registering an Automatic Persisted Query.
+
+`Schema.validate_query(query)` is deliberately unaffected: calling it *is*
+the request to validate. That makes it the tool for the way back -- replay
+your captured traffic through it, fix what it reports, then drop the
+config flag.

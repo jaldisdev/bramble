@@ -28,7 +28,7 @@ Serves the same request shape as every other integration: `GET`/`POST`
 HTTP at whatever path it's mounted under, plus WebSocket
 `graphql-transport-ws` subscriptions on that same path -- see
 [Starlette](starlette.md) for the full request-shape reference.
-`GraphQL(schema, *, multipart_uploads_enabled=True)`.
+`GraphQL(schema, *, multipart_uploads_enabled=True, graphql_ide=True)`.
 
 ## Context
 
