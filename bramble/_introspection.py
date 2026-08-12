@@ -352,6 +352,8 @@ class __Type:
                 name=_effective_name(field_info, info.schema),
                 description=field_info.description,
                 type_ref=_ref_from_type_info(field_info.type_info, info.schema),
+                deprecation_reason=field_info.deprecation_reason,
+                default_value=field_info.default_value,
             )
             for field_info in type_class.__bramble_type_info__.fields
         ]

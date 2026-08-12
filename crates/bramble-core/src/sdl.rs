@@ -126,7 +126,7 @@ fn is_reserved_name(name: &str) -> bool {
     name.starts_with("__")
 }
 
-fn render_field(field: &FieldDefinition, auto_camel_case: bool) -> String {
+fn render_field(field: &FieldDefinition, auto_camel_case: bool, is_input: bool) -> String {
     let mut out = String::new();
     out.push_str(&render_description(&field.description, "  "));
     out.push_str("  ");
@@ -134,6 +134,11 @@ fn render_field(field: &FieldDefinition, auto_camel_case: bool) -> String {
     out.push_str(&render_arguments(&field.arguments, auto_camel_case));
     out.push_str(": ");
     out.push_str(&field.graphql_type.to_sdl_string());
+    // Gated on `is_input`: GraphQL's `FieldDefinition` grammar has no default at all, only
+    // `InputValueDefinition` does. Rendering one on an object field would produce invalid SDL.
+    if is_input && let Some(default) = &field.default_value {
+        out.push_str(&format!(" = {default}"));
+    }
     if let Some(reason) = &field.deprecation_reason {
         out.push_str(&format!(" @deprecated(reason: {reason:?})"));
     }
@@ -191,7 +196,7 @@ fn render_type(type_def: &TypeDefinition, auto_camel_case: bool) -> String {
             if is_reserved_name(&effective_name(&field.name, &field.graphql_name, auto_camel_case)) {
                 continue;
             }
-            out.push_str(&render_field(field, auto_camel_case));
+            out.push_str(&render_field(field, auto_camel_case, type_def.kind == TypeKind::Input));
         }
     }
     out.push('}');
@@ -399,6 +404,7 @@ mod tests {
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
                     description: None,
                     deprecation_reason: None,
+                    default_value: None,
                     has_resolver: true,
                     parent_parameter: None,
                     info_parameter: None,
@@ -492,6 +498,7 @@ mod tests {
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("ID".to_string()))),
                     description: None,
                     deprecation_reason: None,
+                    default_value: None,
                     has_resolver: false,
                     parent_parameter: None,
                     info_parameter: None,
@@ -517,6 +524,7 @@ mod tests {
                         graphql_type: GraphQLType::Named("ID".to_string()),
                         description: None,
                         deprecation_reason: None,
+                        default_value: None,
                         has_resolver: false,
                         parent_parameter: None,
                         info_parameter: None,
@@ -529,6 +537,7 @@ mod tests {
                         graphql_type: GraphQLType::Named("String".to_string()),
                         description: None,
                         deprecation_reason: None,
+                        default_value: None,
                         has_resolver: false,
                         parent_parameter: None,
                         info_parameter: None,
@@ -575,6 +584,7 @@ mod tests {
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
                     description: None,
                     deprecation_reason: None,
+                    default_value: None,
                     has_resolver: true,
                     parent_parameter: None,
                     info_parameter: None,
@@ -621,6 +631,7 @@ mod tests {
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
                     description: None,
                     deprecation_reason: None,
+                    default_value: None,
                     has_resolver: true,
                     parent_parameter: None,
                     info_parameter: None,
@@ -756,6 +767,7 @@ mod tests {
                 graphql_type: GraphQLType::Named("Post".to_string()),
                 description: None,
                 deprecation_reason: None,
+                default_value: None,
                 has_resolver: true,
                 parent_parameter: None,
                 info_parameter: None,

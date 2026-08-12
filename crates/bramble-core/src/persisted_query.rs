@@ -152,6 +152,7 @@ mod tests {
                     graphql_type: GraphQLType::NonNull(Box::new(GraphQLType::Named("String".to_string()))),
                     description: None,
                     deprecation_reason: None,
+                    default_value: None,
                     has_resolver: false,
                     parent_parameter: None,
                     info_parameter: None,

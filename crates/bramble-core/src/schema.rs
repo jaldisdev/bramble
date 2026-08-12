@@ -102,6 +102,12 @@ pub struct FieldDefinition {
     /// `bramble.field(deprecation_reason=...)` -- rendered as `@deprecated(reason: "...")` in SDL
     /// and reported through `__Field.isDeprecated`/`deprecationReason`.
     pub deprecation_reason: Option<String>,
+    /// The field's default rendered as a GraphQL literal, for an **input object** field only --
+    /// object and interface fields have no defaults in GraphQL, so this stays `None` for them and
+    /// is never rendered even if somehow set. Same representation and same reasoning as
+    /// `ArgumentDefinition::default_value`: pre-rendered once on the PyO3 side so SDL and
+    /// introspection cannot disagree, and `None` for a default with no faithful literal spelling.
+    pub default_value: Option<String>,
     pub has_resolver: bool,
     /// The resolver parameter bound to the parent/root value (`Parent[T]`), if any.
     pub parent_parameter: Option<String>,
@@ -381,6 +387,7 @@ mod tests {
             graphql_type,
             description: None,
             deprecation_reason: None,
+            default_value: None,
             has_resolver: false,
             parent_parameter: None,
             info_parameter: None,

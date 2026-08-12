@@ -25,7 +25,7 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
-use crate::lowering::python_to_json_value;
+use crate::lowering::{python_default_to_graphql_literal, python_to_json_value};
 use crate::resolver_binding::bind_resolver_arguments;
 use crate::typing_utils::{find_marker, resolve_graphql_type, seed_lazy_namespace_for_class, unwrap_annotated};
 
@@ -106,6 +106,9 @@ pub struct PyFieldInfo {
     pub type_info: Py<PyGraphQLType>,
     pub description: Option<String>,
     pub deprecation_reason: Option<String>,
+    /// The field's default as a GraphQL literal -- populated for an input object's fields, which
+    /// is the only place GraphQL allows one. `None` otherwise.
+    pub default_value: Option<String>,
     pub is_nullable: bool,
     pub has_resolver: bool,
     pub parent_parameter: Option<String>,
@@ -128,6 +131,7 @@ pub(crate) fn convert_field(py: Python<'_>, field: FieldDefinition) -> PyResult<
         type_info: Py::new(py, convert_graphql_type(py, &field.graphql_type)?)?,
         description: field.description,
         deprecation_reason: field.deprecation_reason,
+        default_value: field.default_value,
         has_resolver: field.has_resolver,
         parent_parameter: field.parent_parameter,
         info_parameter: field.info_parameter,
@@ -319,6 +323,17 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
             .getattr("deprecation_reason")
             .ok()
             .and_then(|value| value.extract().ok());
+        // An input object field's default. Read from `.default` only, never `.default_factory`:
+        // calling a factory at schema-build time to render a literal would run arbitrary user code
+        // for a documentation string, and could differ from what a request actually gets.
+        // `dataclasses.MISSING` means no default, and is not a value any literal should render for.
+        let dataclasses = py.import("dataclasses")?;
+        let missing = dataclasses.getattr("MISSING")?;
+        let default_value = match dataclass_field.getattr("default") {
+            Ok(default) if !default.is(&missing) => python_default_to_graphql_literal(&default)?,
+            _ => None,
+        };
+
         let graphql_type = resolve_graphql_type(py, &typing, &resolved_type)?;
 
         let resolver = dataclass_field
@@ -346,6 +361,7 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
             graphql_type,
             description,
             deprecation_reason,
+            default_value,
             has_resolver,
             parent_parameter,
             info_parameter,

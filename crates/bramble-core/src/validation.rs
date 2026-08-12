@@ -822,6 +822,7 @@ mod tests {
             graphql_type,
             description: None,
             deprecation_reason: None,
+            default_value: None,
             has_resolver: !arguments.is_empty(),
             parent_parameter: None,
             info_parameter: None,

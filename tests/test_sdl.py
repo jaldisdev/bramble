@@ -432,3 +432,44 @@ def test_to_sdl_renders_argument_descriptions_inline() -> None:
             return name
 
     assert 'greet("""Who to greet""" name: String!): String!' in bramble.Schema(query=Query).to_sdl()
+
+
+@bramble.input
+class _DefaultedFilter:
+    limit: int = 10
+    term: str = "all"
+    cursor: str | None = None
+    required: str = bramble.field(description="no default")
+
+
+def test_to_sdl_renders_input_field_defaults() -> None:
+    """The same bug argument defaults had, one type-position over: an input field with a Python
+    default published as `Int!`, which per spec means *required*, while the server treated it as
+    optional.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def search(filter: _DefaultedFilter) -> int:
+            return filter.limit
+
+    sdl = bramble.Schema(query=Query, types=[_DefaultedFilter]).to_sdl()
+
+    assert "limit: Int! = 10" in sdl
+    assert 'term: String! = "all"' in sdl
+    assert "cursor: String = null" in sdl
+    assert "required: String!\n" in sdl, "a field with no default must render none"
+
+
+def test_object_type_fields_never_render_a_default() -> None:
+    # GraphQL's FieldDefinition grammar has no default -- only InputValueDefinition does, so
+    # rendering one on an object field would produce invalid SDL.
+    @bramble.type
+    class Query:
+        greeting: str = bramble.field(default="hi")
+
+    sdl = bramble.Schema(query=Query).to_sdl()
+
+    assert "greeting: String!\n" in sdl
+    assert 'greeting: String! = "hi"' not in sdl

@@ -330,3 +330,23 @@ def test_introspection_reports_no_default_value_for_a_required_argument() -> Non
 
     fields = {field["name"]: field for field in result["data"]["__type"]["fields"]}
     assert fields["greet"]["args"] == [{"name": "name", "defaultValue": None}]
+
+
+@bramble.input
+class _DefaultsFilter:
+    limit: int = 10
+    cursor: str | None = None
+
+
+def test_introspection_reports_input_field_default_values() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def search(filter: _DefaultsFilter) -> int:
+            return filter.limit
+
+    schema = bramble.Schema(query=Query, types=[_DefaultsFilter])
+    result = schema.execute('{ __type(name: "_DefaultsFilter") { inputFields { name defaultValue } } }')
+
+    defaults = {f["name"]: f["defaultValue"] for f in result["data"]["__type"]["inputFields"]}
+    assert defaults == {"limit": "10", "cursor": "null"}
