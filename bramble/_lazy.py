@@ -210,10 +210,18 @@ def namespace_for_class(cls: type) -> dict[str, Any]:
     for base in reversed(cls.__mro__):
         if base is object:
             continue
-        # `base.__dict__` on purpose, not `inspect.get_annotations(base)`: this needs each base's
-        # *own* annotations, and the helper returns the MRO-merged view, which would re-walk
-        # inherited entries once per base.
-        raw_annotations = base.__dict__.get("__annotations__", {})  # noqa: RUF063
+        # `base.__dict__` first, not `inspect.get_annotations(base)`: this wants each base's *own*
+        # annotations, and the helper returns the MRO-merged view, which would re-walk inherited
+        # entries once per base.
+        #
+        # The fallback matters on Python 3.14 (PEP 649): annotations are computed lazily via
+        # `__annotate__`, so a class whose `__annotations__` were assigned dynamically -- which is
+        # exactly what `_ensure_field_annotations` does for every resolver-backed field -- can have
+        # nothing under `__dict__` while `__annotations__` reads back fine. Without this, no lazy
+        # namespace is built for such a class and `get_type_hints` fails on the forward ref. Merging
+        # the MRO view is harmless here: it only ever over-collects, and derived-wins ordering is
+        # preserved by the base-to-derived walk.
+        raw_annotations = base.__dict__.get("__annotations__") or getattr(base, "__annotations__", {})  # noqa: RUF063
         if not raw_annotations:
             continue
         module = sys.modules.get(getattr(base, "__module__", None))

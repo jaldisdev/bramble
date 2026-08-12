@@ -210,3 +210,62 @@ def test_optional_union_field_resolves_to_a_member() -> None:
     assert schema.execute("{ maybeMedia { __typename ... on Video { title } } }") == {
         "data": {"maybeMedia": {"__typename": "Video", "title": "clip"}}
     }
+
+
+# --- Lazy union members -------------------------------------------------------------------------
+
+
+def test_a_union_member_may_be_a_lazy_reference(tmp_path, monkeypatch) -> None:
+    """A union whose members live in another module has to name them lazily, and a genuine import
+    cycle leaves no alternative. Members used to be read verbatim off `get_args`, so such a member
+    arrived as the `Annotated` wrapper and was rejected as not being an object type.
+    """
+    import sys
+    import textwrap
+
+    package = tmp_path / "lazyunion"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "other.py").write_text(
+        textwrap.dedent(
+            """
+            import bramble
+
+            @bramble.type
+            class Video:
+                url: str
+            """
+        )
+    )
+    (package / "main.py").write_text(
+        textwrap.dedent(
+            """
+            from typing import Annotated, Union
+            import bramble
+
+            @bramble.type
+            class Audio:
+                url: str
+
+            Media = Annotated[
+                Union[Audio, Annotated["Video", bramble.lazy(".other")]],
+                bramble.union("Media"),
+            ]
+
+            @bramble.type
+            class Query:
+                @bramble.field
+                def media() -> Media:
+                    return Audio(url="a.mp3")
+            """
+        )
+    )
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in [n for n in sys.modules if n.startswith("lazyunion")]:
+        del sys.modules[name]
+
+    from lazyunion import main
+
+    sdl = bramble.Schema(query=main.Query).to_sdl()
+    assert "union Media = Audio | Video" in sdl

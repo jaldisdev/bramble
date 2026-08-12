@@ -42,7 +42,7 @@ from bramble._execution import execute_incremental as _execute_incremental
 from bramble._execution import subscribe_async as _subscribe_async
 from bramble._extension import SchemaExtension
 from bramble._introspection import INTROSPECTION_TYPES
-from bramble._lazy import LazyType, namespace_for_callable, namespace_for_class
+from bramble._lazy import LazyType, _lazy_reference_marker, namespace_for_callable, namespace_for_class
 from bramble._private import is_private
 from bramble._resolver import Streamable
 from bramble._scalar import ScalarDefinition
@@ -102,11 +102,40 @@ def _union_definition_marker(metadata: Sequence[Any]) -> UnionDefinition | None:
     return None
 
 
+def _unwrap_union_member(member: Any) -> Any:
+    """Resolves one union member that was written as an `Annotated[...]` wrapper.
+
+    A union whose members live in another module has to name them lazily -- that is the whole
+    point of `bramble.lazy`, and a genuine import cycle leaves no alternative:
+
+        MenuLinkable = Annotated[
+            Union[MenuGroup, Annotated["Shortcut", bramble.lazy(".perspective")]],
+            bramble.union("MenuLinkable"),
+        ]
+
+    Members used to be taken verbatim from `get_args`, so such a member arrived as the `Annotated`
+    wrapper itself and was rejected as "not a '@bramble.type'-decorated object type". Resolving the
+    lazy reference here is safe: this only runs while a `Schema()` is being built, by which point
+    the referenced module is importable.
+    """
+    if typing.get_origin(member) is not typing.Annotated:
+        return member
+    inner, *metadata = typing.get_args(member)
+    reference = _lazy_reference_marker(metadata)
+    if reference is not None and isinstance(inner, typing.ForwardRef):
+        return reference.resolve_forward_ref(inner).resolve_type()
+    return inner
+
+
 def _union_member_classes(annotation: Any) -> list[_type]:
     origin = typing.get_origin(annotation)
     if origin is typing.Union or origin is types_module.UnionType:
-        return [member for member in typing.get_args(annotation) if member is not type(None)]
-    return [annotation]
+        return [
+            _unwrap_union_member(member)
+            for member in typing.get_args(annotation)
+            if member is not type(None)
+        ]
+    return [_unwrap_union_member(annotation)]
 
 
 def _register_union(
