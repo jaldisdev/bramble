@@ -33,9 +33,9 @@ from asgiref.sync import iscoroutinefunction
 from channels.layers import get_channel_layer
 from channels.testing import WebsocketCommunicator
 from django.conf import settings
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpRequest
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import RequestFactory
 from django.views.decorators.csrf import csrf_exempt
 
