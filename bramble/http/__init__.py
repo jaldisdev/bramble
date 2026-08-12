@@ -17,5 +17,22 @@
 # limitations under the License.
 #
 
+from bramble.http.async_base_view import AsyncBaseHTTPView  # noqa: F401
+from bramble.http.base import BaseRequestProtocol, BaseView  # noqa: F401
 from bramble.http.exceptions import HTTPException  # noqa: F401
 from bramble.http.types import GraphQLRequestData, HTTPMethod, QueryParams  # noqa: F401
+
+# `AsyncBaseHTTPView`, `BaseView` and `BaseRequestProtocol` are the contract a framework adapter
+# subclasses or satisfies, so they are exported rather than left to a deep import -- matching
+# `bramble.subscriptions`, which already exposes `GraphQLTransportWSHandler` as the hook for a
+# custom transport. Supporting a framework outside the shipped five is meant to be an extension
+# point, not a fork.
+__all__ = [
+    "AsyncBaseHTTPView",
+    "BaseRequestProtocol",
+    "BaseView",
+    "GraphQLRequestData",
+    "HTTPException",
+    "HTTPMethod",
+    "QueryParams",
+]

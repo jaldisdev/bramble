@@ -47,3 +47,33 @@ For local development against any of these, `bramble dev` (see
 GraphiQL and auto-reload with zero setup -- useful even if the target
 production integration is a different framework, since the underlying
 execution behavior is identical either way.
+
+## Writing your own integration
+
+The five above are not a closed set -- the pieces an adapter is built from are
+public API, and `bramble.http` exports them:
+
+```python
+from bramble.http import AsyncBaseHTTPView, BaseRequestProtocol, BaseView
+```
+
+| Export | Role |
+| --- | --- |
+| `AsyncBaseHTTPView` | the async HTTP view to subclass; owns request parsing, execution and result encoding |
+| `BaseView` | the shared, framework-agnostic half (GraphiQL, content negotiation, encoding) |
+| `BaseRequestProtocol` | the structural contract your framework's request object must satisfy |
+
+An adapter's job is to translate between its framework's request/response
+objects and these, and to implement the handful of abstract methods
+`AsyncBaseHTTPView` declares -- reading the body, the query string, and the
+form data. The shipped adapters under `bramble/adapters/` are the worked
+examples; the Django one is the most complete, since it also covers file
+uploads and WebSocket.
+
+Subscriptions have the matching hook: `bramble.subscriptions` exports
+`GraphQLTransportWSHandler`, the transport-agnostic implementation of the
+`graphql-transport-ws` protocol. See [Subscriptions](../general/subscriptions.md).
+
+Because these are exported rather than reached by deep import, they are covered
+by the same compatibility expectations as the rest of the public API -- an
+adapter you maintain outside this repository will not break on a patch release.
