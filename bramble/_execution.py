@@ -611,12 +611,15 @@ def _find_field_info(concrete_type: type, field_name: str, *, auto_camel_case: b
     return None
 
 
-def _build_error(message: str, path: Path, lowered_field: "LoweredField") -> GraphQLError:
+def _build_error(
+    message: str, path: Path, lowered_field: "LoweredField", original_error: BaseException | None = None
+) -> GraphQLError:
     return GraphQLError(
         message,
         code=ErrorCode.FIELD_RESOLUTION_FAILED,
         path=path.as_list(),
         locations=[(lowered_field.line, lowered_field.column)],
+        original_error=original_error,
     )
 
 
@@ -624,13 +627,15 @@ def _error_from_exception(error: Exception, path: Path, lowered_field: "LoweredF
     """A resolver that deliberately raises its own `bramble.GraphQLError` (a custom `code`,
     `extensions`, etc.) keeps all of that -- only `path`/`locations` are overwritten, since the
     resolver has no way to know its own position in the response ahead of time. Any other
-    exception is wrapped generically (`_build_error`), same as an unexpected bug in resolver code.
+    exception is wrapped generically (`_build_error`), same as an unexpected bug in resolver code,
+    and rides along as that error's `original_error` so an extension can still branch on what
+    actually failed -- the response body only ever carries the message.
     """
     if isinstance(error, GraphQLError):
         error.path = path.as_list()
         error.locations = [(lowered_field.line, lowered_field.column)]
         return error
-    return _build_error(str(error), path, lowered_field)
+    return _build_error(str(error), path, lowered_field, original_error=error)
 
 
 def _complete_leaf(

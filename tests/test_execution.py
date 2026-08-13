@@ -473,6 +473,92 @@ def test_resolver_raised_graphql_error_keeps_its_own_code_and_extensions() -> No
     assert error["path"] == ["item"]
 
 
+class _PermissionDenied(Exception):
+    """Stands in for an application's own domain exception -- the kind a service layer raises with
+    no knowledge that it is running under GraphQL at all.
+    """
+
+
+def test_a_wrapped_exception_is_reachable_as_original_error() -> None:
+    """What lets an application map failures onto HTTP status codes by exception type, the way it
+    would anywhere else, instead of having to raise transport-shaped errors from domain code.
+    """
+    seen: list[BaseException | None] = []
+
+    class Recorder(bramble.SchemaExtension):
+        def on_operation(self):
+            yield
+            seen.extend(error.original_error for error in self.execution_context.errors)
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def item() -> str | None:
+            raise _PermissionDenied("not yours")
+
+    result = bramble.Schema(query=Query, extensions=[Recorder]).execute("query { item }")
+
+    assert result["data"] == {"item": None}
+    assert isinstance(seen[0], _PermissionDenied)
+    assert str(seen[0]) == "not yours"
+
+
+def test_original_error_is_never_serialized_into_the_response() -> None:
+    """It is a Python-side handle, not part of the error shape -- an internal exception's type and
+    repr stay off the wire.
+    """
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def item() -> str | None:
+            raise _PermissionDenied("not yours")
+
+    error = bramble.Schema(query=Query).execute("query { item }")["errors"][0]
+
+    assert set(error) == {"message", "locations", "path", "extensions"}
+    assert error["extensions"] == {"code": "FIELD_RESOLUTION_FAILED"}
+
+
+def test_a_deliberately_raised_graphql_error_has_no_original_error() -> None:
+    seen: list[BaseException | None] = []
+
+    class Recorder(bramble.SchemaExtension):
+        def on_operation(self):
+            yield
+            seen.extend(error.original_error for error in self.execution_context.errors)
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def item() -> str | None:
+            raise bramble.GraphQLError("explicit", code=bramble.ErrorCode.UNKNOWN_FIELD)
+
+    bramble.Schema(query=Query, extensions=[Recorder]).execute("query { item }")
+
+    assert seen == [None]
+
+
+def test_an_error_bramble_raised_itself_has_no_original_error() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def item() -> str:
+            return None  # type: ignore[return-value]
+
+    seen: list[BaseException | None] = []
+
+    class Recorder(bramble.SchemaExtension):
+        def on_operation(self):
+            yield
+            seen.extend(error.original_error for error in self.execution_context.errors)
+
+    result = bramble.Schema(query=Query, extensions=[Recorder]).execute("query { item }")
+
+    assert result["data"] is None
+    assert seen == [None]
+
+
 def test_an_extensions_code_overrides_the_error_code() -> None:
     """`extensions.code` is where the ecosystem looks for a machine-readable code (Apollo populates
     exactly that key), so a caller may publish their own there. The cost is that bramble's own

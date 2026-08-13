@@ -76,6 +76,21 @@ class GraphQLError(_GraphQLError):
     `ErrorCode` is then absent from the response entirely, so anything keying off the standard
     values stops recognising that error; give the application code its own key instead if you want
     both.
+
+    `original_error` is the exception this error was wrapped around: when a resolver raises anything
+    that *isn't* a `GraphQLError`, bramble turns it into a generic field error and keeps the
+    exception here. That is what lets a `SchemaExtension` (or an HTTP layer mapping errors onto
+    status codes) branch on the failure's real type without the domain code having to know anything
+    about GraphQL:
+
+        for error in self.execution_context.errors:
+            if isinstance(error.original_error, PermissionDenied):
+                ...
+
+    It is `None` for an error raised deliberately as a `GraphQLError` -- there is no other exception
+    involved -- and for one bramble raised itself (a validation failure, a non-null violation).
+    Python-side only: it is never serialized into the response, so an internal exception's own
+    message and type stay off the wire unless you put them there.
     """
 
     def __init__(
@@ -86,6 +101,7 @@ class GraphQLError(_GraphQLError):
         locations: list[tuple[int, int]] | None = None,
         path: list[str | int] | None = None,
         extensions: dict[str, Any] | None = None,
+        original_error: BaseException | None = None,
     ) -> None:
         """Arguments:
         message: the human-readable error message.
@@ -94,6 +110,8 @@ class GraphQLError(_GraphQLError):
         path: the response path this error belongs to. Overwritten by the executor.
         extensions: extra keys merged alongside `code` in the response's `extensions` object. A
             `code` key here overrides the `code` argument -- see the class docstring.
+        original_error: the exception this error was wrapped around, if any -- see the class
+            docstring.
         """
         super().__init__(message)
         self.message = message
@@ -101,6 +119,7 @@ class GraphQLError(_GraphQLError):
         self.locations = locations
         self.path = path
         self.extensions = extensions or {}
+        self.original_error = original_error
 
 
 def error_to_dict(error: GraphQLError) -> dict[str, Any]:
