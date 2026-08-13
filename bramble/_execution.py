@@ -712,20 +712,25 @@ def _complete_leaf(
 
 
 @functools.lru_cache(maxsize=4096)
-def _plain_scalar_lookup(
+def _plain_field_target(
     concrete_type: type, field_name: str, auto_camel_case: bool, schema: "Schema"
-) -> "tuple[FieldInfo, str] | None":
-    """`(field_info, scalar type name)` when this field is a plain leaf read, else `None`.
+) -> "tuple[FieldInfo, str, Any, bool] | None":
+    """What a plain field ultimately completes to: `(field_info, kind, payload, direct_scalar)`.
+
+    `kind` is `"scalar"` (payload is the scalar's type name) or `"object"` (payload is the concrete
+    class), found by unwrapping every `NonNull`/`List` wrapper -- so `[[Tag!]!]` and `Tag` reach the
+    same answer and lists need no separate lookup. `direct_scalar` marks the overwhelmingly common
+    shape, an unwrapped scalar leaf, which the caller completes without building a plan at all.
 
     "Plain" means everything the full field pipeline exists to handle is absent: no resolver, no
-    permissions, no field extensions, and a leaf scalar type (an enum or any composite is in
-    `types_by_name`/`union_members_by_name` and so is excluded here). `__typename` falls out
-    naturally, having no `FieldInfo` at all.
+    permissions, no field extensions. Abstract types are excluded because their concrete class is
+    only known once the value is in hand, and enums because their completion goes through
+    `_enum_graphql_name` rather than a scalar's `serialize`.
 
     This is the whole *static* half of the fast-path test and the field lookup it needs, resolved
-    together in one cached call -- deciding eligibility runs per field per request, so it is itself
-    on the hot path. The per-query half (directives, `@defer`/`@stream`, schema-wide resolve
-    extensions) cannot be cached and is checked by the caller.
+    in one cached call -- deciding eligibility runs per field per request, so it is itself on the
+    hot path. The per-query half (directives, `@defer`/`@stream`, fragment type conditions,
+    schema-wide resolve extensions) cannot be cached and is checked by the caller.
     """
     field_info = _find_field_info(concrete_type, field_name, auto_camel_case=auto_camel_case)
     if field_info is None or field_info.has_resolver:
@@ -736,49 +741,61 @@ def _plain_scalar_lookup(
         return None
 
     type_info = field_info.type_info
-    if type_info.kind == "NON_NULL":
-        type_info = type_info.of_type
-    if type_info.kind != "NAMED":
-        return None
-
-    type_name = type_info.name
-    if type_name is None or type_name in schema.types_by_name or type_name in schema.union_members_by_name:
-        return None
-    return field_info, type_name
-
-
-@functools.lru_cache(maxsize=4096)
-def _plain_object_lookup(
-    concrete_type: type, field_name: str, auto_camel_case: bool, schema: "Schema"
-) -> "tuple[FieldInfo, type] | None":
-    """`(field_info, the object class)` when this field is a plain read of a *concrete* object type.
-
-    Concrete is the whole point: for an interface or union the class is only known once the value
-    is in hand, so the selection set that applies to it cannot be planned ahead of execution.
-    Restricting to a plain object type is what makes `_resolve_concrete_type` a pure lookup and
-    `_applicable_selections` a no-op, and so makes an inline plan sound. Lists are excluded too --
-    they still go through `_complete_value`'s item loop.
-    """
-    field_info = _find_field_info(concrete_type, field_name, auto_camel_case=auto_camel_case)
-    if field_info is None or field_info.has_resolver:
-        return None
-    if getattr(concrete_type, "__bramble_permissions__", {}).get(field_info.name):
-        return None
-    if getattr(concrete_type, "__bramble_field_extensions__", {}).get(field_info.name):
-        return None
-
-    type_info = field_info.type_info
-    if type_info.kind == "NON_NULL":
+    wrapped = False
+    while type_info.kind in ("NON_NULL", "LIST"):
+        wrapped = wrapped or type_info.kind == "LIST"
         type_info = type_info.of_type
     if type_info.kind != "NAMED" or type_info.name is None:
         return None
 
-    object_class = schema.types_by_name.get(type_info.name)
-    if object_class is None or object_class.__bramble_type_info__.kind != "type":
+    type_name = type_info.name
+    if type_name in schema.union_members_by_name:
         return None
-    if type_info.name in schema.union_members_by_name:
+
+    named_type = schema.types_by_name.get(type_name)
+    if named_type is None:
+        return field_info, "scalar", type_name, not wrapped
+    if named_type.__bramble_type_info__.kind != "type":
         return None
-    return field_info, object_class
+    return field_info, "object", named_type, False
+
+
+#: Bounds plan construction on a pathological query rather than trusting the schema to be shallow.
+_MAX_INLINE_DEPTH = 8
+
+
+def _inline_step(
+    concrete_type: type,
+    response_key: str,
+    occurrences: Sequence["LoweredField"],
+    auto_camel_case: bool,
+    state: _ExecutionState,
+    depth: int = 0,
+) -> "tuple[Any, ...] | None":
+    """One plan step for this response key, or `None` if it needs the ordinary async path.
+
+    Merged response keys are refused outright: a step walks `primary.selections`, which is only the
+    complete selection set when the key occurs once.
+    """
+    if len(occurrences) != 1:
+        return None
+    primary = occurrences[0]
+    if primary.type_condition is not None or primary.directives or primary.is_deferred or primary.is_streamed:
+        return None
+
+    if primary.field_name == "__typename":
+        return ("typename", response_key, concrete_type.__bramble_type_info__.name)
+
+    target = _plain_field_target(concrete_type, primary.field_name, auto_camel_case, state.schema)
+    if target is None:
+        return None
+
+    field_info, kind, payload, _ = target
+    if kind == "object":
+        payload = _inline_plan(payload, primary.selections, state, depth + 1)
+        if payload is None:
+            return None
+    return ("value", response_key, primary, field_info, kind, payload)
 
 
 def _inline_plan(
@@ -788,81 +805,79 @@ def _inline_plan(
 
     Planned in full before anything runs, so there is never a partially-built result to unwind:
     either the entire subtree is inlinable or the caller uses the ordinary async path for that
-    field. Any construct the plan cannot account for -- a fragment's type condition, a directive,
-    `@defer`/`@stream`, a merged response key, a resolver, permissions, extensions, an abstract
-    type, a list -- makes the whole plan `None` rather than being special-cased.
+    field. Any construct a step cannot account for makes the whole plan `None` rather than being
+    special-cased.
     """
     key = (concrete_type, tuple(selections))
     memoised = state.inline_plans.get(key)
     if memoised is not None:
         return memoised[0]
 
-    plan = _build_inline_plan(concrete_type, selections, state, depth)
+    plan: "list[tuple[Any, ...]] | None"
+    if depth > _MAX_INLINE_DEPTH or state.resolve_extensions:
+        plan = None
+    else:
+        auto_camel_case = state.schema.config.auto_camel_case
+        plan = []
+        for response_key, occurrences in _group_by_response_key(selections).items():
+            step = _inline_step(concrete_type, response_key, occurrences, auto_camel_case, state, depth)
+            if step is None:
+                plan = None
+                break
+            plan.append(step)
+
     state.inline_plans[key] = (plan,)
     return plan
 
 
-#: Bounds plan construction on a pathological query rather than trusting the schema to be shallow.
-_MAX_INLINE_DEPTH = 8
-
-
-def _build_inline_plan(
-    concrete_type: type, selections: Sequence["LoweredField"], state: _ExecutionState, depth: int
-) -> "list[tuple[Any, ...]] | None":
-    if depth > _MAX_INLINE_DEPTH or state.resolve_extensions:
-        return None
-
-    auto_camel_case = state.schema.config.auto_camel_case
-    steps: list[tuple[Any, ...]] = []
-    for response_key, occurrences in _group_by_response_key(selections).items():
-        if len(occurrences) != 1:
-            return None
-        primary = occurrences[0]
-        if primary.type_condition is not None or primary.directives or primary.is_deferred or primary.is_streamed:
-            return None
-
-        if primary.field_name == "__typename":
-            steps.append(("typename", response_key, concrete_type.__bramble_type_info__.name))
-            continue
-
-        scalar = _plain_scalar_lookup(concrete_type, primary.field_name, auto_camel_case, state.schema)
-        if scalar is not None:
-            steps.append(("scalar", response_key, primary, scalar[0], scalar[1]))
-            continue
-
-        composite = _plain_object_lookup(concrete_type, primary.field_name, auto_camel_case, state.schema)
-        if composite is None:
-            return None
-        field_info, object_class = composite
-        sub_plan = _inline_plan(object_class, primary.selections, state, depth + 1)
-        if sub_plan is None:
-            return None
-        steps.append(("object", response_key, primary, field_info, sub_plan))
-    return steps
-
-
-def _inline_object_step(
-    concrete_type: type,
-    primary: "LoweredField",
-    occurrences: Sequence["LoweredField"],
-    auto_camel_case: bool,
+def _inline_complete(
+    type_info: "GraphQLTypeInfo",
+    raw_value: Any,
+    lowered_field: "LoweredField",
+    path: Path,
     state: _ExecutionState,
-) -> "tuple[Any, ...] | None":
-    """A single `("object", ...)` plan step for `primary`, or `None` if it is not inlinable.
+    kind: str,
+    payload: Any,
+) -> Any:
+    """The synchronous counterpart of `_complete_value`, for a value already known to be plain.
 
-    Merged response keys are refused outright: the plan walks `primary.selections`, which is only
-    the complete selection set when this key occurs once.
+    Walks the same `NonNull`/`List` wrappers with the same rules -- a null in a non-null slot
+    records its error and raises `_PropagateNull`, and a list item that propagates leaves `None` in
+    its own position while only a non-null *item* type forces the list itself to propagate. The
+    named type is not re-examined here: `kind`/`payload` were settled when the plan was built.
     """
-    if len(occurrences) != 1:
+    if type_info.kind == "NON_NULL":
+        if raw_value is None:
+            state.errors.append(_build_error("Cannot return null for non-nullable field.", path, lowered_field))
+            raise _PropagateNull
+        return _inline_complete(type_info.of_type, raw_value, lowered_field, path, state, kind, payload)
+
+    if raw_value is None:
         return None
-    composite = _plain_object_lookup(concrete_type, primary.field_name, auto_camel_case, state.schema)
-    if composite is None:
-        return None
-    field_info, object_class = composite
-    sub_plan = _inline_plan(object_class, primary.selections, state)
-    if sub_plan is None:
-        return None
-    return ("object", primary.response_key, primary, field_info, sub_plan)
+
+    if type_info.kind == "LIST":
+        item_type = type_info.of_type
+        item_non_null = item_type.kind == "NON_NULL"
+        results = []
+        propagate: _PropagateNull | None = None
+        for index, item in enumerate(raw_value):
+            try:
+                results.append(
+                    _inline_complete(
+                        item_type, item, lowered_field, Path(key=index, prev=path), state, kind, payload
+                    )
+                )
+            except _PropagateNull as error:
+                if item_non_null:
+                    propagate = propagate or error
+                results.append(None)
+        if propagate is not None:
+            raise propagate
+        return results
+
+    if kind == "scalar":
+        return _complete_leaf(lambda: _serialize_scalar(payload, raw_value, state.schema), path, lowered_field, state)
+    return _execute_inline_plan(payload, raw_value, path, state)
 
 
 def _execute_inline_plan(
@@ -878,98 +893,37 @@ def _execute_inline_plan(
     propagate: _PropagateNull | None = None
 
     for step in steps:
-        kind = step[0]
-        if kind == "typename":
+        if step[0] == "typename":
             result[step[1]] = step[2]
             continue
 
-        response_key, lowered_field, field_info = step[1], step[2], step[3]
+        _, response_key, lowered_field, field_info, kind, payload = step
         field_path = Path(key=response_key, prev=path)
+        is_non_null = field_info.type_info.kind == "NON_NULL"
         try:
-            if kind == "scalar":
-                result[response_key] = _complete_plain_scalar(
-                    field_info=field_info,
-                    lowered_field=lowered_field,
-                    type_name=step[4],
-                    parent_value=parent_value,
-                    path=field_path,
-                    state=state,
-                )
-                continue
-
-            is_non_null = field_info.type_info.kind == "NON_NULL"
             try:
                 raw_value = state.schema.config.default_resolver(parent_value, field_info.name)
             except Exception as error:  # deliberately broad: any read failure becomes a field error, per §8.
                 state.errors.append(_error_from_exception(error, field_path, lowered_field))
-                if is_non_null:
-                    raise _PropagateNull from error
-                result[response_key] = None
-                continue
-
-            if raw_value is None:
-                if is_non_null:
-                    state.errors.append(
-                        _build_error("Cannot return null for non-nullable field.", field_path, lowered_field)
-                    )
-                    raise _PropagateNull
-                result[response_key] = None
-                continue
+                raise _PropagateNull from error
 
             try:
-                result[response_key] = _execute_inline_plan(step[4], raw_value, field_path, state)
+                result[response_key] = _inline_complete(
+                    field_info.type_info, raw_value, lowered_field, field_path, state, kind, payload
+                )
             except _PropagateNull:
                 if is_non_null:
                     raise
                 result[response_key] = None
         except _PropagateNull as error:
-            propagate = propagate or error
+            if is_non_null:
+                propagate = propagate or error
+            else:
+                result[response_key] = None
 
     if propagate is not None:
         raise propagate
     return result
-
-
-def _complete_plain_scalar(
-    *,
-    field_info: "FieldInfo",
-    lowered_field: "LoweredField",
-    type_name: str,
-    parent_value: Any,
-    path: Path,
-    state: _ExecutionState,
-) -> Any:
-    """Reads and serializes a plain scalar leaf synchronously.
-
-    Deliberately a line-by-line mirror of what `_execute_field` -> `_finish_field` ->
-    `_complete_value` do for this same field shape, minus everything that shape cannot reach: no
-    `Info` (nothing would read it), no directive application, no `CompleteValue` recursion. It has
-    to reproduce their error semantics exactly -- a raising read and an unserializable value both
-    become field errors, and a null in a non-null slot raises `_PropagateNull` after recording the
-    error, while a nullable slot absorbs the same failure as `None`.
-    """
-    is_non_null = field_info.type_info.kind == "NON_NULL"
-
-    try:
-        raw_value = state.schema.config.default_resolver(parent_value, field_info.name)
-    except Exception as error:  # deliberately broad: any read failure becomes a field error, per §8.
-        state.errors.append(_error_from_exception(error, path, lowered_field))
-        if is_non_null:
-            raise _PropagateNull from error
-        return None
-
-    if raw_value is None:
-        if is_non_null:
-            state.errors.append(_build_error("Cannot return null for non-nullable field.", path, lowered_field))
-            raise _PropagateNull
-        return None
-
-    try:
-        return _complete_leaf(lambda: _serialize_scalar(type_name, raw_value, state.schema), path, lowered_field, state)
-    except _PropagateNull:
-        if is_non_null:
-            raise
-        return None
 
 
 async def _complete_value(
@@ -1275,39 +1229,32 @@ async def _execute_selection_set(
 
     for response_key, occurrences in grouped.items():
         primary = occurrences[0]
-        eligible = fast_path_open and not (primary.directives or primary.is_deferred or primary.is_streamed)
-        plain = (
-            _plain_scalar_lookup(concrete_type, primary.field_name, auto_camel_case, state.schema)
-            if eligible
+        target = (
+            _plain_field_target(concrete_type, primary.field_name, auto_camel_case, state.schema)
+            if fast_path_open and not (primary.directives or primary.is_deferred or primary.is_streamed)
             else None
         )
-        if plain is None:
-            # Not a leaf, but possibly a plain object whose entire subtree is inlinable too -- a
-            # nested object costs a coroutine, an `Info` and a selection set of its own otherwise.
-            nested = (
-                _inline_object_step(concrete_type, primary, occurrences, auto_camel_case, state)
-                if eligible
-                else None
-            )
-            if nested is None:
+        if target is None:
+            awaited_keys.append(response_key)
+            awaited.append(_resolve_group(response_key, occurrences))
+            continue
+
+        if target[3]:
+            # An unwrapped scalar leaf: by far the most common field, completed without the
+            # intermediate plan and result dict a step would otherwise cost.
+            step = ("value", response_key, primary, target[0], "scalar", target[2])
+        else:
+            # A list, or an object whose whole subtree may be inlinable too -- either would
+            # otherwise cost a coroutine, an `Info` and a selection set per instance.
+            planned = _inline_step(concrete_type, response_key, occurrences, auto_camel_case, state)
+            if planned is None:
                 awaited_keys.append(response_key)
                 awaited.append(_resolve_group(response_key, occurrences))
                 continue
-            try:
-                resolved[response_key] = _execute_inline_plan([nested], parent_value, path, state)[response_key]
-            except _PropagateNull as error:
-                propagate = propagate or error
-            continue
-        field_info, type_name = plain
+            step = planned
+
         try:
-            resolved[response_key] = _complete_plain_scalar(
-                field_info=field_info,
-                lowered_field=occurrences[0],
-                type_name=type_name,
-                parent_value=parent_value,
-                path=Path(key=response_key, prev=path),
-                state=state,
-            )
+            resolved.update(_execute_inline_plan([step], parent_value, path, state))
         except _PropagateNull as error:
             # Recorded rather than raised, so the remaining siblings still run and report their own
             # errors -- the same reason the gather below passes `return_exceptions=True`.

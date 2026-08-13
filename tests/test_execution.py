@@ -1353,3 +1353,72 @@ def test_a_directive_on_a_nested_field_falls_back_off_the_inline_path() -> None:
     )
 
     assert result["data"] == {"post": {"id": "1", "author": {"id": "1"}}}
+
+
+@bramble.type
+class _ListTag:
+    name: str
+
+
+@bramble.type
+class _ListPost:
+    tags: list[str]
+    labels: list[_ListTag]
+    matrix: list[list[str]]
+
+
+@bramble.type
+class _ListQuery:
+    @bramble.field
+    def post(info: bramble.Info) -> _ListPost:
+        return info.root_value
+
+
+_LIST_SCHEMA = bramble.Schema(query=_ListQuery)
+
+
+class _ListRecord:
+    def __init__(self, tags: list[str] | None = None) -> None:
+        self.tags = ["a", "b"] if tags is None else tags
+        self.matrix = [["x", "y"], ["z"]]
+        self.labels = [_ListTag(name="one"), _ListTag(name="two")]
+
+
+def test_plain_lists_are_completed_without_a_coroutine_per_item() -> None:
+    """A list used to cost a coroutine and a gather slot per element. Scalar lists, object lists
+    and nested lists all complete inline when the item type is plain.
+    """
+    from bramble import _execution
+
+    calls = []
+    original = _execution._gather_concurrently
+
+    async def counting(coroutines):
+        calls.append(len(coroutines))
+        return await original(coroutines)
+
+    _execution._gather_concurrently = counting
+    try:
+        result = _LIST_SCHEMA.execute(
+            "{ post { tags labels { name } matrix } }", root_value=_ListRecord()
+        )
+    finally:
+        _execution._gather_concurrently = original
+
+    assert result["data"] == {
+        "post": {
+            "tags": ["a", "b"],
+            "labels": [{"name": "one"}, {"name": "two"}],
+            "matrix": [["x", "y"], ["z"]],
+        }
+    }
+    # Only the root's resolver-backed `post` field gathers; no item of any list does.
+    assert calls == [1]
+
+
+def test_a_null_item_in_a_non_null_list_still_propagates_with_its_index() -> None:
+    """List null propagation is index-sensitive, and the inline path has to reproduce it exactly."""
+    result = _LIST_SCHEMA.execute("{ post { tags } }", root_value=_ListRecord(tags=["a", None]))
+
+    assert result["data"] is None
+    assert [error["path"] for error in result["errors"]] == [["post", "tags", 1]]
