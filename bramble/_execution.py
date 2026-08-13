@@ -694,6 +694,96 @@ def _complete_leaf(
         raise _PropagateNull from error
 
 
+@functools.lru_cache(maxsize=4096)
+def _plain_scalar_type_name(concrete_type: type, field_info: "FieldInfo", schema: "Schema") -> str | None:
+    """The scalar type name when this field is a plain leaf read, else `None`.
+
+    "Plain" means everything the full field pipeline exists to handle is absent: no resolver, no
+    permissions, no field extensions, and a leaf scalar type (an enum or any composite is in
+    `types_by_name`/`union_members_by_name` and so is excluded here). Only the static, per-schema
+    half of the test lives here -- the per-query half (directives, `@defer`/`@stream`, schema-wide
+    resolve extensions) has to be checked against each request.
+    """
+    if field_info.has_resolver:
+        return None
+    if getattr(concrete_type, "__bramble_permissions__", {}).get(field_info.name):
+        return None
+    if getattr(concrete_type, "__bramble_field_extensions__", {}).get(field_info.name):
+        return None
+
+    type_info = field_info.type_info
+    if type_info.kind == "NON_NULL":
+        type_info = type_info.of_type
+    if type_info.kind != "NAMED":
+        return None
+
+    type_name = type_info.name
+    if type_name is None or type_name in schema.types_by_name or type_name in schema.union_members_by_name:
+        return None
+    return type_name
+
+
+def _plain_scalar_field(
+    primary: "LoweredField", concrete_type: type, state: _ExecutionState
+) -> "tuple[FieldInfo, str] | None":
+    """`(field_info, scalar type name)` when `primary` can be completed without the event loop."""
+    if primary.directives or primary.is_deferred or primary.is_streamed or state.resolve_extensions:
+        return None
+    if primary.field_name == "__typename":
+        return None
+    field_info = _find_field_info(
+        concrete_type, primary.field_name, auto_camel_case=state.schema.config.auto_camel_case
+    )
+    if field_info is None:
+        return None
+    type_name = _plain_scalar_type_name(concrete_type, field_info, state.schema)
+    if type_name is None:
+        return None
+    return field_info, type_name
+
+
+def _complete_plain_scalar(
+    *,
+    field_info: "FieldInfo",
+    lowered_field: "LoweredField",
+    type_name: str,
+    parent_value: Any,
+    path: Path,
+    state: _ExecutionState,
+) -> Any:
+    """Reads and serializes a plain scalar leaf synchronously.
+
+    Deliberately a line-by-line mirror of what `_execute_field` -> `_finish_field` ->
+    `_complete_value` do for this same field shape, minus everything that shape cannot reach: no
+    `Info` (nothing would read it), no directive application, no `CompleteValue` recursion. It has
+    to reproduce their error semantics exactly -- a raising read and an unserializable value both
+    become field errors, and a null in a non-null slot raises `_PropagateNull` after recording the
+    error, while a nullable slot absorbs the same failure as `None`.
+    """
+    is_non_null = field_info.type_info.kind == "NON_NULL"
+
+    try:
+        raw_value = state.schema.config.default_resolver(parent_value, field_info.name)
+    except Exception as error:  # deliberately broad: any read failure becomes a field error, per §8.
+        state.errors.append(_error_from_exception(error, path, lowered_field))
+        if is_non_null:
+            raise _PropagateNull from error
+        return None
+
+    if raw_value is None:
+        if is_non_null:
+            state.errors.append(_build_error("Cannot return null for non-nullable field.", path, lowered_field))
+            raise _PropagateNull
+        return None
+
+    try:
+        return _complete_leaf(lambda: _serialize_scalar(type_name, raw_value, state.schema), path, lowered_field, state)
+    except _PropagateNull:
+        if is_non_null:
+            raise
+        return None
+
+
 async def _complete_value(
     *,
     type_info: "GraphQLTypeInfo",
@@ -982,23 +1072,49 @@ async def _execute_selection_set(
     # reaches this level always means the whole selection set must propagate too. Still gathered
     # with `return_exceptions=True` so every sibling field gets to run (and record its own errors)
     # before that decision is acted on.
-    outcomes = await _gather_concurrently(
-        [_resolve_group(response_key, occurrences) for response_key, occurrences in grouped.items()]
-    )
-
-    result = {}
+    # Plain scalar leaves -- the majority of fields in a typical response -- are read inline rather
+    # than turned into a coroutine and a task apiece. Everything else still goes through the full
+    # pipeline concurrently, so a field that actually awaits is unaffected.
+    resolved: dict[str, Any] = {}
     propagate: _PropagateNull | None = None
-    for outcome in outcomes:
+    awaited_keys: list[str] = []
+    awaited: list[Coroutine[Any, Any, tuple[str, Any]]] = []
+
+    for response_key, occurrences in grouped.items():
+        plain = _plain_scalar_field(occurrences[0], concrete_type, state)
+        if plain is None:
+            awaited_keys.append(response_key)
+            awaited.append(_resolve_group(response_key, occurrences))
+            continue
+        field_info, type_name = plain
+        try:
+            resolved[response_key] = _complete_plain_scalar(
+                field_info=field_info,
+                lowered_field=occurrences[0],
+                type_name=type_name,
+                parent_value=parent_value,
+                path=Path(key=response_key, prev=path),
+                state=state,
+            )
+        except _PropagateNull as error:
+            # Recorded rather than raised, so the remaining siblings still run and report their own
+            # errors -- the same reason the gather below passes `return_exceptions=True`.
+            propagate = propagate or error
+
+    for outcome in await _gather_concurrently(awaited) if awaited else ():
         if isinstance(outcome, _PropagateNull):
             propagate = propagate or outcome
             continue
         if isinstance(outcome, BaseException):
             raise outcome
         key, value = outcome
-        result[key] = value
+        resolved[key] = value
+
     if propagate is not None:
         raise propagate
-    return result
+    # Rebuilt in selection order: the inline reads above ran before the awaited fields, which says
+    # nothing about the order a response should list them in.
+    return {response_key: resolved[response_key] for response_key in grouped if response_key in resolved}
 
 
 # --- @defer/@stream incremental delivery ---------------------------------------------------------
