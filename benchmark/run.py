@@ -40,6 +40,11 @@ move:
 Deliberately dependency-free and comparative only against itself: record a baseline before a
 change, run it again after, and diff. Absolute numbers are machine-specific and not meaningful
 across hosts.
+
+One caveat worth more than all the others: `pip install -e .` builds the Rust extension
+*unoptimized*, which inflates the parse and validate stages by roughly an order of magnitude and
+leaves the Python-side numbers untouched -- a combination that quietly misattributes where the time
+goes. Use `pip install .` for any number you intend to act on.
 """
 
 from __future__ import annotations
@@ -56,6 +61,7 @@ from typing import Any
 from bramble._bramble import parse_query, validate_document
 
 import bramble
+from bramble import _bramble
 
 # --- Domain -------------------------------------------------------------------------------------
 # Plain records with no GraphQL awareness, so the fields below are ordinary attribute reads and the
@@ -294,6 +300,12 @@ def main() -> None:
 
     sections = arguments.only or ["phases", "sweep", "async"]
     USER.posts = build_user(arguments.posts).posts
+
+    # Printed rather than detected: there is no reliable cross-platform way to tell an optimized
+    # extension from an unoptimized one, and the failure mode (parse and validate ~10x too slow,
+    # everything else correct) reads as a real result rather than a broken build.
+    print(f"extension {_bramble.__file__}")
+    print("`pip install -e .` builds this unoptimized -- use `pip install .` for numbers you act on\n")
 
     if "phases" in sections:
         run_phases(arguments.repeats)
