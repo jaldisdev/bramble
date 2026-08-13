@@ -23,6 +23,7 @@ import asyncio
 import datetime
 import decimal
 import inspect
+import sys
 import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
@@ -47,6 +48,32 @@ from bramble.directive import apply_directive
 if TYPE_CHECKING:
     from bramble._bramble import ArgumentInfo, FieldInfo, GraphQLTypeInfo, LoweredField, ParsedDocument
     from bramble._schema import Schema
+
+#: `asyncio.Task(..., eager_start=True)` runs a coroutine synchronously until its first actual
+#: suspension, only falling back to loop scheduling if it really does suspend. Added in 3.12.
+_EAGER_TASKS_AVAILABLE = sys.version_info >= (3, 12)
+
+
+async def _gather_concurrently(coroutines: Sequence[Coroutine[Any, Any, Any]]) -> list[Any]:
+    """`asyncio.gather(..., return_exceptions=True)` over sibling work, skipping the event loop
+    for whichever siblings never suspend.
+
+    Plain `gather` schedules every coroutine as a task and hands control back to the loop, costing
+    a scheduling round trip (and, on the sync `execute` path, a kernel poll) per selection set --
+    even when every resolver is an ordinary synchronous function that could have returned inline.
+    That is the common case: most fields read an attribute. Starting each task eagerly collapses
+    those to a direct call and leaves the loop involved only for resolvers that genuinely await.
+
+    Concurrency for resolvers that *do* await is unchanged: such a task suspends at its first await
+    and is scheduled exactly as before, so I/O still overlaps. Field execution order within a
+    selection set is unspecified by the spec and was already loop-dependent.
+    """
+    if not _EAGER_TASKS_AVAILABLE:
+        return list(await asyncio.gather(*coroutines, return_exceptions=True))
+
+    loop = asyncio.get_running_loop()
+    tasks = [asyncio.Task(coroutine, loop=loop, eager_start=True) for coroutine in coroutines]
+    return list(await asyncio.gather(*tasks, return_exceptions=True))
 
 
 def _selected_fields(lowered_fields: Sequence["LoweredField"]) -> list[SelectedField]:
@@ -716,9 +743,7 @@ async def _complete_value(
         # `return_exceptions=True` so one item's `_PropagateNull` doesn't cancel its siblings --
         # every item still gets to run (and record its own errors) before this list decides
         # whether *it* must propagate too.
-        outcomes = await asyncio.gather(
-            *(_complete_item(index, item) for index, item in enumerate(raw_value)), return_exceptions=True
-        )
+        outcomes = await _gather_concurrently([_complete_item(index, item) for index, item in enumerate(raw_value)])
 
         item_type_non_null = type_info.of_type.kind == "NON_NULL"
         results = []
@@ -896,8 +921,8 @@ async def _execute_selection_set(
 ) -> dict[str, Any]:
     """Executes one selection set against a known concrete type + resolved parent value (§8's
     per-field algorithm), after merging any same-response-key occurrences (`_group_by_response_key`).
-    Fields run concurrently by default (`asyncio.gather`) -- the spec permits but doesn't require
-    this, and it lets I/O-bound resolvers actually overlap. `serial=True` is passed only for a
+    Fields run concurrently by default (`_gather_concurrently`) -- the spec permits but doesn't
+    require this, and it lets I/O-bound resolvers actually overlap. `serial=True` is passed only for a
     mutation's *root* selection set (the one spec-mandated exception: "fields of the top-level
     selection set must be executed serially"); anything nested -- including inside a mutation's own
     result, or a list's items -- reverts to concurrent execution regardless of the root operation.
@@ -948,9 +973,8 @@ async def _execute_selection_set(
     # reaches this level always means the whole selection set must propagate too. Still gathered
     # with `return_exceptions=True` so every sibling field gets to run (and record its own errors)
     # before that decision is acted on.
-    outcomes = await asyncio.gather(
-        *(_resolve_group(response_key, occurrences) for response_key, occurrences in grouped.items()),
-        return_exceptions=True,
+    outcomes = await _gather_concurrently(
+        [_resolve_group(response_key, occurrences) for response_key, occurrences in grouped.items()]
     )
 
     result = {}
@@ -1197,9 +1221,7 @@ async def _complete_value_incremental(
                 incremental=incremental,
             )
 
-        outcomes = await asyncio.gather(
-            *(_complete_item(index, item) for index, item in enumerate(raw_value)), return_exceptions=True
-        )
+        outcomes = await _gather_concurrently([_complete_item(index, item) for index, item in enumerate(raw_value)])
 
         item_type_non_null = type_info.of_type.kind == "NON_NULL"
         results = []
@@ -1540,7 +1562,7 @@ async def _run_deferred_job(
         return response_key, value
 
     try:
-        outcomes = await asyncio.gather(*(_resolve_one(*entry) for entry in fields), return_exceptions=True)
+        outcomes = await _gather_concurrently([_resolve_one(*entry) for entry in fields])
         propagate = False
         for outcome in outcomes:
             if isinstance(outcome, _PropagateNull):
@@ -1674,12 +1696,11 @@ async def _execute_selection_set_incremental(
             result[key] = value
         return result
 
-    outcomes = await asyncio.gather(
-        *(
+    outcomes = await _gather_concurrently(
+        [
             _resolve_group(response_key, field_info, primary, merged_selections)
             for response_key, field_info, primary, merged_selections in resolvable
-        ),
-        return_exceptions=True,
+        ]
     )
     result = {}
     propagate = None
