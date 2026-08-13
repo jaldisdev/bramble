@@ -207,14 +207,30 @@ def _map_arguments(
 def _enum_graphql_name(enum_class: type, member: Any) -> str:
     """The GraphQL name a resolved enum member is sent as -- its `bramble.enum_value(name=...)`
     override if it declared one, else the Python member's own identifier.
+
+    A resolver may also return the member's *underlying value* (`"draft"` for
+    `Status.DRAFT = "draft"`) rather than the member itself, which is what a database row, an ORM
+    field, or a plain dict standing in for a bramble type hands back. That is looked up through the
+    enum class itself, so it stays correct for a member whose value isn't a string at all.
     """
+    if not isinstance(member, enum_class):
+        try:
+            member = enum_class(member)
+        except ValueError:
+            # Neither a member nor one of their values -- a resolver returned something else
+            # entirely. Reported as a field error rather than silently emitting a name no client
+            # could match, and deliberately not as the `AttributeError` that reading `.name` off a
+            # bare string used to raise.
+            raise GraphQLError(
+                f"{member!r} is not a member of enum '{enum_class.__bramble_type_info__.name}'",
+                code=ErrorCode.FIELD_RESOLUTION_FAILED,
+            ) from None
+
     for value_info in enum_class.__bramble_type_info__.enum_values:
         if value_info.name == member.name:
             return value_info.graphql_name or value_info.name
-    # Not a member of this enum at all -- a resolver returned something else entirely. Reported as
-    # a field error rather than silently emitting a name no client could match.
     raise GraphQLError(
-        f"'{member!r}' is not a member of enum '{enum_class.__bramble_type_info__.name}'",
+        f"{member!r} is not a member of enum '{enum_class.__bramble_type_info__.name}'",
         code=ErrorCode.FIELD_RESOLUTION_FAILED,
     )
 
@@ -617,6 +633,26 @@ def _error_from_exception(error: Exception, path: Path, lowered_field: "LoweredF
     return _build_error(str(error), path, lowered_field)
 
 
+def _complete_leaf(
+    serialize: Callable[[], Any], path: Path, lowered_field: "LoweredField", state: _ExecutionState
+) -> Any:
+    """Runs a leaf's serialization (an enum member's GraphQL name, a scalar's `serialize` hook) and
+    turns a failure into an ordinary field error at `path` rather than letting it escape the whole
+    request.
+
+    Per §6.4.3 a value that can't be completed nulls its own field and is reported in `errors`;
+    without this, one unserializable leaf -- a row holding a value that isn't in the enum, a custom
+    scalar's hook raising on unexpected input -- would take the entire response down with it, which
+    is both wrong and, on a large schema, very hard to trace back to the one field responsible.
+    `_PropagateNull` then does the usual work of deciding how far up the null has to bubble.
+    """
+    try:
+        return serialize()
+    except Exception as error:  # deliberately broad: any serialization failure is a field error.
+        state.errors.append(_error_from_exception(error, path, lowered_field))
+        raise _PropagateNull from error
+
+
 async def _complete_value(
     *,
     type_info: "GraphQLTypeInfo",
@@ -703,7 +739,7 @@ async def _complete_value(
     # GraphQL name a client matches on.
     named_type = state.schema.types_by_name.get(type_name)
     if named_type is not None and named_type.__bramble_type_info__.kind == "enum":
-        return _enum_graphql_name(named_type, raw_value)
+        return _complete_leaf(lambda: _enum_graphql_name(named_type, raw_value), path, lowered_field, state)
 
     if type_name in state.schema.types_by_name or type_name in state.schema.union_members_by_name:
         info = _build_info(
@@ -723,7 +759,7 @@ async def _complete_value(
             state=state,
         )
 
-    return _serialize_scalar(type_name, raw_value, state.schema)
+    return _complete_leaf(lambda: _serialize_scalar(type_name, raw_value, state.schema), path, lowered_field, state)
 
 
 async def _finish_field(
@@ -1184,7 +1220,7 @@ async def _complete_value_incremental(
     # GraphQL name a client matches on.
     named_type = state.schema.types_by_name.get(type_name)
     if named_type is not None and named_type.__bramble_type_info__.kind == "enum":
-        return _enum_graphql_name(named_type, raw_value)
+        return _complete_leaf(lambda: _enum_graphql_name(named_type, raw_value), path, lowered_field, state)
 
     if type_name in state.schema.types_by_name or type_name in state.schema.union_members_by_name:
         info = _build_info(
@@ -1205,7 +1241,7 @@ async def _complete_value_incremental(
             incremental=incremental,
         )
 
-    return _serialize_scalar(type_name, raw_value, state.schema)
+    return _complete_leaf(lambda: _serialize_scalar(type_name, raw_value, state.schema), path, lowered_field, state)
 
 
 async def _start_streamed_field(

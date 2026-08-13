@@ -43,6 +43,19 @@ class ColorFilter:
     fallbacks: list[Color] | None = None
 
 
+@bramble.enum
+class Priority(enum.Enum):
+    LOW = 1
+    HIGH = 2
+
+
+@bramble.type
+class PriorityQuery:
+    @bramble.field
+    def priority() -> Priority:
+        return 2  # an int-valued member's value, not the member
+
+
 @bramble.input
 class Numbers:
     count: int
@@ -81,6 +94,28 @@ class Query:
     @bramble.field
     def maybe(color: Color | None = None) -> str:
         return "none" if color is None else color.name
+
+    # The shape a database row or ORM field produces: the member's underlying value, not the
+    # member. Declared here rather than in each test so they share one schema.
+    @bramble.field
+    def from_value() -> Color:
+        return "green"
+
+    @bramble.field
+    def renamed_from_value() -> Color:
+        return "blue"
+
+    @bramble.field
+    def unknown_value() -> Color | None:
+        return "chartreuse"
+
+    @bramble.field
+    def required_unknown_value() -> Color:
+        return "chartreuse"
+
+    @bramble.field
+    def values_in_a_list() -> list[Color | None]:
+        return ["red", "chartreuse"]
 
 
 def _schema() -> bramble.Schema:
@@ -148,6 +183,41 @@ def test_resolved_member_serializes_to_its_graphql_name() -> None:
 
 def test_resolved_member_uses_its_name_override() -> None:
     assert _schema().execute("{ renamed }") == {"data": {"renamed": "BLUE"}}
+
+
+def test_a_resolver_may_return_the_members_underlying_value() -> None:
+    """Gel rows, ORM fields, and plain dicts hand back the value rather than the member -- and this
+    used to raise `AttributeError: 'str' object has no attribute 'name'` out of serialization.
+    """
+    assert _schema().execute("{ fromValue }") == {"data": {"fromValue": "GREEN"}}
+
+
+def test_an_underlying_value_resolves_through_a_members_name_override() -> None:
+    assert _schema().execute("{ renamedFromValue }") == {"data": {"renamedFromValue": "BLUE"}}
+
+
+def test_a_non_string_underlying_value_is_looked_up_through_the_enum_class() -> None:
+    assert bramble.Schema(query=PriorityQuery).execute("{ priority }") == {"data": {"priority": "HIGH"}}
+
+
+def test_a_value_that_is_no_member_at_all_becomes_a_field_error() -> None:
+    result = _schema().execute("{ unknownValue }")
+
+    assert result["data"] == {"unknownValue": None}
+    (error,) = result["errors"]
+    assert error["message"] == "'chartreuse' is not a member of enum 'Color'"
+    assert error["path"] == ["unknownValue"]
+
+
+def test_an_unserializable_enum_leaf_bubbles_like_any_other_null() -> None:
+    """The failure nulls the leaf and bubbles from there -- one bad row shouldn't take the whole
+    response down, and inside a list only that item is lost.
+    """
+    assert _schema().execute("{ requiredUnknownValue }")["data"] is None
+
+    result = _schema().execute("{ valuesInAList }")
+    assert result["data"] == {"valuesInAList": ["RED", None]}
+    assert result["errors"][0]["path"] == ["valuesInAList", 1]
 
 
 # --- Input coercion -----------------------------------------------------------------------------

@@ -350,9 +350,16 @@ def test_a_builtin_container_is_rejected_rather_than_stringified() -> None:
     """Mirrors graphql-core's own split: a custom type is trusted to `__str__` meaningfully, but
     stringifying a `dict` into `"{'a': 1}"` would hide a genuine resolver bug behind output that
     looks plausible.
+
+    Delivered as a field error rather than an exception out of `execute`, per §6.4.3 -- the rejection
+    is the point, but one unserializable leaf shouldn't cost the whole response.
     """
-    with pytest.raises(Exception, match="String cannot represent value"):
-        bramble.Schema(query=_StringCoercionQuery).execute("{ container }")
+    result = bramble.Schema(query=_StringCoercionQuery).execute("{ container }")
+
+    assert result["data"] is None  # `container` is `String!`, so the null bubbles to the root
+    (error,) = result["errors"]
+    assert "String cannot represent value" in error["message"]
+    assert error["path"] == ["container"]
 
 
 # --- built-in scalars are declared when referenced ------------------------------------------------
