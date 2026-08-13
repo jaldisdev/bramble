@@ -770,6 +770,42 @@ def test_a_resolver_may_return_a_type_defined_later_in_the_module() -> None:
     assert "type _DefinedAfterwards" in sdl
 
 
+@bramble.type
+class _PostWithLaterAuthor:
+    title: str
+    author: "_AuthorDefinedAfterwards"
+
+
+@bramble.type
+class _AuthorDefinedAfterwards:
+    name: str
+
+
+@bramble.type
+class _PostQuery:
+    @bramble.field
+    def post() -> _PostWithLaterAuthor:
+        raise NotImplementedError
+
+
+def test_a_field_may_reference_a_type_defined_later_in_the_module() -> None:
+    """The field counterpart of the resolver-return case above, which used to fail differently and
+    far more quietly: rather than deferring, an unresolvable field annotation fell back to an empty
+    hint set, so *every* field on the class kept its raw annotation text as its GraphQL type name.
+
+    Under this module's deferred annotations that text is a string for all of them, so one forward
+    reference produced `title: str!` and `author: '_AuthorDefinedAfterwards'!` -- invalid SDL naming
+    a type that does not exist, with nothing raising at decoration, at `Schema()`, or at render.
+    `title` is asserted here precisely because it was collateral damage: it is independently
+    resolvable and was broken anyway.
+    """
+    sdl = bramble.Schema(query=_PostQuery).to_sdl()
+
+    assert "title: String!" in sdl
+    assert "author: _AuthorDefinedAfterwards!" in sdl
+    assert "type _AuthorDefinedAfterwards" in sdl
+
+
 def test_an_unresolvable_annotation_is_still_an_error_just_later() -> None:
     """Deferring must not swallow a genuine typo: it is reported when the schema is built, which is
     the first point at which "this name does not exist anywhere" is actually knowable.

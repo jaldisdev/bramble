@@ -21,7 +21,7 @@ use bramble_core::schema::{
     AppliedDirective, ArgumentDefinition, EnumValueDefinition, FieldDefinition, GraphQLType, TypeDefinition, TypeKind,
 };
 use pyo3::create_exception;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{PyException, PyNameError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
@@ -262,7 +262,7 @@ pub(crate) fn extract_applied_directives(directives: &Bound<'_, PyAny>) -> PyRes
 /// (dataclasses auto-creates plain `dataclasses.Field`s for bare annotated attributes, which
 /// have no such attribute -- `getattr(..., "resolver", None)` treats that the same as "no
 /// resolver", which is exactly what a plain data field is).
-fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDefinition>> {
+fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>, allow_unresolved_annotations: bool) -> PyResult<Vec<FieldDefinition>> {
     let dataclass_fields = py.import("dataclasses")?.call_method1("fields", (cls,))?;
     let typing = py.import("typing")?;
 
@@ -274,9 +274,21 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
     // class itself handles a field forward-referencing its own enclosing type. It can't handle a
     // field referencing some *other* type defined in the same enclosing local scope (a sibling
     // class inside a test function, say) -- `get_type_hints` has no visibility into that scope at
-    // all. Rather than fail type registration outright over an annotation we can't resolve, fall
-    // back to an empty hint set: `resolve_graphql_type` still degrades gracefully on a raw string
-    // (falls through to treating it as an opaque named type) rather than erroring.
+    // all.
+    //
+    // A `NameError` is therefore reported rather than swallowed, *unless* the caller has already
+    // established that this is the unresolvable-forever case. Usually it is not: a field
+    // forward-referencing a type defined *later in the same module* is unresolvable at decoration
+    // time and perfectly resolvable once the module finishes importing. Reporting it as a "could
+    // not resolve" `SchemaError` is what hands the class to `_type._PENDING_TYPES`, which retries
+    // from `Schema()` and only falls back here with `allow_unresolved_annotations` once no further
+    // progress is possible.
+    //
+    // Swallowing it unconditionally -- which is what this did before -- substituted an empty hint
+    // set, silently degrading *every* field on the class to its raw annotation text. Under
+    // `from __future__ import annotations` that text is a string for all of them, so a single
+    // unresolvable forward reference yielded a whole type of fields named `str!` and `'User'!`:
+    // invalid SDL, and a dangling type reference nothing downstream rejected.
     let cls_name: String = cls.getattr("__name__")?.extract()?;
     let localns = PyDict::new(py);
     localns.set_item(&cls_name, cls)?;
@@ -284,11 +296,18 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
     let kwargs = PyDict::new(py);
     kwargs.set_item("localns", &localns)?;
     kwargs.set_item("include_extras", true)?;
-    let resolved_hints = typing
-        .call_method("get_type_hints", (cls,), Some(&kwargs))
-        .ok()
-        .and_then(|hints| hints.cast::<PyDict>().ok().cloned())
-        .unwrap_or_else(|| PyDict::new(py));
+    let resolved_hints = match typing.call_method("get_type_hints", (cls,), Some(&kwargs)) {
+        Ok(hints) => hints.cast::<PyDict>().cloned().unwrap_or_else(|_| PyDict::new(py)),
+        Err(error) if error.is_instance_of::<PyNameError>(py) => {
+            if !allow_unresolved_annotations {
+                return Err(SchemaError::new_err(format!(
+                    "could not resolve field annotations for '{cls_name}': {error}"
+                )));
+            }
+            PyDict::new(py)
+        }
+        Err(error) => return Err(error),
+    };
 
     let private_marker_class = py.import("bramble._private")?.getattr("PrivateMarker")?;
 
@@ -397,7 +416,7 @@ fn read_fields(py: Python<'_>, cls: &Bound<'_, PyType>) -> PyResult<Vec<FieldDef
 /// validation (interface field contracts, directive locations) is deferred to `Schema()`
 /// (Task 8b), since it needs the whole type graph, not just this class.
 #[pyfunction]
-#[pyo3(signature = (cls, *, kind, name=None, description=None, directives, one_of=false))]
+#[pyo3(signature = (cls, *, kind, name=None, description=None, directives, one_of=false, allow_unresolved_annotations=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn process_type(
     py: Python<'_>,
@@ -407,11 +426,12 @@ pub fn process_type(
     description: Option<String>,
     directives: &Bound<'_, PyAny>,
     one_of: bool,
+    allow_unresolved_annotations: bool,
 ) -> PyResult<PyTypeInfo> {
     let applied_directives = extract_applied_directives(directives)?;
 
     let type_kind = parse_kind(kind)?;
-    let fields = read_fields(py, cls)?;
+    let fields = read_fields(py, cls, allow_unresolved_annotations)?;
 
     if type_kind == TypeKind::Input
         && let Some(bad_field) = fields.iter().find(|f| f.has_resolver)
@@ -597,7 +617,16 @@ mod tests {
         bramble_type.call_method1("_restore_resolvers", (&cls,))?;
 
         let cls = cls.cast::<PyType>()?;
-        let info = process_type(py, cls, kind, None, None, &pyo3::types::PyTuple::empty(py).into_any(), false)?;
+        let info = process_type(
+            py,
+            cls,
+            kind,
+            None,
+            None,
+            &pyo3::types::PyTuple::empty(py).into_any(),
+            false,
+            false,
+        )?;
         Ok(info.definition)
     }
 

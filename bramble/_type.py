@@ -52,8 +52,15 @@ def resolve_pending_types() -> None:
     """Re-processes every type deferred at decoration time. Called by `Schema()`.
 
     Iterates to a fixed point: resolving one type can make another's annotations resolvable, and the
-    order they were deferred in says nothing about their dependencies. Whatever is still failing
-    when no further progress is made raises with its original error.
+    order they were deferred in says nothing about their dependencies.
+
+    Whatever is still failing when no further progress is made is reprocessed with
+    `allow_unresolved_annotations`, which restores the raw-annotation fallback. By that point the
+    name is not merely early -- every module involved has finished importing -- so it is either a
+    genuine typo or a type declared in a scope `get_type_hints` cannot see at all (sibling classes
+    inside a function body, which is common in tests). The former is caught by the schema graph
+    walker, which rejects a field referencing a type it never discovered; the latter has no better
+    answer available, and a raw string still resolves as an opaque named type.
     """
     while _PENDING_TYPES:
         progressed = False
@@ -73,13 +80,14 @@ def resolve_pending_types() -> None:
             progressed = True
         if not progressed:
             pending = _PENDING_TYPES.pop(0)
-            process_type(
+            pending.cls.__bramble_type_info__ = process_type(
                 pending.cls,
                 kind=pending.kind,
                 name=pending.name,
                 description=pending.description,
                 directives=pending.directives,
                 one_of=pending.one_of,
+                allow_unresolved_annotations=True,
             )
 
 
@@ -372,6 +380,30 @@ def _process_type(
             _PENDING_TYPES.append(
                 _PendingType(cls, kind, name, description, tuple(directives), one_of)
             )
+            # Set provisionally from the raw annotations anyway, so `__bramble_type_info__` is
+            # readable between decoration and `Schema()` exactly as it is for a class that resolved
+            # first time -- classes declared inside a function body never resolve here (their scope
+            # is invisible to `get_type_hints`) yet are still expected to carry their IR. The
+            # deferred pass above overwrites this with the correctly-resolved version if the name
+            # becomes knowable; if it never does, this stands as the final answer.
+            #
+            # The fallback only covers *field* annotations, so a resolver whose parameter types are
+            # unresolvable still fails -- there is genuinely no IR to publish in that case, and the
+            # class stays without the attribute until the deferred pass supplies it.
+            try:
+                provisional_info = process_type(
+                    cls,
+                    kind=kind,
+                    name=name,
+                    description=description,
+                    directives=tuple(directives),
+                    one_of=one_of,
+                    allow_unresolved_annotations=True,
+                )
+            except SchemaError:
+                provisional_info = None
+            if provisional_info is not None:
+                cls.__bramble_type_info__ = provisional_info
         # `process_type` (Rust) already extracted these directives' *values* into
         # `TypeDefinition.applied_directives` for SDL rendering -- kept here too, on the Python
         # side, so `Schema()`'s graph walker (§7b) can discover each *class* of schema directive
