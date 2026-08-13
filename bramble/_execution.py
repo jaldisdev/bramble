@@ -70,6 +70,18 @@ async def _gather_concurrently(coroutines: Sequence[Coroutine[Any, Any, Any]]) -
     and is scheduled exactly as before, so I/O still overlaps. Field execution order within a
     selection set is unspecified by the spec and was already loop-dependent.
     """
+    if len(coroutines) == 1:
+        # A gather of one allocates a task and a done-callback to supervise nothing. This is the
+        # common shape now that plain scalars are read inline: a selection set is frequently left
+        # with a single composite field to await.
+        try:
+            return [await coroutines[0]]
+        except Exception as error:  # noqa: BLE001 -- mirrors `gather(return_exceptions=True)`, whose
+            # whole contract is that any resolver failure comes back as a value for the caller to
+            # classify. `BaseException` is deliberately not caught: `gather` would return it only
+            # for the caller to re-raise immediately, so letting it propagate here is equivalent.
+            return [error]
+
     if not _EAGER_TASKS_AVAILABLE:
         return list(await asyncio.gather(*coroutines, return_exceptions=True))
 
@@ -695,16 +707,23 @@ def _complete_leaf(
 
 
 @functools.lru_cache(maxsize=4096)
-def _plain_scalar_type_name(concrete_type: type, field_info: "FieldInfo", schema: "Schema") -> str | None:
-    """The scalar type name when this field is a plain leaf read, else `None`.
+def _plain_scalar_lookup(
+    concrete_type: type, field_name: str, auto_camel_case: bool, schema: "Schema"
+) -> "tuple[FieldInfo, str] | None":
+    """`(field_info, scalar type name)` when this field is a plain leaf read, else `None`.
 
     "Plain" means everything the full field pipeline exists to handle is absent: no resolver, no
     permissions, no field extensions, and a leaf scalar type (an enum or any composite is in
-    `types_by_name`/`union_members_by_name` and so is excluded here). Only the static, per-schema
-    half of the test lives here -- the per-query half (directives, `@defer`/`@stream`, schema-wide
-    resolve extensions) has to be checked against each request.
+    `types_by_name`/`union_members_by_name` and so is excluded here). `__typename` falls out
+    naturally, having no `FieldInfo` at all.
+
+    This is the whole *static* half of the fast-path test and the field lookup it needs, resolved
+    together in one cached call -- deciding eligibility runs per field per request, so it is itself
+    on the hot path. The per-query half (directives, `@defer`/`@stream`, schema-wide resolve
+    extensions) cannot be cached and is checked by the caller.
     """
-    if field_info.has_resolver:
+    field_info = _find_field_info(concrete_type, field_name, auto_camel_case=auto_camel_case)
+    if field_info is None or field_info.has_resolver:
         return None
     if getattr(concrete_type, "__bramble_permissions__", {}).get(field_info.name):
         return None
@@ -719,25 +738,6 @@ def _plain_scalar_type_name(concrete_type: type, field_info: "FieldInfo", schema
 
     type_name = type_info.name
     if type_name is None or type_name in schema.types_by_name or type_name in schema.union_members_by_name:
-        return None
-    return type_name
-
-
-def _plain_scalar_field(
-    primary: "LoweredField", concrete_type: type, state: _ExecutionState
-) -> "tuple[FieldInfo, str] | None":
-    """`(field_info, scalar type name)` when `primary` can be completed without the event loop."""
-    if primary.directives or primary.is_deferred or primary.is_streamed or state.resolve_extensions:
-        return None
-    if primary.field_name == "__typename":
-        return None
-    field_info = _find_field_info(
-        concrete_type, primary.field_name, auto_camel_case=state.schema.config.auto_camel_case
-    )
-    if field_info is None:
-        return None
-    type_name = _plain_scalar_type_name(concrete_type, field_info, state.schema)
-    if type_name is None:
         return None
     return field_info, type_name
 
@@ -1080,8 +1080,18 @@ async def _execute_selection_set(
     awaited_keys: list[str] = []
     awaited: list[Coroutine[Any, Any, tuple[str, Any]]] = []
 
+    # Hoisted: schema-wide resolve extensions wrap *every* field, so they disqualify the whole
+    # selection set at once rather than being re-tested per field.
+    fast_path_open = not state.resolve_extensions
+    auto_camel_case = state.schema.config.auto_camel_case
+
     for response_key, occurrences in grouped.items():
-        plain = _plain_scalar_field(occurrences[0], concrete_type, state)
+        primary = occurrences[0]
+        plain = (
+            _plain_scalar_lookup(concrete_type, primary.field_name, auto_camel_case, state.schema)
+            if fast_path_open and not (primary.directives or primary.is_deferred or primary.is_streamed)
+            else None
+        )
         if plain is None:
             awaited_keys.append(response_key)
             awaited.append(_resolve_group(response_key, occurrences))
