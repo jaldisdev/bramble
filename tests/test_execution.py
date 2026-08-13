@@ -1138,3 +1138,141 @@ def test_asdict_converts_a_bramble_type_to_a_plain_dict() -> None:
         y: int
 
     assert bramble.asdict(Point(x=1, y=2)) == {"x": 1, "y": 2}
+
+
+# --- Execution fast paths -----------------------------------------------------------------------
+#
+# These pin behaviour that is invisible in a result but very visible in a profile: a plain scalar
+# field is read inline, a lone awaited sibling is awaited directly, `Info.selected_fields` is not
+# built unless read, and a type's field lookup is computed once rather than per request. Each was
+# a measured cost before it was removed, and each is the kind of thing an otherwise-correct
+# refactor silently reinstates -- so they are asserted structurally rather than by timing, which
+# would only be flaky.
+
+
+@bramble.type
+class _FastPathAuthor:
+    id: bramble.ID
+    name: str
+
+
+@bramble.type
+class _FastPathPost:
+    id: bramble.ID
+    title: str
+
+    @bramble.field
+    def author(parent: bramble.Parent[object]) -> _FastPathAuthor:
+        return parent.author
+
+
+@bramble.type
+class _FastPathQuery:
+    @bramble.field
+    def post(info: bramble.Info) -> _FastPathPost:
+        return info.root_value
+
+
+class _FastPathRecord:
+    id = "1"
+    title = "Hello"
+    name = "Ada"
+
+    def __init__(self) -> None:
+        self.author = self
+
+
+_FAST_PATH_SCHEMA = bramble.Schema(query=_FastPathQuery)
+
+
+def test_a_selection_set_of_plain_scalars_never_reaches_the_event_loop() -> None:
+    """Plain scalar leaves are read inline, so a selection set containing only them must not gather
+    at all -- gathering would mean a coroutine and a task per field, which is what the inline read
+    exists to avoid.
+    """
+    from bramble import _execution
+
+    calls = []
+    original = _execution._gather_concurrently
+
+    async def counting(coroutines):
+        calls.append(len(coroutines))
+        return await original(coroutines)
+
+    _execution._gather_concurrently = counting
+    try:
+        result = _FAST_PATH_SCHEMA.execute("{ post { id title } }", root_value=_FastPathRecord())
+    finally:
+        _execution._gather_concurrently = original
+
+    assert result["data"] == {"post": {"id": "1", "title": "Hello"}}
+    # One gather for the root's own `post` field, which has a resolver; none for `id`/`title`.
+    assert calls == [1]
+
+
+def test_a_lone_awaited_field_is_awaited_without_gathering() -> None:
+    """`asyncio.gather` over a single awaitable still allocates a task to supervise it. Every
+    selection set here is left with at most one non-plain field once the scalars go inline.
+    """
+    gathers = []
+    original = asyncio.gather
+
+    def counting(*awaitables, **kwargs):
+        gathers.append(len(awaitables))
+        return original(*awaitables, **kwargs)
+
+    asyncio.gather = counting
+    try:
+        result = _FAST_PATH_SCHEMA.execute(
+            "{ post { id title author { id name } } }", root_value=_FastPathRecord()
+        )
+    finally:
+        asyncio.gather = original
+
+    assert result["data"]["post"]["author"] == {"id": "1", "name": "Ada"}
+    assert gathers == []
+
+
+def test_selected_fields_is_not_built_unless_a_resolver_reads_it() -> None:
+    """Building it walks the whole remaining selection subtree, and almost no resolver wants it."""
+    from bramble import _resolver
+
+    builds = []
+    original = _resolver.build_selected_fields
+
+    def counting(lowered_fields):
+        builds.append(lowered_fields)
+        return original(lowered_fields)
+
+    _resolver.build_selected_fields = counting
+    try:
+        _FAST_PATH_SCHEMA.execute("{ post { id title } }", root_value=_FastPathRecord())
+        assert builds == []
+
+        observed = []
+
+        @bramble.type
+        class Query:
+            @bramble.field
+            def thing(info: bramble.Info) -> str:
+                observed.append([field.name for field in info.selected_fields])
+                return "x"
+
+        bramble.Schema(query=Query).execute("{ thing }")
+        assert len(builds) == 1
+    finally:
+        _resolver.build_selected_fields = original
+
+
+def test_a_types_field_lookup_is_computed_once_not_per_request() -> None:
+    """The lookup used to be a linear scan recomputing every field's GraphQL name per request."""
+    from bramble._execution import _fields_by_graphql_name
+
+    document = "{ post { id title } }"
+    _FAST_PATH_SCHEMA.execute(document, root_value=_FastPathRecord())
+    misses_after_first = _fields_by_graphql_name.cache_info().misses
+
+    for _ in range(5):
+        _FAST_PATH_SCHEMA.execute(document, root_value=_FastPathRecord())
+
+    assert _fields_by_graphql_name.cache_info().misses == misses_after_first
