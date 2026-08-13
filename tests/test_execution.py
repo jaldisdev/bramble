@@ -1276,3 +1276,80 @@ def test_a_types_field_lookup_is_computed_once_not_per_request() -> None:
         _FAST_PATH_SCHEMA.execute(document, root_value=_FastPathRecord())
 
     assert _fields_by_graphql_name.cache_info().misses == misses_after_first
+
+
+@bramble.type
+class _NestedAuthor:
+    id: bramble.ID
+    name: str
+
+
+@bramble.type
+class _NestedPost:
+    id: bramble.ID
+    title: str
+    author: _NestedAuthor
+
+
+@bramble.type
+class _NestedQuery:
+    @bramble.field
+    def post(info: bramble.Info) -> _NestedPost:
+        return info.root_value
+
+
+_NESTED_SCHEMA = bramble.Schema(query=_NestedQuery)
+
+
+def test_a_plain_nested_object_is_completed_without_its_own_selection_set() -> None:
+    """A nested object whose whole subtree is plain reads is planned and completed inline, rather
+    than costing a coroutine, an `Info` and a selection set of its own per instance.
+    """
+    from bramble import _execution
+
+    calls = []
+    original = _execution._gather_concurrently
+
+    async def counting(coroutines):
+        calls.append(len(coroutines))
+        return await original(coroutines)
+
+    _execution._gather_concurrently = counting
+    try:
+        result = _NESTED_SCHEMA.execute(
+            "{ post { id title author { id name __typename } } }", root_value=_FastPathRecord()
+        )
+    finally:
+        _execution._gather_concurrently = original
+
+    assert result["data"] == {
+        "post": {"id": "1", "title": "Hello", "author": {"id": "1", "name": "Ada", "__typename": "_NestedAuthor"}}
+    }
+    # Only the root's resolver-backed `post` field gathers; the nested author does not.
+    assert calls == [1]
+
+
+def test_an_inlined_subtree_still_bubbles_a_nested_non_null_null() -> None:
+    """The inline path has to reproduce null propagation exactly, including the reported path."""
+
+    class _NoName:
+        id = "1"
+        title = "Hello"
+        name = None
+
+        def __init__(self) -> None:
+            self.author = self
+
+    result = _NESTED_SCHEMA.execute("{ post { id author { id name } } }", root_value=_NoName())
+
+    assert result["data"] is None
+    assert [error["path"] for error in result["errors"]] == [["post", "author", "name"]]
+
+
+def test_a_directive_on_a_nested_field_falls_back_off_the_inline_path() -> None:
+    """Anything the plan cannot account for must disqualify it rather than be skipped silently."""
+    result = _NESTED_SCHEMA.execute(
+        "{ post { id author { id name @skip(if: true) } } }", root_value=_FastPathRecord()
+    )
+
+    assert result["data"] == {"post": {"id": "1", "author": {"id": "1"}}}
