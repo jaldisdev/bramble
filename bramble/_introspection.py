@@ -275,8 +275,9 @@ class __Type:
         type_class = info.schema.types_by_name.get(parent.name)
         if type_class is not None:
             return type_class.__bramble_type_info__.description
-        scalar = info.schema.scalars_by_name.get(parent.name)
-        return scalar.description if scalar is not None else None
+        # Covers registered scalars and the implicitly declared standard-library ones alike -- the
+        # compiled schema holds both, and it is the same map the SDL's own descriptions render from.
+        return info.schema.scalar_descriptions_by_name.get(parent.name)
 
     @bramble_field
     def fields(parent: Parent[_TypeRef], info: Info, include_deprecated: bool = False) -> list["__Field"] | None:
@@ -376,13 +377,14 @@ class __Type:
 
 def _all_type_refs(schema: Any) -> list[_TypeRef]:
     """Every named type in the schema, introspection-shaped: the declared object/interface/input/
-    enum types, every union, every registered scalar, and the built-in scalars (which are never
-    "registered" anywhere but are always referencable).
+    enum types, every union, every scalar the compiled schema declares (registered ones plus the
+    standard-library built-ins it references), and the specification's own five scalars, which are
+    never declared anywhere but are always referencable.
     """
     refs = [_named_ref(name, schema) for name in schema.types_by_name]
     refs += [_TypeRef(kind=_TypeKind.UNION, name=name) for name in schema.unions_by_name]
-    scalar_names = list(schema.scalars_by_name) + [
-        name for name in _BUILTIN_SCALAR_NAMES if name not in schema.scalars_by_name
+    scalar_names = list(schema.declared_scalar_names) + [
+        name for name in _BUILTIN_SCALAR_NAMES if name not in schema.declared_scalar_names
     ]
     refs += [_TypeRef(kind=_TypeKind.SCALAR, name=name) for name in scalar_names]
     return refs
@@ -489,7 +491,7 @@ def resolve_type_field(name: str, info: Info) -> __Type | None:
     known = (
         name in info.schema.types_by_name
         or name in info.schema.unions_by_name
-        or name in info.schema.scalars_by_name
+        or name in info.schema.declared_scalar_names
         or name in _BUILTIN_SCALAR_NAMES
     )
     return _named_ref(name, info.schema) if known else None

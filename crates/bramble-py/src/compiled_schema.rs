@@ -37,6 +37,29 @@ pub struct PyCompiledSchema {
     pub schema: CompiledSchema,
 }
 
+#[pymethods]
+impl PyCompiledSchema {
+    /// Every scalar name this schema declares: the explicitly registered ones plus whichever
+    /// standard-library built-ins it actually references, which nothing on the Python side knows
+    /// about -- they are only ever added below, in `compile_schema`. Introspection reads this so it
+    /// reports exactly the scalars the SDL declares; deriving the set separately in Python is what
+    /// let `__schema.types` omit `DateTime` while the SDL declared it, which a client building a
+    /// schema from an introspection result rejects as a dangling reference.
+    ///
+    /// Sorted because the underlying set's iteration order is not stable across runs.
+    #[getter]
+    fn scalar_names(&self) -> Vec<String> {
+        let mut names = self.schema.scalar_names.iter().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[getter]
+    fn scalar_descriptions(&self) -> HashMap<String, String> {
+        self.schema.scalar_descriptions.clone()
+    }
+}
+
 /// Assembles a `CompiledSchema` from what `Schema()`'s Python-side graph walker (Task 8b) already
 /// discovered -- the `__bramble_type_info__`/`__bramble_union_info__`/`__bramble_directive_info__`
 /// objects for every reachable type/union/directive, plus the resolved scalar names. Each of those

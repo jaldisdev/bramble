@@ -563,6 +563,12 @@ class Schema:
             schema_applied_directives=list(self.schema_directives),
         )
 
+        # Read back off the *compiled* schema rather than off `scalar_map`: compilation is where the
+        # standard-library built-ins a schema references (`DateTime`, `UUID`, ...) get declared, and
+        # nothing registers those in `scalar_map`. Introspection needs the same set the SDL renders.
+        self.declared_scalar_names: tuple[str, ...] = tuple(self._compiled.scalar_names)
+        self.scalar_descriptions_by_name: dict[str, str] = dict(self._compiled.scalar_descriptions)
+
     def validate_query(self, query: str, *, operation_name: str | None = None) -> None:
         """Validates `query`'s (optionally named) operation against this compiled schema (§7a),
         raising a `bramble.GraphQLError` on the first violation found. Returns `None` if valid.

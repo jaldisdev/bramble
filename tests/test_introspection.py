@@ -19,8 +19,11 @@
 
 from __future__ import annotations
 
+import datetime
+import decimal
 import enum
 import json
+import uuid
 
 import bramble
 import bramble.federation as federation
@@ -350,3 +353,92 @@ def test_introspection_reports_input_field_default_values() -> None:
 
     defaults = {f["name"]: f["defaultValue"] for f in result["data"]["__type"]["inputFields"]}
     assert defaults == {"limit": "10", "cursor": "null"}
+
+
+# --- Standard-library scalars -----------------------------------------------------------------------
+
+
+@bramble.type
+class _Reading:
+    at: datetime.datetime
+    on: datetime.date
+    taken: datetime.time
+    identifier: uuid.UUID
+    amount: decimal.Decimal
+
+
+@bramble.type
+class _ScalarQuery:
+    @bramble.field
+    def reading() -> _Reading:
+        return _Reading(
+            at=datetime.datetime(2026, 1, 1),
+            on=datetime.date(2026, 1, 1),
+            taken=datetime.time(12, 0),
+            identifier=uuid.UUID(int=1),
+            amount=decimal.Decimal("1.5"),
+        )
+
+
+def _referenced_type_names(node: dict | None) -> set[str]:
+    """Every named type a `...TypeRef`-shaped fragment of an introspection result points at,
+    unwrapping `ofType` chains.
+    """
+    names: set[str] = set()
+    while node is not None:
+        if node.get("name") is not None:
+            names.add(node["name"])
+        node = node.get("ofType")
+    return names
+
+
+def test_standard_library_scalars_are_reported_as_types() -> None:
+    """`datetime`/`date`/`time`/`UUID`/`Decimal` are named and serialized with no registration at
+    all, so they never appear in `scalar_map` -- the SDL still declares them, and introspection has
+    to agree, or a client rejects the result with "unknown type: DateTime".
+    """
+    types = _types_by_name(bramble.Schema(query=_ScalarQuery).execute(INTROSPECTION_QUERY))
+
+    for name in ("DateTime", "Date", "Time", "UUID", "Decimal"):
+        assert types[name]["kind"] == "SCALAR", name
+    assert types["DateTime"]["description"] == "Date with time (isoformat)"
+
+
+def test_an_unreferenced_standard_library_scalar_is_not_reported() -> None:
+    """Same rule the SDL renders by: only the built-ins a schema actually refers to are declared."""
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def at() -> datetime.datetime:
+            return datetime.datetime(2026, 1, 1)
+
+    types = _types_by_name(bramble.Schema(query=Query).execute(INTROSPECTION_QUERY))
+
+    assert "DateTime" in types
+    assert "UUID" not in types
+
+
+def test_every_referenced_type_is_present_in_the_result() -> None:
+    """The invariant a client's `buildClientSchema` enforces, and the one a missing scalar breaks:
+    every type named anywhere in the result -- as a field's type, an argument's, an interface, a
+    union member -- must itself be one of the reported types.
+    """
+    result = bramble.Schema(query=_ScalarQuery, types=[Item], directives=[shout]).execute(INTROSPECTION_QUERY)
+    types = _types_by_name(result)
+
+    referenced: set[str] = set()
+    for entry in types.values():
+        for field in entry["fields"] or ():
+            referenced |= _referenced_type_names(field["type"])
+            for argument in field["args"]:
+                referenced |= _referenced_type_names(argument["type"])
+        for input_field in entry["inputFields"] or ():
+            referenced |= _referenced_type_names(input_field["type"])
+        for related in (entry["interfaces"] or []) + (entry["possibleTypes"] or []):
+            referenced |= _referenced_type_names(related)
+    for directive in result["data"]["__schema"]["directives"]:
+        for argument in directive["args"]:
+            referenced |= _referenced_type_names(argument["type"])
+
+    assert referenced - set(types) == set()
