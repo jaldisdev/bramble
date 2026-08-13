@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     # `_execution`, which imports this module. It is instead bound late, by `_schema` itself once
     # the class exists -- see the assignment at the bottom of `bramble/_schema.py`, which is what
     # keeps `typing.get_type_hints(Info)` working.
+    from bramble._bramble import LoweredField
     from bramble._schema import Schema
 
 # `Path` and `SelectedField` live here rather than in `bramble._execution` where they are built:
@@ -90,6 +91,22 @@ class SelectedField:
     name: str
     arguments: dict[str, Any]
     selections: list["SelectedField"]
+
+
+def build_selected_fields(lowered_fields: Sequence["LoweredField"]) -> list[SelectedField]:
+    """Materialises the resolver-facing view of a selection set from the lowered query.
+
+    Lives here rather than in `_execution` because `Info.selected_fields` builds it on demand --
+    see that property for why it is not built up front.
+    """
+    return [
+        SelectedField(
+            name=lowered.field_name,
+            arguments=dict(lowered.arguments),
+            selections=build_selected_fields(lowered.selections),
+        )
+        for lowered in lowered_fields
+    ]
 
 
 ParentType = TypeVar("ParentType")
@@ -152,6 +169,22 @@ class Info(Generic[ContextType, RootValueType]):
     #: do `@defer`/`@stream` (see `Info.path`/the incremental-delivery docs for those).
     field_directives: tuple["FieldDirective", ...]
     schema: "Schema"
+
+    @property
+    def selected_fields(self) -> list["SelectedField"]:
+        """This field's own sub-selections, built the first time a resolver asks for them.
+
+        Built lazily because the overwhelming majority of resolvers never read it, while building
+        it walks the entire remaining selection subtree and allocates a `SelectedField` per node --
+        eagerly, for every field of every request. The execution bridge stashes the lowered
+        selections instead and this materialises them on demand, memoised per `Info` so repeated
+        reads inside one resolver stay free.
+        """
+        selected = self.__dict__.get("_selected_fields")
+        if selected is None:
+            selected = build_selected_fields(self._lowered_selections)
+            self.__dict__["_selected_fields"] = selected
+        return selected
 
 
 class Depends(Generic[ProvidedType]):

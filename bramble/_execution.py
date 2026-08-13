@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import decimal
+import functools
 import inspect
 import sys
 import uuid
@@ -39,14 +40,15 @@ from bramble._maybe import Some
 from bramble._permission import check_permissions
 
 # `Path`/`SelectedField` are defined in `_resolver` (they are resolver-facing types) and
-# re-exported here, where they are actually constructed, so the original import path keeps
-# working for anything that used it.
-from bramble._resolver import FieldDirective, Info, Path, SelectedField
+# re-exported here, which is where they used to be constructed, so the original import path keeps
+# working for anything that used it. `SelectedField` is now built lazily by `Info.selected_fields`
+# and so is unreferenced in this module -- the re-export is the whole point of importing it.
+from bramble._resolver import FieldDirective, Info, Path, SelectedField  # noqa: F401
 from bramble._union import resolve_union_type
 from bramble.directive import apply_directive
 
 if TYPE_CHECKING:
-    from bramble._bramble import ArgumentInfo, FieldInfo, GraphQLTypeInfo, LoweredField, ParsedDocument
+    from bramble._bramble import ArgumentInfo, FieldInfo, GraphQLTypeInfo, LoweredField, ParsedDocument, TypeInfo
     from bramble._schema import Schema
 
 #: `asyncio.Task(..., eager_start=True)` runs a coroutine synchronously until its first actual
@@ -74,17 +76,6 @@ async def _gather_concurrently(coroutines: Sequence[Coroutine[Any, Any, Any]]) -
     loop = asyncio.get_running_loop()
     tasks = [asyncio.Task(coroutine, loop=loop, eager_start=True) for coroutine in coroutines]
     return list(await asyncio.gather(*tasks, return_exceptions=True))
-
-
-def _selected_fields(lowered_fields: Sequence["LoweredField"]) -> list[SelectedField]:
-    return [
-        SelectedField(
-            name=lowered.field_name,
-            arguments=dict(lowered.arguments),
-            selections=_selected_fields(lowered.selections),
-        )
-        for lowered in lowered_fields
-    ]
 
 
 class _PropagateNull(Exception):
@@ -149,7 +140,8 @@ def _build_info(
     info.variable_values = state.variable_values
     info.query = state.query
     info.path = path
-    info.selected_fields = _selected_fields(selections)
+    # Stashed rather than materialised -- `Info.selected_fields` builds the view on first read.
+    info._lowered_selections = selections
     info.field_directives = _field_directives(lowered_field, state.schema)
     info.schema = state.schema
     return info
@@ -189,10 +181,14 @@ def _field_directives(lowered_field: "LoweredField | None", schema: "Schema") ->
     return tuple(directives)
 
 
+@functools.lru_cache(maxsize=4096)
 def _to_camel_case(name: str) -> str:
     """Mirrors `bramble_core::naming::to_camel_case` exactly (`post_id` -> `postId`) -- must stay
     in lockstep with the Rust implementation validation uses, or a query could pass validation
     (Rust) but fail to bind at execution time (Python), or vice versa.
+
+    Cached because it is a pure function of a name drawn from a fixed, schema-sized set, yet was
+    being recomputed per field per request.
     """
     result: list[str] = []
     capitalize_next = False
@@ -630,12 +626,25 @@ def _applicable_selections(
     return result
 
 
-def _find_field_info(concrete_type: type, field_name: str, *, auto_camel_case: bool) -> "FieldInfo | None":
-    for field_info in concrete_type.__bramble_type_info__.fields:
+@functools.lru_cache(maxsize=2048)
+def _fields_by_graphql_name(type_info: "TypeInfo", auto_camel_case: bool) -> dict[str, "FieldInfo"]:
+    """`type_info`'s fields keyed by the name a query would write, built once per type.
+
+    Keyed on the `TypeInfo` rather than the class deliberately: a class deferred at decoration time
+    has its `__bramble_type_info__` *replaced* once `Schema()` resolves it, and keying on the object
+    means the stale entry is simply never looked up again instead of having to be invalidated.
+    """
+    mapping: dict[str, "FieldInfo"] = {}
+    for field_info in type_info.fields:
         graphql_key = _effective_name(field_info.name, field_info.graphql_name, auto_camel_case=auto_camel_case)
-        if graphql_key == field_name:
-            return field_info
-    return None
+        # `setdefault`, not assignment: a linear scan returned the *first* field matching a name,
+        # and duplicate names must keep resolving the same way here.
+        mapping.setdefault(graphql_key, field_info)
+    return mapping
+
+
+def _find_field_info(concrete_type: type, field_name: str, *, auto_camel_case: bool) -> "FieldInfo | None":
+    return _fields_by_graphql_name(concrete_type.__bramble_type_info__, auto_camel_case).get(field_name)
 
 
 def _build_error(
