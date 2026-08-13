@@ -119,10 +119,21 @@ def _unwrap_union_member(member: Any) -> Any:
     wrapper itself and was rejected as "not a '@bramble.type'-decorated object type". Resolving the
     lazy reference here is safe: this only runs while a `Schema()` is being built, by which point
     the referenced module is importable.
+
+    The forward reference may still be unevaluated (`ForwardRef`) or already turned into a
+    `LazyType` -- `typing.get_type_hints` evaluates it against the seeded `localns`
+    (`namespace_for_class`/`namespace_for_callable`), which maps the name to exactly that
+    placeholder. Both spellings have to resolve to the real class here, or the placeholder itself
+    ends up in `union_members_by_name`, where `resolve_type`'s `isinstance` checks and
+    introspection's `possibleTypes` both fail on it.
     """
+    if isinstance(member, LazyType):
+        return member.resolve_type()
     if typing.get_origin(member) is not typing.Annotated:
         return member
     inner, *metadata = typing.get_args(member)
+    if isinstance(inner, LazyType):
+        return inner.resolve_type()
     reference = _lazy_reference_marker(metadata)
     if reference is not None and isinstance(inner, typing.ForwardRef):
         return reference.resolve_forward_ref(inner).resolve_type()

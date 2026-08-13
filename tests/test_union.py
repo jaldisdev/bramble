@@ -269,3 +269,72 @@ def test_a_union_member_may_be_a_lazy_reference(tmp_path, monkeypatch) -> None:
 
     sdl = bramble.Schema(query=main.Query).to_sdl()
     assert "union Media = Audio | Video" in sdl
+
+
+def test_a_lazy_union_member_resolves_to_the_real_class(tmp_path, monkeypatch) -> None:
+    """SDL rendering reads the union's members off the annotation in Rust, so it stayed correct
+    while `union_members_by_name` -- what `resolve_type` and introspection's `possibleTypes` both
+    read -- held a `LazyType` placeholder instead of the imported class. The placeholder reaches
+    that list whenever `get_type_hints` has already evaluated the forward reference against the
+    seeded `localns`, which is every union named through a resolver's return annotation.
+    """
+    import sys
+    import textwrap
+
+    package = tmp_path / "lazymembers"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "other.py").write_text(
+        textwrap.dedent(
+            """
+            import bramble
+
+            @bramble.type
+            class Video:
+                url: str
+            """
+        )
+    )
+    (package / "main.py").write_text(
+        textwrap.dedent(
+            """
+            from typing import Annotated, Union
+            import bramble
+
+            @bramble.type
+            class Audio:
+                url: str
+
+            Media = Annotated[
+                Union[Audio, Annotated["Video", bramble.lazy(".other")]],
+                bramble.union("Media"),
+            ]
+
+            @bramble.type
+            class Query:
+                @bramble.field
+                def media() -> Media:
+                    from lazymembers.other import Video
+
+                    return Video(url="v.mp4")
+            """
+        )
+    )
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in [n for n in sys.modules if n.startswith("lazymembers")]:
+        del sys.modules[name]
+
+    from lazymembers import main
+    from lazymembers.other import Video
+
+    schema = bramble.Schema(query=main.Query)
+    assert schema.union_members_by_name["Media"] == [main.Audio, Video]
+
+    introspection = schema.execute('{ __type(name: "Media") { possibleTypes { name } } }')
+    assert "errors" not in introspection
+    assert introspection["data"]["__type"]["possibleTypes"] == [{"name": "Audio"}, {"name": "Video"}]
+
+    result = schema.execute("{ media { __typename ... on Video { url } } }")
+    assert "errors" not in result
+    assert result["data"] == {"media": {"__typename": "Video", "url": "v.mp4"}}
