@@ -1,0 +1,94 @@
+name: Publish
+
+# Manual only: releasing is a deliberate act, and the version in `pyproject.toml` is hand-bumped,
+# so a push trigger would just retry publishing an already-taken version on every merge.
+on:
+  workflow_dispatch:
+
+# `workflow_dispatch` can be launched from any ref the actor picks in the UI, so the branch
+# restriction has to be enforced inside the workflow -- see the `guard` job.
+
+permissions: {}
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  RELEASE_BRANCH: master
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the run was started from the release branch
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/$RELEASE_BRANCH" ]; then
+            echo "::error::Refusing to publish from '$REF'. This workflow only runs on '$RELEASE_BRANCH'."
+            exit 1
+          fi
+
+  build-wheels:
+    needs: guard
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The extension is built against `abi3-py310`, so one wheel per platform covers every
+          # Python this package supports -- the matrix varies by target triple only, not by version.
+          - { runner: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { runner: ubuntu-24.04-arm, target: aarch64, manylinux: auto }
+          # No Intel macOS wheel on purpose: macOS 26 is Apple's last Intel release, and the hosted
+          # Intel runner label is itself a stopgap that disappears in Fall 2027. Anyone still on an
+          # Intel Mac falls back to the sdist, which needs a Rust toolchain to build.
+          - { runner: macos-latest, target: aarch64, manylinux: "" }
+          - { runner: windows-latest, target: x64, manylinux: "" }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.runner }}-${{ matrix.target }}
+          path: dist
+
+  build-sdist:
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist
+
+  publish:
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/bramble
+    permissions:
+      # Required for PyPI trusted publishing: the job mints a short-lived OIDC token instead of
+      # reading a stored API token.
+      id-token: write
+    steps:
+      # No `pattern`: every artifact this workflow produces is a distribution meant for the upload.
+      - uses: actions/download-artifact@v7
+        with:
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
