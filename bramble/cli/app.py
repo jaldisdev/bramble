@@ -26,7 +26,10 @@ from bramble.cli.commands.dev import dev
 
 
 @click.group(name="bramble")
-@click.version_option(package_name="bramble", message="%(prog)s %(version)s")
+# The distribution is `bramble-graphql` even though the command and import package are `bramble`.
+# Recent click recovers from the mismatch by mapping the import package back to its distribution,
+# but click 8.1 -- the floor this package allows -- raises instead, so name the distribution here.
+@click.version_option(package_name="bramble-graphql", message="%(prog)s %(version)s")
 def cli() -> None:
     """bramble command-line tools."""
 

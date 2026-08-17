@@ -1,6 +1,6 @@
 # The `bramble` CLI
 
-Installing the `cli` extra (`pip install "bramble[cli]"`) provides a
+Installing the `cli` extra (`pip install "bramble-graphql[cli]"`) provides a
 `bramble` command with two subcommands: `dev` (a local development server
 with GraphiQL) and `codegen` (typed client code generation from `.graphql`
 query files).

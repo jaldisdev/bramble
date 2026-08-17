@@ -1,7 +1,7 @@
 # FastAPI
 
 ```bash
-pip install "bramble[fastapi]"
+pip install "bramble-graphql[fastapi]"
 ```
 
 `bramble.adapters.fastapi.GraphQLRouter` builds an `APIRouter` serving

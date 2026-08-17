@@ -1,7 +1,7 @@
 # Django
 
 ```bash
-pip install "bramble[django]"
+pip install "bramble-graphql[django]"
 ```
 
 Django's own views (sync or async) can't hold a long-lived duplex socket,

@@ -1,7 +1,7 @@
 # Raw ASGI
 
 ```bash
-pip install "bramble[asgi]"
+pip install "bramble-graphql[asgi]"
 ```
 
 `bramble.adapters.asgi.GraphQL` implements the exact same behavior as the

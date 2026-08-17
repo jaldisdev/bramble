@@ -22,15 +22,29 @@ Python and dataclass-based.
 
 ## Installation
 
-Requires Python 3.10+ and a Rust toolchain (for building from source; no
-prebuilt wheels are published yet).
+Requires Python 3.10+.
 
 ```bash
-pip install -e ".[dev]"
+pip install bramble-graphql
 ```
 
-This uses [maturin](https://www.maturin.rs/) to build the Rust extension
-in place.
+The distribution is named `bramble-graphql` on PyPI; the import package is
+`bramble`:
+
+```python
+import bramble
+```
+
+Prebuilt wheels are published for Linux (x86_64, aarch64), macOS (Apple
+silicon), and Windows (x64). Other platforms fall back to the sdist, which
+needs a Rust toolchain to build.
+
+To pull in an HTTP framework's dependencies alongside Bramble, install the
+matching extra — `asgi`, `starlette`, `fastapi`, `flask`, `django`, or `cli`:
+
+```bash
+pip install "bramble-graphql[fastapi]"
+```
 
 ## Quickstart
 
@@ -49,8 +63,12 @@ result = schema.execute("{ hello }")
 # {'data': {'hello': 'Hello, world!'}}
 
 print(schema.to_sdl())
+# schema {
+#   query: Query
+# }
+#
 # type Query {
-#   hello(name: String!): String!
+#   hello(name: String! = "world"): String!
 # }
 ```
 
@@ -59,6 +77,13 @@ interfaces, unions, custom scalars, schema/operation directives, mutations,
 and async resolvers.
 
 ## Development
+
+Working on Bramble itself needs a Rust toolchain.
+[maturin](https://www.maturin.rs/) builds the extension in place:
+
+```bash
+pip install -e ".[dev]"
+```
 
 ```bash
 # Rust

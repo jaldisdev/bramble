@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_BRANCH: master
+  RELEASE_BRANCH: canary
 
 jobs:
   guard:
@@ -80,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/bramble
+      url: https://pypi.org/p/bramble-graphql
     permissions:
       # Required for PyPI trusted publishing: the job mints a short-lived OIDC token instead of
       # reading a stored API token.

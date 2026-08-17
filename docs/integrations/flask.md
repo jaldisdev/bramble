@@ -1,7 +1,7 @@
 # Flask
 
 ```bash
-pip install "bramble[flask]"
+pip install "bramble-graphql[flask]"
 ```
 
 Flask is WSGI-based, and **WSGI has no WebSocket support at all** -- this

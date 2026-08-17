@@ -1,7 +1,7 @@
 # Starlette
 
 ```bash
-pip install "bramble[starlette]"
+pip install "bramble-graphql[starlette]"
 ```
 
 `bramble.adapters.starlette.GraphQL` is a plain ASGI application -- mount

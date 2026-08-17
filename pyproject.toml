@@ -3,7 +3,8 @@ requires = ["maturin>=1.14.1,<2"]
 build-backend = "maturin"
 
 [project]
-name = "bramble"
+# The distribution name on PyPI; the import package is still `bramble` (see `[tool.maturin]`).
+name = "bramble-graphql"
 version = "0.1.0"
 authors = [
     { name = "Mario Ritzerfeld" }
@@ -43,11 +44,11 @@ starlette = ["starlette>=0.37", "python-multipart>=0.0.32"]
 fastapi = ["fastapi>=0.100", "python-multipart>=0.0.32"]
 flask = ["flask>=2.0", "asgiref>=3.7", "python-multipart>=0.0.32"]
 django = ["django>=4.2", "channels>=4.0", "python-multipart>=0.0.32"]
-cli = ["click>=8.1", "uvicorn>=0.30", "bramble[starlette]"]
+cli = ["click>=8.1", "uvicorn>=0.30", "bramble-graphql[starlette]"]
 dev = [
     "pytest",
     "ruff",
-    "bramble[cli,asgi,starlette,fastapi,flask,django]",
+    "bramble-graphql[cli,asgi,starlette,fastapi,flask,django]",
     "httpx>=0.28.1",
     "httpx2>=2.9.1",
     "channels[daphne]>=4.0",

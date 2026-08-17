@@ -54,7 +54,7 @@ def dev(schema: str, host: str, port: int, log_level: str, app_dir: str) -> None
     except ImportError:
         click.secho(
             "Error: the dev server requires additional packages, install them with:\n"
-            '  pip install "bramble[cli]"',
+            '  pip install "bramble-graphql[cli]"',
             fg="red",
         )
         raise SystemExit(1) from None

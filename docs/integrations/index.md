@@ -8,17 +8,17 @@ all behave identically across every one of them.
 
 | Framework | Extra | HTTP | WebSocket subscriptions |
 | --- | --- | --- | --- |
-| [Starlette](starlette.md) | `bramble[starlette]` | Yes | Yes |
-| [Raw ASGI](asgi.md) | `bramble[asgi]` | Yes | Yes |
-| [FastAPI](fastapi.md) | `bramble[fastapi]` | Yes | Yes |
-| [Flask](flask.md) | `bramble[flask]` | Yes | No (WSGI has no WebSocket support) |
-| [Django](django.md) | `bramble[django]` | Yes | Yes, via Django Channels |
+| [Starlette](starlette.md) | `bramble-graphql[starlette]` | Yes | Yes |
+| [Raw ASGI](asgi.md) | `bramble-graphql[asgi]` | Yes | Yes |
+| [FastAPI](fastapi.md) | `bramble-graphql[fastapi]` | Yes | Yes |
+| [Flask](flask.md) | `bramble-graphql[flask]` | Yes | No (WSGI has no WebSocket support) |
+| [Django](django.md) | `bramble-graphql[django]` | Yes | Yes, via Django Channels |
 
 Each extra installs bramble alongside that framework's own dependencies,
 e.g.:
 
 ```bash
-pip install "bramble[fastapi]"
+pip install "bramble-graphql[fastapi]"
 ```
 
 Every integration accepts a `multipart_uploads_enabled: bool = True`

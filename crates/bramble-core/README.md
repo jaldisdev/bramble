@@ -22,15 +22,16 @@ Python and dataclass-based.
 
 ## Installation
 
-Requires Python 3.10+ and a Rust toolchain (for building from source; no
-prebuilt wheels are published yet).
+Requires Python 3.10+.
 
 ```bash
-pip install -e ".[dev]"
+pip install bramble-graphql
 ```
 
-This uses [maturin](https://www.maturin.rs/) to build the Rust extension
-in place.
+The distribution is named `bramble-graphql` on PyPI; the import package is
+`bramble`. Building from source instead requires a Rust toolchain:
+`pip install -e ".[dev]"` uses [maturin](https://www.maturin.rs/) to build
+the Rust extension in place.
 
 ## Quickstart
 
@@ -49,8 +50,12 @@ result = schema.execute("{ hello }")
 # {'data': {'hello': 'Hello, world!'}}
 
 print(schema.to_sdl())
+# schema {
+#   query: Query
+# }
+#
 # type Query {
-#   hello(name: String!): String!
+#   hello(name: String! = "world"): String!
 # }
 ```
 
