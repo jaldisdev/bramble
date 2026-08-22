@@ -23,10 +23,11 @@ resolved against a `bramble.Schema` -- powers `bramble codegen`, but also usable
 
 **Known, deliberate scope limits** (not silent gaps -- see `bramble/codegen/query_codegen.py`'s
 own docstrings for exactly where each applies):
-- No interface/union type-conditional codegen yet: a field scoped to `... on ConcreteType { ... }`
-  is flattened the same as an unconditional selection, rather than generating a proper
-  discriminated-union response type per concrete type. Works correctly as long as a query against
-  an interface/union field only selects fields common to every possible type (no `... on X`).
+- No discriminated response type per concrete type yet: a field scoped to
+  `... on ConcreteType { ... }` resolves against that type and is typed as optional, since it is
+  absent whenever the value turns out to be one of the others -- but the result is still one flat
+  shape rather than a union of per-type shapes, so the optional fields are not correlated with
+  each other or with `__typename`.
 - GraphQL enum types can't appear at all yet, since bramble's schema layer has no enum concept of
   its own (a long-standing, separately-tracked gap unrelated to codegen specifically).
 """
