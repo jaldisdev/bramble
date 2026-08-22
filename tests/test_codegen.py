@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+from typing import Annotated, Union
+
 import pytest
 
 import bramble
@@ -65,6 +67,43 @@ class _Query:
     @bramble.field
     def posts(filter: PostFilter) -> list[_Post]:
         return []
+
+
+@bramble.interface
+class _Media:
+    id: bramble.ID
+
+
+@bramble.type
+class _Photo(_Media):
+    width: int
+
+
+@bramble.type
+class _Video(_Media):
+    duration: int
+
+
+def _resolve_attachment(value: object, info: object) -> type:
+    return _Photo if isinstance(value, _Photo) else _Video
+
+
+_Attachment = Annotated[Union[_Photo, _Video], bramble.union("_Attachment", resolve_type=_resolve_attachment)]
+
+
+@bramble.type
+class _Gallery:
+    @bramble.field
+    def media() -> _Media:
+        return _Photo(id="1", width=1)
+
+    @bramble.field
+    def attachment() -> _Attachment:
+        return _Photo(id="1", width=1)
+
+
+def _polymorphic_schema() -> bramble.Schema:
+    return bramble.Schema(query=_Gallery, types=[_Media, _Photo, _Video])
 
 
 def _schema() -> bramble.Schema:
@@ -134,7 +173,7 @@ def test_named_fragment_is_flattened_into_the_selection() -> None:
       }
     }
 
-    fragment PostFields on Post {
+    fragment PostFields on _Post {
       title
       author { name }
     }
@@ -198,3 +237,75 @@ def test_typescript_plugin_generates_expected_shape() -> None:
     assert "postBySlug: GetPostResultPostBySlug | null;" in code
     assert "export type GetPostResultPostBySlug = {" in code
     assert "title: string;" in code
+
+
+def test_interface_field_resolves_against_the_interface() -> None:
+    operation = generate_operation(_polymorphic_schema(), "query G { media { id } }")
+
+    nested = next(shape for shape in operation.nested_types if shape.name == "GResultMedia")
+    assert [field.name for field in nested.fields] == ["id"]
+
+
+def test_type_conditional_field_is_optional() -> None:
+    operation = generate_operation(
+        _polymorphic_schema(), "query G { media { id ... on _Photo { width } } }"
+    )
+
+    nested = next(shape for shape in operation.nested_types if shape.name == "GResultMedia")
+    by_name = {field.name: field.type for field in nested.fields}
+
+    assert list(by_name) == ["id", "width"]
+    # `width` only exists when the value really is a `_Photo`
+    assert isinstance(by_name["width"], OptionalType)
+    assert not isinstance(by_name["id"], OptionalType)
+
+
+def test_named_fragment_carries_its_own_condition() -> None:
+    operation = generate_operation(
+        _polymorphic_schema(),
+        "query G { media { id ...PhotoFields } } fragment PhotoFields on _Photo { width }",
+    )
+
+    nested = next(shape for shape in operation.nested_types if shape.name == "GResultMedia")
+    by_name = {field.name: field.type for field in nested.fields}
+    assert isinstance(by_name["width"], OptionalType)
+
+
+def test_union_members_contribute_their_own_fields() -> None:
+    operation = generate_operation(
+        _polymorphic_schema(),
+        "query G { attachment { __typename ... on _Photo { width } ... on _Video { duration } } }",
+    )
+
+    nested = next(shape for shape in operation.nested_types if shape.name == "GResultAttachment")
+    by_name = {field.name: field.type for field in nested.fields}
+
+    assert list(by_name) == ["__typename", "width", "duration"]
+    assert isinstance(by_name["width"], OptionalType)
+    assert isinstance(by_name["duration"], OptionalType)
+
+
+def test_selecting_a_field_straight_off_a_union_is_rejected() -> None:
+    with pytest.raises(QueryCodegenError) as error:
+        generate_operation(_polymorphic_schema(), "query G { attachment { width } }")
+
+    message = str(error.value)
+    assert "union '_Attachment'" in message
+    assert "... on <Type>" in message
+
+
+def test_unknown_fragment_condition_is_rejected() -> None:
+    with pytest.raises(QueryCodegenError, match="unknown type '_Missing'"):
+        generate_operation(_polymorphic_schema(), "query G { media { id ... on _Missing { x } } }")
+
+
+def test_a_field_selected_both_ways_stays_required() -> None:
+    operation = generate_operation(
+        _polymorphic_schema(), "query G { media { id ... on _Photo { id } } }"
+    )
+
+    nested = next(shape for shape in operation.nested_types if shape.name == "GResultMedia")
+    by_name = {field.name: field.type for field in nested.fields}
+
+    assert list(by_name) == ["id"]
+    assert not isinstance(by_name["id"], OptionalType)
