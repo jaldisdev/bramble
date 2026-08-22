@@ -88,6 +88,7 @@ def _register_input_object(type_name: str, schema: "Schema", object_registry: di
         ObjectField(
             _effective_key(field_info, schema),
             _codegen_type_from_type_info(field_info.type_info, selections=None, document=None, schema=schema, path=(), operation_name="", object_registry=object_registry),
+            optional=field_info.is_nullable or field_info.default_value is not None,
         )
         for field_info in input_type.__bramble_type_info__.fields
     )
@@ -324,7 +325,11 @@ def generate_operation(schema: "Schema", query_text: str) -> Operation:
     object_registry.pop(result_type.name, None)
 
     variables = tuple(
-        VariableDefinition(name=variable.name, type=_codegen_type_for_variable(variable.type_str, schema, object_registry))
+        VariableDefinition(
+            name=variable.name,
+            type=_codegen_type_for_variable(variable.type_str, schema, object_registry),
+            optional=variable.has_default or not variable.type_str.endswith("!"),
+        )
         for variable in operation.variables
     )
 

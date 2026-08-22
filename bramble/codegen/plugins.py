@@ -98,18 +98,22 @@ class PythonPlugin(QueryCodegenPlugin):
             lines.append(f"class {shape.name}:")
             if not shape.fields:
                 lines.append("    pass")
-            for field in shape.fields:
+            # A dataclass cannot declare a defaulted field before an undefaulted one, so the
+            # omittable fields have to trail the required ones regardless of schema order.
+            for field in sorted(shape.fields, key=lambda field: field.optional):
                 type_str = _type_str(field.type, _PYTHON_SCALAR_MAP, known_names, optional_suffix=" | None", list_format="list[{}]")
-                lines.append(f"    {field.name}: {type_str}")
+                suffix = " = None" if field.optional else ""
+                lines.append(f"    {field.name}: {type_str}{suffix}")
             lines.append("")
             lines.append("")
 
         if operation.variables:
             lines.append("@dataclasses.dataclass")
             lines.append(f"class {operation.name}Variables:")
-            for variable in operation.variables:
+            for variable in sorted(operation.variables, key=lambda variable: variable.optional):
                 type_str = _type_str(variable.type, _PYTHON_SCALAR_MAP, known_names, optional_suffix=" | None", list_format="list[{}]")
-                lines.append(f"    {variable.name}: {type_str}")
+                suffix = " = None" if variable.optional else ""
+                lines.append(f"    {variable.name}: {type_str}{suffix}")
             lines.append("")
 
         return "\n".join(lines)
@@ -128,7 +132,7 @@ class TypeScriptPlugin(QueryCodegenPlugin):
             lines.append(f"export type {shape.name} = {{")
             for field in shape.fields:
                 type_str = _type_str(field.type, _TYPESCRIPT_SCALAR_MAP, known_names, optional_suffix=" | null", list_format="Array<{}>")
-                lines.append(f"  {field.name}: {type_str};")
+                lines.append(f"  {field.name}{'?' if field.optional else ''}: {type_str};")
             lines.append("};")
             lines.append("")
 
@@ -136,7 +140,7 @@ class TypeScriptPlugin(QueryCodegenPlugin):
             lines.append(f"export type {operation.name}Variables = {{")
             for variable in operation.variables:
                 type_str = _type_str(variable.type, _TYPESCRIPT_SCALAR_MAP, known_names, optional_suffix=" | null", list_format="Array<{}>")
-                lines.append(f"  {variable.name}: {type_str};")
+                lines.append(f"  {variable.name}{'?' if variable.optional else ''}: {type_str};")
             lines.append("};")
             lines.append("")
 

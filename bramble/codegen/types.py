@@ -57,6 +57,10 @@ CodegenType = NamedType | ListType | OptionalType
 class ObjectField:
     name: str
     type: CodegenType
+    # Whether the field may be *omitted*, which is not the same thing as being nullable: an input
+    # field is required only when its type is non-null and it declares no default, whereas a
+    # selected result field is always present in the response even when its value is null.
+    optional: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -74,6 +78,7 @@ class ObjectType:
 class VariableDefinition:
     name: str
     type: CodegenType
+    optional: bool = False
 
 
 @dataclasses.dataclass(frozen=True)

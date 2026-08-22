@@ -146,10 +146,10 @@ def test_generates_variable_definitions_including_input_types() -> None:
     )
 
     assert operation.variables == (
-        bramble.codegen.VariableDefinition("filter", OptionalType(NamedType("PostFilter"))),
+        bramble.codegen.VariableDefinition("filter", OptionalType(NamedType("PostFilter")), optional=True),
     )
     input_shape = next(shape for shape in operation.nested_types if shape.name == "PostFilter")
-    assert input_shape.fields == (ObjectField("limit", NamedType("Int")),)
+    assert input_shape.fields == (ObjectField("limit", NamedType("Int"), optional=True),)
 
 
 def test_required_scalar_variable_has_no_optional_wrapper() -> None:
@@ -309,3 +309,53 @@ def test_a_field_selected_both_ways_stays_required() -> None:
 
     assert list(by_name) == ["id"]
     assert not isinstance(by_name["id"], OptionalType)
+
+
+def test_a_variable_is_omittable_unless_it_is_non_null_without_a_default() -> None:
+    operation = generate_operation(
+        _schema(),
+        "query GetPosts($slug: String!, $filter: PostFilter) { postBySlug(slug: $slug) { title } }",
+    )
+
+    optional_by_name = {variable.name: variable.optional for variable in operation.variables}
+    assert optional_by_name == {"slug": False, "filter": True}
+
+
+def test_an_input_field_with_a_default_is_omittable() -> None:
+    operation = generate_operation(
+        _schema(), "query GetPosts($filter: PostFilter) { posts(filter: $filter) { title } }"
+    )
+
+    input_shape = next(shape for shape in operation.nested_types if shape.name == "PostFilter")
+    assert [(field.name, field.optional) for field in input_shape.fields] == [("limit", True)]
+
+
+def test_a_selected_result_field_is_never_omittable() -> None:
+    """A field the client asked for comes back in the response even when its value is null, so
+    nullability must not leak into whether the key is present.
+    """
+    operation = generate_operation(_schema(), "query GetPosts { posts { title } }")
+
+    assert all(not field.optional for field in operation.result_type.fields)
+
+
+def test_typescript_marks_only_omittable_members_with_a_question_mark() -> None:
+    operation = generate_operation(
+        _schema(),
+        "query GetPosts($slug: String!, $filter: PostFilter) { postBySlug(slug: $slug) { title } }",
+    )
+    code = bramble.codegen.TypeScriptPlugin().generate_code(operation)
+
+    assert "  slug: string;" in code
+    assert "  filter?: PostFilter | null;" in code
+    assert "  limit?: number;" in code
+
+
+def test_python_defaults_trail_the_required_members() -> None:
+    operation = generate_operation(
+        _schema(),
+        "query GetPosts($filter: PostFilter, $slug: String!) { postBySlug(slug: $slug) { title } }",
+    )
+    code = bramble.codegen.PythonPlugin().generate_code(operation)
+
+    assert code.index("    slug: str") < code.index("    filter: PostFilter | None = None")
