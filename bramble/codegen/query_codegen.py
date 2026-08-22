@@ -48,24 +48,31 @@ def _capitalize(text: str) -> str:
     return text[:1].upper() + text[1:] if text else text
 
 
-def _flatten_selections(selections: list[Any], document: Any) -> list[Any]:
-    """Expands fragment spreads and inline fragments into their own selections, recursively --
-    unlike `bramble._execution`'s own field flattening, this deliberately does **not** track each
-    result's `type_condition` (no interface/union-aware type-conditional codegen yet, a known,
-    flagged gap -- see the module's own top-level note in `bramble/codegen/__init__.py`); a field
-    scoped to `... on SomeType { ... }` is treated exactly like an unconditional one.
+def _flatten_selections(selections: list[Any], document: Any, condition: str | None = None) -> list[tuple[Any, str | None]]:
+    """Expands fragment spreads and inline fragments into their own selections, recursively,
+    pairing each field with the type condition it was reached through.
+
+    A field selected inside `... on SomeType { ... }` only appears in a response when the value
+    really is a `SomeType`, so the condition has to travel with the field: `_build_object_type`
+    resolves the field against that type rather than the enclosing one, and types it as optional.
+    A nested condition wins over the one it sits inside, which is what a narrowing fragment
+    (`... on A { ... on B { ... } }`) means.
     """
     flattened = []
     for selection in selections:
         if selection.kind == "field":
-            flattened.append(selection)
+            flattened.append((selection, condition))
         elif selection.kind == "fragment_spread":
             fragment = next((f for f in document.fragments if f.name == selection.fragment_name), None)
             if fragment is None:
                 raise QueryCodegenError(f"undefined fragment '{selection.fragment_name}'")
-            flattened.extend(_flatten_selections(fragment.selections, document))
+            flattened.extend(
+                _flatten_selections(fragment.selections, document, fragment.type_condition or condition)
+            )
         elif selection.kind == "inline_fragment":
-            flattened.extend(_flatten_selections(selection.selections, document))
+            flattened.extend(
+                _flatten_selections(selection.selections, document, selection.type_condition or condition)
+            )
     return flattened
 
 
@@ -99,23 +106,24 @@ def _build_object_type(
 ) -> ObjectType:
     synthesized_name = operation_name + "".join(_capitalize(part) for part in path)
 
-    concrete_type = schema.types_by_name.get(type_name)
-    fields_by_name = {}
-    if concrete_type is not None:
-        for field_info in concrete_type.__bramble_type_info__.fields:
-            fields_by_name[field_info.name] = field_info
+    object_fields: list[ObjectField] = []
+    conditional_keys: set[str] = set()
 
-    object_fields = []
-    for selection in _flatten_selections(selections, document):
+    for selection, condition in _flatten_selections(selections, document):
         response_key = selection.alias or selection.field_name
+        owner = condition or type_name
 
         if selection.field_name == "__typename":
-            object_fields.append(ObjectField(response_key, NamedType("String")))
+            if response_key not in {field.name for field in object_fields}:
+                object_fields.append(ObjectField(response_key, NamedType("String")))
             continue
 
-        field_info = _find_field_info(fields_by_name, selection.field_name, schema)
+        if owner != type_name and owner not in schema.types_by_name and owner not in schema.union_members_by_name:
+            raise QueryCodegenError(f"fragment condition names unknown type '{owner}'")
+
+        field_info = _find_field_info(_fields_of(owner, schema), selection.field_name, schema)
         if field_info is None:
-            raise QueryCodegenError(f"field '{selection.field_name}' does not exist on type '{type_name}'")
+            raise QueryCodegenError(_missing_field_message(selection.field_name, owner, schema))
 
         nested_path = (*path, response_key)
         field_type = _codegen_type_from_type_info(
@@ -127,11 +135,46 @@ def _build_object_type(
             operation_name=operation_name,
             object_registry=object_registry,
         )
-        object_fields.append(ObjectField(response_key, field_type))
+
+        # Reached through `... on SomeType`, so the field is absent whenever the value turns out
+        # to be one of the other possible types -- unless it is *also* selected unconditionally.
+        if condition is not None and condition != type_name:
+            conditional_keys.add(response_key)
+            if not isinstance(field_type, OptionalType):
+                field_type = OptionalType(field_type)
+        else:
+            conditional_keys.discard(response_key)
+
+        existing = next((index for index, field in enumerate(object_fields) if field.name == response_key), None)
+        if existing is None:
+            object_fields.append(ObjectField(response_key, field_type))
+        elif response_key not in conditional_keys:
+            # An unconditional selection of the same key overrides the optional form
+            object_fields[existing] = ObjectField(response_key, field_type)
 
     result = ObjectType(synthesized_name, tuple(object_fields))
     object_registry[synthesized_name] = result
     return result
+
+
+def _fields_of(type_name: str, schema: "Schema") -> dict[str, Any]:
+    """The fields selectable on a type. A union has none of its own -- only `__typename` and
+    fragments are valid against it -- so it maps to an empty set rather than being an error here.
+    """
+    named = schema.types_by_name.get(type_name)
+    if named is None:
+        return {}
+    return {field_info.name: field_info for field_info in named.__bramble_type_info__.fields}
+
+
+def _missing_field_message(field_name: str, type_name: str, schema: "Schema") -> str:
+    if type_name in schema.union_members_by_name:
+        members = " | ".join(member.__name__ for member in schema.union_members_by_name[type_name])
+        return (
+            f"field '{field_name}' cannot be selected on union '{type_name}' ({members}) -- "
+            f"a union has no fields of its own, so select it inside `... on <Type>`"
+        )
+    return f"field '{field_name}' does not exist on type '{type_name}'"
 
 
 def _find_field_info(fields_by_name: dict[str, Any], field_name: str, schema: "Schema") -> Any | None:
