@@ -38,6 +38,7 @@ class QueryCodegenPlugin(abc.ABC):
 
 
 _PYTHON_SCALAR_MAP: dict[str, str] = {
+    "JSON": "typing.Any",
     "String": "str",
     "Int": "int",
     "Float": "float",
@@ -51,6 +52,8 @@ _PYTHON_SCALAR_MAP: dict[str, str] = {
 }
 
 _TYPESCRIPT_SCALAR_MAP: dict[str, str] = {
+    # Emitting the bare name would collide with the global `JSON` object type
+    "JSON": "any",
     "String": "string",
     "Int": "number",
     "Float": "number",
