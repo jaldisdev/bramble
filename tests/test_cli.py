@@ -36,7 +36,7 @@ def test_version_flag_reports_the_installed_package_version() -> None:
     result = runner.invoke(cli, ["--version"])
 
     assert result.exit_code == 0
-    assert result.output.strip() == "bramble 0.1.0"
+    assert result.output.strip() == "bramble 0.2.0"
 
 _SCHEMA_MODULE = """
 import bramble

@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 # The distribution name on PyPI; the import package is still `bramble` (see `[tool.maturin]`).
 name = "bramble-graphql"
-version = "0.1.0"
+version = "0.2.0"
 authors = [
     { name = "Mario Ritzerfeld" }
 ]
