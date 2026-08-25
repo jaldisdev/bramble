@@ -332,6 +332,31 @@ pub fn validate_schema_shape(
     unions: &HashMap<String, UnionDefinition>,
     scalar_names: &HashSet<String>,
 ) -> Result<(), String> {
+    // "An Object type must define one or more fields" (§3.6), and the same rule holds for
+    // interfaces (§3.7) and input objects (§3.10). Beyond being invalid, a field-less type has no
+    // legal SDL spelling with a body: `type Empty {\n}` is a parse error, so letting one through
+    // would make `to_sdl()` output that cannot be read back.
+    //
+    // Iterated by name so a schema with several offenders always reports the same one.
+    let mut definitions = types.values().collect::<Vec<_>>();
+    definitions.sort_by(|left, right| left.name.cmp(&right.name));
+    for type_def in definitions {
+        let described_kind = match type_def.kind {
+            TypeKind::Type => "object type",
+            TypeKind::Interface => "interface",
+            TypeKind::Input => "input object type",
+            // An enum's members live in `enum_values`, not `fields`; its own "one or more values"
+            // rule is a separate one this check does not cover.
+            TypeKind::Enum => continue,
+        };
+        if type_def.fields.is_empty() {
+            return Err(format!(
+                "{described_kind} '{}' defines no fields, but the GraphQL specification requires one or more",
+                type_def.name
+            ));
+        }
+    }
+
     for type_def in types.values() {
         for interface_name in &type_def.interfaces {
             let Some(interface) = types.get(interface_name) else {
@@ -540,14 +565,24 @@ mod tests {
     #[test]
     fn a_missing_interface_field_is_rejected() {
         let node = type_def("Node", TypeKind::Interface, vec![], vec![field("id", non_null("ID"), vec![])]);
-        let user = type_def("User", TypeKind::Type, vec!["Node"], vec![]);
+        let user = type_def(
+            "User",
+            TypeKind::Type,
+            vec!["Node"],
+            vec![field("name", non_null("String"), vec![])],
+        );
         let error = check(vec![node, user], vec![]).expect_err("a missing field must be rejected");
         assert!(error.contains("does not implement field"), "unexpected: {error}");
     }
 
     #[test]
     fn implementing_an_unregistered_interface_is_rejected() {
-        let user = type_def("User", TypeKind::Type, vec!["Ghost"], vec![]);
+        let user = type_def(
+            "User",
+            TypeKind::Type,
+            vec!["Ghost"],
+            vec![field("id", non_null("ID"), vec![])],
+        );
         let error = check(vec![user], vec![]).expect_err("an unresolvable interface name must be rejected");
         assert!(error.contains("not a registered type"), "unexpected: {error}");
     }
@@ -562,6 +597,33 @@ mod tests {
         };
         let error = check(vec![], vec![union]).expect_err("an unresolvable union member must be rejected");
         assert!(error.contains("not a registered type"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn a_field_less_object_interface_or_input_type_is_rejected() {
+        for (kind, described) in [
+            (TypeKind::Type, "object type"),
+            (TypeKind::Interface, "interface"),
+            (TypeKind::Input, "input object type"),
+        ] {
+            let empty = type_def("Empty", kind, vec![], vec![]);
+            let error = check(vec![empty], vec![]).expect_err("a field-less type must be rejected");
+            assert!(error.contains(described), "unexpected: {error}");
+            assert!(error.contains("'Empty'"), "unexpected: {error}");
+        }
+    }
+
+    #[test]
+    fn an_enum_is_not_mistaken_for_a_field_less_type() {
+        let mut empty = type_def("Color", TypeKind::Enum, vec![], vec![]);
+        empty.enum_values = vec![EnumValueDefinition {
+            name: "RED".to_string(),
+            graphql_name: None,
+            description: None,
+            deprecation_reason: None,
+            applied_directives: Vec::new(),
+        }];
+        check(vec![empty], vec![]).expect("an enum carries its members in `enum_values`, not `fields`");
     }
 
     #[test]

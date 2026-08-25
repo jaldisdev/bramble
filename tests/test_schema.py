@@ -37,6 +37,11 @@ from bramble.schema_directive import Location as SchemaDirectiveLocation
 Base64 = NewType("Base64", bytes)
 
 
+@bramble.input
+class _EmptyInputForFieldLessTest:
+    pass
+
+
 @bramble.type
 class _AudioForUnionTest:
     title: str
@@ -163,6 +168,64 @@ def test_nullable_covariance_violation_fails_at_construction() -> None:
 
     with pytest.raises(bramble.SchemaError, match="non-null"):
         bramble.Schema(query=Query, types=[Shape, Circle])
+
+
+def test_field_less_object_type_fails_at_construction() -> None:
+    @bramble.type
+    class Empty:
+        pass
+
+    @bramble.type
+    class Query:
+        admin: Empty | None
+
+    # A field-less type has no legal SDL spelling -- `type Empty {\n}` is a parse error -- so it
+    # is rejected at build time rather than left to break whatever reparses `to_sdl()` output.
+    with pytest.raises(bramble.SchemaError, match="object type 'Empty' defines no fields"):
+        bramble.Schema(query=Query, types=[Empty])
+
+
+def test_field_less_input_type_fails_at_construction() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def search(criteria: _EmptyInputForFieldLessTest) -> int:
+            return 0
+
+    with pytest.raises(bramble.SchemaError, match="input object type '_EmptyInputForFieldLessTest' defines no fields"):
+        bramble.Schema(query=Query)
+
+
+def test_field_less_interface_fails_at_construction() -> None:
+    @bramble.interface
+    class Marker:
+        pass
+
+    @bramble.type
+    class Tagged(Marker):
+        name: str
+
+    @bramble.type
+    class Query:
+        marked: Marker
+
+    with pytest.raises(bramble.SchemaError, match="interface 'Marker' defines no fields"):
+        bramble.Schema(query=Query, types=[Marker, Tagged])
+
+
+def test_a_type_whose_every_field_is_private_fails_at_construction() -> None:
+    # `bramble.Private` excludes the field from the schema, so a type declaring nothing else
+    # reaches the SDL renderer just as empty as one declaring no fields at all.
+    @bramble.type
+    class OnlySecrets:
+        secret: bramble.Private[str]
+
+    @bramble.type
+    class Query:
+        hidden: OnlySecrets | None
+
+    with pytest.raises(bramble.SchemaError, match="object type 'OnlySecrets' defines no fields"):
+        bramble.Schema(query=Query, types=[OnlySecrets])
 
 
 def test_narrowing_nullability_is_allowed() -> None:

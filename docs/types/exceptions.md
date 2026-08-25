@@ -112,9 +112,11 @@ picks whichever code best matches the situation for its own API's callers.
 
 `bramble.SchemaError` is raised for a problem with the schema *definition*
 itself, at decoration/schema-build time -- an interface implementor missing
-a required field, an `@bramble.input`-decorated class with a resolver
-field, a directive applied somewhere its declared locations don't allow,
-and so on. Since these are all caught before any query ever executes, a
-`SchemaError` should never reach a running server's request-handling path
-in practice -- it signals a bug in the schema's own Python code, not a bad
-request.
+a required field, an object/interface/input type defining no fields at all
+(the GraphQL specification requires one or more, and there is no way to
+print such a type as valid SDL), an `@bramble.input`-decorated class with a
+resolver field, a directive applied somewhere its declared locations don't
+allow, and so on. Since these are all caught before any query ever
+executes, a `SchemaError` should never reach a running server's
+request-handling path in practice -- it signals a bug in the schema's own
+Python code, not a bad request.
