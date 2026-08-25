@@ -14,3 +14,11 @@ rustflags = ["-C", "link-arg=-Wl,--unresolved-symbols=ignore-all"]
 
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-Wl,--unresolved-symbols=ignore-all"]
+
+# `bramble-py`'s tests share one embedded Python interpreter, and a concurrent `import bramble`
+# across cargo's test threads trips CPython's own import-deadlock detection. CI passes
+# `-- --test-threads=1` explicitly; setting it here means a plain `cargo test` behaves the same
+# way, instead of failing with 22 "Once instance has previously been poisoned" cascades. Not
+# `force = true`: an explicit `RUST_TEST_THREADS` in the environment still wins.
+[env]
+RUST_TEST_THREADS = "1"

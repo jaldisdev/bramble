@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import base64
+import enum
 import re
 from typing import Annotated, NewType, Union
 
@@ -211,6 +212,21 @@ def test_field_less_interface_fails_at_construction() -> None:
 
     with pytest.raises(bramble.SchemaError, match="interface 'Marker' defines no fields"):
         bramble.Schema(query=Query, types=[Marker, Tagged])
+
+
+def test_value_less_enum_fails_at_construction() -> None:
+    # An enum's members live in `enum_values`, not `fields`, but `enum Empty {\n}` is just as
+    # unparseable as the field-less object type above.
+    @bramble.enum
+    class Empty(enum.Enum):
+        pass
+
+    @bramble.type
+    class Query:
+        choice: Empty | None
+
+    with pytest.raises(bramble.SchemaError, match="enum 'Empty' defines no values"):
+        bramble.Schema(query=Query, types=[Empty])
 
 
 def test_a_type_whose_every_field_is_private_fails_at_construction() -> None:

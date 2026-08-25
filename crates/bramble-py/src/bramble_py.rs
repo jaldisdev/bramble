@@ -35,15 +35,15 @@ mod validation;
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::sync::Once;
+    use std::sync::OnceLock;
 
     use pyo3::prelude::*;
 
-    static INIT: Once = Once::new();
+    static INIT: OnceLock<()> = OnceLock::new();
 
     /// Puts the repo root on `sys.path` and imports `bramble`, exactly once per test binary.
     ///
-    /// The `Once` is load-bearing: cargo runs tests in parallel threads, and while Python's import
+    /// The `OnceLock` is load-bearing: cargo runs tests in parallel threads, and while Python's import
     /// lock keeps a concurrent `import bramble` from corrupting anything, a second thread can
     /// observe the half-initialised module and fail with "module 'bramble' has no attribute
     /// 'type'". Importing once up front removes the window.
@@ -51,19 +51,23 @@ pub(crate) mod test_support {
     /// **These tests must run single-threaded** (`--test-threads=1`, set in CI). They share one
     /// embedded interpreter, and concurrent `import bramble` across cargo's test threads makes
     /// Python's own import machinery raise `_DeadlockError` on a partially-held module lock. The
-    /// `Once` below removes the repeated work but cannot remove that hazard, since the very first
-    /// import is what races.
+    /// `OnceLock` below removes the repeated work but cannot remove that hazard, since the very
+    /// first import is what races. `.cargo/config.toml` sets `RUST_TEST_THREADS = "1"` so a plain
+    /// `cargo test` gets this too, not just CI's explicit flag.
     ///
     /// Note the `bramble._bramble` this loads is the *separately built* extension, not this test
     /// binary's own copy of the same code -- so a Rust pyclass produced through the Python
     /// decorators cannot be extracted here. Read those via `getattr`, or call this crate's
     /// functions directly. Requires `maturin develop` to have been run, like `pytest` does.
     pub(crate) fn ensure_bramble_importable(py: Python<'_>) {
-        // `detach` releases the GIL for the duration of the wait. Blocking on the `Once` *while
-        // holding* it deadlocks: the thread doing the import needs the GIL back to finish, and
-        // cannot get it from a thread parked inside `call_once`.
+        // `detach` releases the GIL for the duration of the wait. Blocking on the `OnceLock`
+        // *while holding* it deadlocks: the thread doing the import needs the GIL back to finish,
+        // and cannot get it from a thread parked inside `get_or_init`.
         py.detach(|| {
-            INIT.call_once(|| {
+            // `OnceLock` rather than `Once` so a failed import stays retryable: a poisoned `Once`
+            // reports "previously poisoned" to every later test, burying the one message that says
+            // what to actually do about it.
+            INIT.get_or_init(|| {
                 Python::attach(|py| {
                     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
                     let repo_root = repo_root.to_str().expect("repo path is valid UTF-8");

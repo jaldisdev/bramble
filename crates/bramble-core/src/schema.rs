@@ -333,25 +333,26 @@ pub fn validate_schema_shape(
     scalar_names: &HashSet<String>,
 ) -> Result<(), String> {
     // "An Object type must define one or more fields" (§3.6), and the same rule holds for
-    // interfaces (§3.7) and input objects (§3.10). Beyond being invalid, a field-less type has no
-    // legal SDL spelling with a body: `type Empty {\n}` is a parse error, so letting one through
-    // would make `to_sdl()` output that cannot be read back.
+    // interfaces (§3.7), input objects (§3.10), and -- over its members rather than its fields --
+    // enums (§3.9). Beyond being invalid, none of the four has a legal SDL spelling when empty:
+    // `type Empty {\n}` is a parse error, so letting one through would make `to_sdl()` output that
+    // cannot be read back.
     //
     // Iterated by name so a schema with several offenders always reports the same one.
     let mut definitions = types.values().collect::<Vec<_>>();
     definitions.sort_by(|left, right| left.name.cmp(&right.name));
     for type_def in definitions {
-        let described_kind = match type_def.kind {
-            TypeKind::Type => "object type",
-            TypeKind::Interface => "interface",
-            TypeKind::Input => "input object type",
-            // An enum's members live in `enum_values`, not `fields`; its own "one or more values"
-            // rule is a separate one this check does not cover.
-            TypeKind::Enum => continue,
+        let (described_kind, described_members, is_empty) = match type_def.kind {
+            TypeKind::Type => ("object type", "fields", type_def.fields.is_empty()),
+            TypeKind::Interface => ("interface", "fields", type_def.fields.is_empty()),
+            TypeKind::Input => ("input object type", "fields", type_def.fields.is_empty()),
+            // An enum carries its members in `enum_values`; `fields` is always empty for one.
+            TypeKind::Enum => ("enum", "values", type_def.enum_values.is_empty()),
         };
-        if type_def.fields.is_empty() {
+        if is_empty {
             return Err(format!(
-                "{described_kind} '{}' defines no fields, but the GraphQL specification requires one or more",
+                "{described_kind} '{}' defines no {described_members}, but the GraphQL specification \
+                 requires one or more",
                 type_def.name
             ));
         }
@@ -614,16 +615,23 @@ mod tests {
     }
 
     #[test]
-    fn an_enum_is_not_mistaken_for_a_field_less_type() {
-        let mut empty = type_def("Color", TypeKind::Enum, vec![], vec![]);
-        empty.enum_values = vec![EnumValueDefinition {
+    fn an_enum_is_measured_by_its_values_not_its_always_empty_fields() {
+        let mut color = type_def("Color", TypeKind::Enum, vec![], vec![]);
+        color.enum_values = vec![EnumValueDefinition {
             name: "RED".to_string(),
             graphql_name: None,
             description: None,
             deprecation_reason: None,
             applied_directives: Vec::new(),
         }];
-        check(vec![empty], vec![]).expect("an enum carries its members in `enum_values`, not `fields`");
+        check(vec![color], vec![]).expect("an enum carries its members in `enum_values`, not `fields`");
+    }
+
+    #[test]
+    fn a_value_less_enum_is_rejected() {
+        let empty = type_def("Color", TypeKind::Enum, vec![], vec![]);
+        let error = check(vec![empty], vec![]).expect_err("a value-less enum must be rejected");
+        assert!(error.contains("enum 'Color' defines no values"), "unexpected: {error}");
     }
 
     #[test]
