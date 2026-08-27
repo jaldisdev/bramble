@@ -37,7 +37,7 @@ from python_multipart.multipart import parse_form
 from bramble.http.async_base_view import AsyncBaseHTTPView
 from bramble.http.exceptions import HTTPException
 from bramble.http.multipart import multipart_content_type
-from bramble.subscriptions import GRAPHQL_TRANSPORT_WS_PROTOCOL
+from bramble.subscriptions import GRAPHQL_TRANSPORT_WS_PROTOCOL, WebSocketDisconnected
 
 if TYPE_CHECKING:
     from bramble._schema import Schema
@@ -175,7 +175,7 @@ class _RawWebSocket:
     async def receive_json(self) -> Any:
         message = await self._receive()
         if message["type"] == "websocket.disconnect":
-            raise RuntimeError("WebSocket disconnected")
+            raise WebSocketDisconnected("WebSocket disconnected")
         text = message.get("text")
         if text is None:
             raise ValueError("Expected a text WebSocket message")

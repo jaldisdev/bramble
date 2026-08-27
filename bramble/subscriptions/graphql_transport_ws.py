@@ -55,6 +55,15 @@ class WebSocketProtocol(Protocol):
     async def close(self, code: int = 1000, reason: str | None = None) -> None: ...
 
 
+class WebSocketDisconnected(ConnectionError):
+    """Raised by an adapter when the peer has gone away mid-receive.
+
+    A `ConnectionError` so that `handle` treats it as the ordinary hang-up it is. An adapter
+    raising anything outside that family instead reports every client navigating away as a defect
+    in message handling.
+    """
+
+
 class GraphQLTransportWSHandler:
     """Implements the `graphql-transport-ws` subprotocol -- the current standard WebSocket
     subscription transport, and what a fresh GraphQL IDE speaks by default (the legacy

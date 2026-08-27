@@ -21,10 +21,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any
 
 import bramble
-from bramble.subscriptions.graphql_transport_ws import GraphQLTransportWSHandler
+from bramble.subscriptions.graphql_transport_ws import (
+    GraphQLTransportWSHandler,
+    WebSocketDisconnected,
+)
 
 # These drive `GraphQLTransportWSHandler` directly through a fake socket rather than through a real
 # adapter: the protocol's own close codes (4400/4401/4409/4429) are the thing under test, and a
@@ -265,3 +269,35 @@ def test_a_client_disconnect_is_not_logged_as_an_error(caplog: Any) -> None:
         _run([{"type": "connection_init"}])
 
     assert caplog.text == ""
+
+
+def test_the_disconnect_an_adapter_raises_is_not_logged_as_an_error(caplog: Any) -> None:
+    """The test above proves `handle` stays quiet for the exceptions it names. This proves the
+    adapters raise one of them: a bare `RuntimeError` misses that branch, so every client
+    navigating away was reported as a defect in message handling.
+    """
+
+    class _DisconnectingWebSocket(_FakeWebSocket):
+        async def receive_json(self) -> Any:
+            raise WebSocketDisconnected("WebSocket disconnected")
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(
+            GraphQLTransportWSHandler(schema=_schema(), websocket=_DisconnectingWebSocket([])).handle()
+        )
+
+    assert caplog.text == ""
+
+
+def test_every_adapter_signals_a_disconnect_the_handler_treats_as_ordinary() -> None:
+    assert issubclass(WebSocketDisconnected, ConnectionError)
+
+    # Read rather than imported: an adapter pulls in the framework it adapts, which the test
+    # environment has no reason to carry
+    adapters = Path(__file__).resolve().parents[1] / "bramble" / "adapters"
+
+    for name in ("asgi/__init__.py", "django/channels.py"):
+        source = (adapters / name).read_text()
+
+        assert 'raise RuntimeError("WebSocket disconnected")' not in source, name
+        assert "WebSocketDisconnected" in source, name

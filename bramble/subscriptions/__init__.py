@@ -20,4 +20,5 @@
 from bramble.subscriptions.graphql_transport_ws import (  # noqa: F401
     GRAPHQL_TRANSPORT_WS_PROTOCOL,
     GraphQLTransportWSHandler,
+    WebSocketDisconnected,
 )

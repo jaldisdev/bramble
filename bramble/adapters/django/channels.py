@@ -43,7 +43,11 @@ from typing import TYPE_CHECKING, Any
 
 from channels.generic.websocket import AsyncWebsocketConsumer
 
-from bramble.subscriptions import GRAPHQL_TRANSPORT_WS_PROTOCOL, GraphQLTransportWSHandler
+from bramble.subscriptions import (
+    GRAPHQL_TRANSPORT_WS_PROTOCOL,
+    GraphQLTransportWSHandler,
+    WebSocketDisconnected,
+)
 
 if TYPE_CHECKING:
     from bramble._schema import Schema
@@ -65,7 +69,7 @@ class _ChannelsWebSocketAdapter:
     async def receive_json(self) -> Any:
         message = await self._consumer.incoming.get()
         if message is None:
-            raise RuntimeError("WebSocket disconnected")
+            raise WebSocketDisconnected("WebSocket disconnected")
         return message
 
     async def send_json(self, data: Any) -> None:
