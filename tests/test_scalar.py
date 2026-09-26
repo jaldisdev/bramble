@@ -207,6 +207,181 @@ def test_builtin_uuid_serializes_to_str() -> None:
     assert schema.execute("{ identifier }") == {"data": {"identifier": str(fixed_uuid)}}
 
 
+# The other direction: a built-in scalar's *argument* arrives as the string a client wrote it as,
+# and the resolver is annotated with the Python type it names.
+
+
+def _echoed(annotation_schema: "bramble.Schema", graphql_type: str, sent: object) -> dict:
+    return annotation_schema.execute(f"query($v: {graphql_type}!) {{ echo(value: $v) }}", variable_values={"v": sent})
+
+
+def test_a_date_argument_arrives_as_a_date() -> None:
+    received: list[object] = []
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(value: datetime.date) -> str:
+            received.append(value)
+            return "ok"
+
+    assert _echoed(bramble.Schema(query=Query), "Date", "2024-01-01") == {"data": {"echo": "ok"}}
+    assert received == [datetime.date(2024, 1, 1)]
+
+
+def test_a_time_argument_arrives_as_a_time() -> None:
+    received: list[object] = []
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(value: datetime.time) -> str:
+            received.append(value)
+            return "ok"
+
+    assert _echoed(bramble.Schema(query=Query), "Time", "09:30:00") == {"data": {"echo": "ok"}}
+    assert received == [datetime.time(9, 30)]
+
+
+def test_a_datetime_argument_arrives_as_a_datetime() -> None:
+    """Including the `Z` spelling, which is what a browser's `toISOString()` produces."""
+    received: list[object] = []
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(value: datetime.datetime) -> str:
+            received.append(value)
+            return "ok"
+
+    schema = bramble.Schema(query=Query)
+    noon = datetime.datetime(2024, 1, 1, 9, 30, tzinfo=datetime.timezone.utc)
+
+    assert _echoed(schema, "DateTime", "2024-01-01T09:30:00+00:00") == {"data": {"echo": "ok"}}
+    assert _echoed(schema, "DateTime", "2024-01-01T09:30:00.000Z") == {"data": {"echo": "ok"}}
+    assert received == [noon, noon]
+
+
+def test_a_decimal_argument_arrives_as_a_decimal() -> None:
+    received: list[object] = []
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(value: decimal.Decimal) -> str:
+            received.append(value)
+            return "ok"
+
+    schema = bramble.Schema(query=Query)
+
+    assert _echoed(schema, "Decimal", "9.99") == {"data": {"echo": "ok"}}
+    # JSON has numbers, and a decimal reads one the way it reads the string of one.
+    assert _echoed(schema, "Decimal", 3) == {"data": {"echo": "ok"}}
+    assert received == [decimal.Decimal("9.99"), decimal.Decimal("3")]
+
+
+def test_a_uuid_argument_arrives_as_a_uuid() -> None:
+    received: list[object] = []
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(value: uuid.UUID) -> str:
+            received.append(value)
+            return "ok"
+
+    identifier = "3f1e9b0e-0000-4000-8000-000000000000"
+
+    assert _echoed(bramble.Schema(query=Query), "UUID", identifier) == {"data": {"echo": "ok"}}
+    assert received == [uuid.UUID(identifier)]
+
+
+def test_builtin_scalar_argument_that_is_already_its_python_type_passes_through() -> None:
+    """An internal caller can put a real value in `variable_values`; stringifying it first to
+    parse it back would be the long way round, and lossy for a `Decimal`."""
+    received: list[object] = []
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(value: datetime.datetime) -> str:
+            received.append(value)
+            return "ok"
+
+    schema = bramble.Schema(query=Query)
+    given = datetime.datetime(2024, 1, 1, 9, 30)
+
+    schema.execute("query($v: DateTime!) { echo(value: $v) }", variable_values={"v": given})
+    assert received == [given]
+
+
+def test_builtin_decimal_argument_takes_a_number() -> None:
+    """JSON has numbers, and a decimal reads one the way it reads the string of one."""
+    received: list[object] = []
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(value: decimal.Decimal) -> str:
+            received.append(value)
+            return "ok"
+
+    schema = bramble.Schema(query=Query)
+
+    schema.execute("query($v: Decimal!) { echo(value: $v) }", variable_values={"v": 3})
+    assert received == [decimal.Decimal("3")]
+
+
+@pytest.mark.parametrize(("graphql_type", "sent"), [("DateTime", "yesterday"), ("DateTime", "01/01/2024")])
+def test_a_malformed_builtin_scalar_argument_is_a_client_error(graphql_type: str, sent: str) -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(value: datetime.datetime) -> str:
+            return "ok"
+
+    result = _echoed(bramble.Schema(query=Query), graphql_type, sent)
+
+    assert result["data"] is None
+    assert f"is not a valid value for '{graphql_type}'" in result["errors"][0]["message"]
+
+
+def test_a_builtin_scalar_argument_of_the_wrong_shape_is_a_client_error() -> None:
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(value: datetime.datetime) -> str:
+            return "ok"
+
+    result = _echoed(bramble.Schema(query=Query), "DateTime", 17)
+
+    assert result["data"] is None
+    assert "'DateTime' expects a string, got int" in result["errors"][0]["message"]
+
+
+def test_a_registered_scalar_still_overrides_the_builtin_parser() -> None:
+    """`scalar_map` wins: a schema that wants its own reading of `DateTime` gets it."""
+    received: list[object] = []
+
+    definition = bramble.scalar(
+        name="DateTime",
+        serialize=lambda value: "whatever",
+        parse_value=lambda value: f"parsed {value}",
+    )
+
+    @bramble.type
+    class Query:
+        @bramble.field
+        def echo(value: datetime.datetime) -> str:
+            received.append(value)
+            return "ok"
+
+    schema = bramble.Schema(query=Query, config=SchemaConfig(scalar_map={datetime.datetime: definition}))
+
+    schema.execute("query($v: DateTime!) { echo(value: $v) }", variable_values={"v": "2024-01-01T09:30:00"})
+    assert received == ["parsed 2024-01-01T09:30:00"]
+
+
 # `bramble.Upload`/`UploadDefinition` (matches the equivalent scalar in another popular Python
 # GraphQL library's exact signature -- see project memory on not naming it in code/comments):
 # a fully opaque pass-through scalar. bramble has no HTTP transport layer of its own, so there's

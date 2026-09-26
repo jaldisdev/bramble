@@ -289,6 +289,50 @@ def _enum_member_from_graphql_name(enum_class: type, name: Any) -> Any:
     )
 
 
+#: The standard-library scalars bramble names and serialises without any registration (see
+#: `BUILTIN_SCALARS`, and `_serialize_scalar` for the way back out), and how each one reads the
+#: string a variable or a literal delivers it as. Without these an argument declared
+#: `datetime.datetime` reached the resolver as the raw string, which looks right until it is
+#: handed to something that wants the real type.
+_BUILTIN_SCALAR_PARSERS: dict[str, tuple[type, Callable[[str], Any]]] = {
+    "Date": (datetime.date, datetime.date.fromisoformat),
+    "DateTime": (datetime.datetime, datetime.datetime.fromisoformat),
+    "Decimal": (decimal.Decimal, decimal.Decimal),
+    "Time": (datetime.time, datetime.time.fromisoformat),
+    "UUID": (uuid.UUID, uuid.UUID),
+}
+
+
+def _parse_builtin_scalar(type_name: str, value: Any) -> Any:
+    """One of `_BUILTIN_SCALAR_PARSERS`, read from the value a client sent."""
+    python_type, parser = _BUILTIN_SCALAR_PARSERS[type_name]
+
+    # A value that already *is* the Python type passes through — an internal caller can put a real
+    # `datetime` in `variable_values`, and re-parsing it would mean stringifying it first. Except
+    # that a `datetime` is also a `date`: passing one through a `Date` argument would hand the
+    # resolver a type its annotation does not name.
+    if isinstance(value, python_type) and not (python_type is datetime.date and isinstance(value, datetime.datetime)):
+        return value
+
+    # A JSON document can carry a number for a decimal, and stringifying it is exactly what the
+    # constructor wants. The date and time types take no such reading of a number.
+    if python_type is decimal.Decimal and isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = str(value)
+
+    if not isinstance(value, str):
+        raise GraphQLError(
+            f"'{type_name}' expects a string, got {type(value).__name__}",
+            code=ErrorCode.ARGUMENT_TYPE_MISMATCH,
+        )
+    try:
+        return parser(value)
+    except (ValueError, decimal.DecimalException) as exc:
+        raise GraphQLError(
+            f"'{value}' is not a valid value for '{type_name}'",
+            code=ErrorCode.ARGUMENT_TYPE_MISMATCH,
+        ) from exc
+
+
 def _coerce_value(type_info: "GraphQLTypeInfo", value: Any, schema: "Schema") -> Any:
     """Coerces a resolved argument value to what a resolver should actually receive, recursing
     through the value's own declared type structure: `NonNull`/`List` wrapping (each list item
@@ -316,6 +360,10 @@ def _coerce_value(type_info: "GraphQLTypeInfo", value: Any, schema: "Schema") ->
     scalar_definition = schema.scalars_by_name.get(type_name)
     if scalar_definition is not None and scalar_definition.parse_value is not None:
         return scalar_definition.parse_value(value)
+
+    # After the registered hook, so a schema that registers its own `DateTime` still overrides it.
+    if type_name in _BUILTIN_SCALAR_PARSERS:
+        return _parse_builtin_scalar(type_name, value)
 
     named_type = schema.types_by_name.get(type_name)
     if named_type is not None and named_type.__bramble_type_info__.kind == "enum":
